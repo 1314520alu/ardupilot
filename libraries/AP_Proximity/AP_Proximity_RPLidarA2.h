@@ -143,7 +143,7 @@ private:
         _descriptor descriptor;
         _rpi_information information;
         _device_info device_info;
-        uint8_t forced_buffer_size[256]; // just so we read(...) efficiently
+        uint8_t forced_buffer_size[2048]; // just so we read(...) efficiently
     } _payload;
     static_assert(sizeof(_payload) >= 63, "Needed for parsing out reboot data");
 
@@ -153,6 +153,7 @@ private:
         A2,
         C1,
         S1,
+        S3,
     } model = Model::UNKNOWN;
 
     bool make_first_byte_in_payload(uint8_t desired_byte);

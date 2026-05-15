@@ -1,0 +1,32 @@
+# hw definition file for myf103-relay6
+# 直接引用官方公共配置，只添加自定义部分（不使用 PA5）
+
+include ../f103-periph/hwdef.inc
+
+# 自定义板子名称（可选，便于日志识别）
+define CUSTOM_BOARD_NAME "myf103-relay6"
+
+
+
+# HARDPOINT 通道从 0 开始编号，对应飞行控制器 HARDPOINT1~6
+PA1 HEAD1 OUTPUT LOW GPIO(50)
+PA4 HEAD2 OUTPUT LOW GPIO(51)
+PA5 HEAD3 OUTPUT LOW GPIO(52)
+PA6 HEAD4 OUTPUT LOW GPIO(53)
+PA7 HEAD5 OUTPUT LOW GPIO(54)
+PB10 HEAD6 OUTPUT LOW GPIO(55)
+
+
+# 强制启用 HARDPOINT 支持（虽然默认已支持，但显式加保险）
+  define AP_PERIPH_HARDPOINT_ENABLED 1
+  define DEBUG_HARDPOINT 1
+  define AP_PERIPH_RELAY_ENABLED TRUE
+  define AP_RELAY_ENABLED TRUE
+
+  define HAL_USE_USB FALSE
+  define HAL_USB_ENABLED 0
+  define STM32_USB_USE_OTG1 FALSE
+
+
+
+
