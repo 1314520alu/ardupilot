@@ -1,0 +1,78 @@
+# hw definition file for myf103-relay6 (STM32F103CBT6 + TJA1051)
+# 自定义6路Relay DroneCAN外围节点
+
+MCU STM32F103 STM32F103xB
+
+# crystal frequency - Blue Pill 标准 8MHz
+OSCILLATOR_HZ 8000000
+
+# board ID - 自定义，避免冲突
+APJ_BOARD_ID 99999
+
+# setup build for a peripheral firmware
+env AP_PERIPH 1
+
+# flash and RAM size
+FLASH_SIZE_KB 128
+RAM_SIZE_KB 20
+
+# reserve space for parameters
+FLASH_RESERVE_START_KB 0
+APP_START_OFFSET_KB 2
+
+# stack sizes
+MAIN_STACK 0x800
+PROCESS_STACK 0x800
+
+# chibios systick frequency
+define CH_CFG_ST_FREQUENCY 1000
+
+# disable unnecessary peripherals to save flash
+define HAL_USE_SERIAL FALSE
+define HAL_USE_I2C FALSE
+define HAL_USE_SPI FALSE
+define HAL_USE_ADC FALSE
+define HAL_USE_PWM FALSE
+define HAL_USE_ICU FALSE
+define HAL_USE_GPT FALSE
+define HAL_NO_GPIO_IRQ
+define CH_CFG_ST_TIMEDELTA 0
+define PORT_INT_REQUIRED_STACK 64
+define HAL_USE_EMPTY_IO TRUE
+define DMA_RESERVE_SIZE 0
+define __FPU_PRESENT 0
+
+# enable DroneCAN
+define HAL_PERIPH_ENABLE_CAN 1
+define HAL_CAN_DEFAULT_NODE_ID 50
+
+# CAN pins (PA11 RX, PA12 TX - 接 TJA1051)
+PA11 CAN_RX CAN
+PA12 CAN_TX CAN
+define STM32_CAN_USE_CAN1 TRUE
+
+# enable Relay support (最多支持6个)
+define AP_PERIPH_ENABLE_RELAY 1
+
+# 6路Relay输出引脚（选择空闲GPIO，避免CAN/SWD/UART引脚）
+PB0  RELAY0 OUTPUT GPIO(100)
+PB1  RELAY1 OUTPUT GPIO(101)
+PB10 RELAY2 OUTPUT GPIO(102)
+PB11 RELAY3 OUTPUT GPIO(103)
+PB12 RELAY4 OUTPUT GPIO(104)
+PB13 RELAY5 OUTPUT GPIO(105)
+
+# 板载LED作为通知/心跳指示（官方常用）
+define HAL_PERIPH_ENABLE_NOTIFY 1
+PC13 LED OUTPUT GPIO(50) HIGH   # 高电平熄灭（沉电流LED）
+
+# 禁用所有其他外设（最小化固件）
+define AP_PERIPH_ENABLE_GPS 0
+define AP_PERIPH_ENABLE_MAG 0
+define AP_PERIPH_ENABLE_BARO 0
+define AP_PERIPH_ENABLE_BATTERY 0
+define AP_PERIPH_ENABLE_RANGEFINDER 0
+define AP_PERIPH_ENABLE_AIRSPEED 0
+define AP_PERIPH_ENABLE_PWM_OUT 0
+
+env BOARD myf103-relay6

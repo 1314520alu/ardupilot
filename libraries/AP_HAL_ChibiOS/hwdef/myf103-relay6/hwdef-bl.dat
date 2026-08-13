@@ -1,0 +1,50 @@
+# hw definition file for myf103-relay6 bootloader
+
+MCU STM32F103 STM32F103xB
+
+# crystal frequency
+OSCILLATOR_HZ 8000000
+
+# board ID (必须和主固件一致)
+APJ_BOARD_ID 99999
+
+# bootloader build
+#define HAL_BOOTLOADER_BUILD 1
+
+# flash size
+FLASH_SIZE_KB 128
+
+# bootloader load size (官方F103推荐23KB)
+FLASH_BOOTLOADER_LOAD_KB 23
+
+# app start offset
+APP_START_OFFSET_KB 2
+
+# minimal features
+define HAL_USE_SERIAL FALSE
+define HAL_NO_GPIO_IRQ
+define CH_CFG_ST_TIMEDELTA 0
+define PORT_INT_REQUIRED_STACK 64
+define HAL_USE_EMPTY_IO TRUE
+define DMA_RESERVE_SIZE 0
+define __FPU_PRESENT 0
+
+# enable CAN for firmware update
+define HAL_PERIPH_ENABLE_CAN 1
+
+# CAN pins
+PA11 CAN_RX CAN
+PA12 CAN_TX CAN
+define STM32_CAN_USE_CAN1 TRUE
+
+# bootloader LED (板载PC13)
+PA4 LED_BOOTLOADER OUTPUT LOW GPIO(0)   # 使用PA4作为bootloader指示（官方常用PA4）
+define HAL_LED_ON 0
+
+# short timeout
+define HAL_BOOTLOADER_TIMEOUT 500
+
+# optional: hold in bootloader pin
+PB6 STAY_IN_BOOTLOADER INPUT FLOATING
+
+env BOARD myf103-relay6-bl
