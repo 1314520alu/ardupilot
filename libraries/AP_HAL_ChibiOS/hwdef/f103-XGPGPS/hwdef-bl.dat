@@ -1,0 +1,13 @@
+include ../f103-periph/hwdef-bl.inc
+
+# CAN on PB8/PB9 (AFIO CAN_REMAP_REMAP2)
+undef PA11
+undef PA12
+undef CAN_RX
+undef CAN_TX
+undef PB0
+undef MAG_CS
+
+PB8 CAN_RX CAN
+PB9 CAN_TX CAN
+define HAL_BOARD_AP_PERIPH_ZUBAXGNSS
