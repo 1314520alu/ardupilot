@@ -1,3 +1,6 @@
+
+
+
 /*
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -33,6 +36,7 @@
 #include "AP_Proximity_RPLidarA2.h"
 
 #include <AP_HAL/AP_HAL.h>
+#include "AP_Proximity_RPLidarA2.h"
 #include <AP_InternalError/AP_InternalError.h>
 
 #include <ctype.h>
@@ -62,11 +66,12 @@
 // Commands without payload but have response
 #define RPLIDAR_CMD_GET_DEVICE_INFO    0x50
 #define RPLIDAR_CMD_GET_DEVICE_HEALTH  0x52
+#define RPLIDAR_CMD_GET_SAMPLERATE     0x59
 
-#if AP_PROXIMITY_RPLIDAR_EXPRESSSCAN_ENABLED
 // Commands with payload and have response
 #define RPLIDAR_CMD_EXPRESS_SCAN       0x82
-#endif
+#define RPLIDAR_CMD_GET_LIDAR_CONF     0x84
+#define RPLIDAR_CMD_MOTOR_SPEED_CTRL   0xA8
 
 extern const AP_HAL::HAL& hal;
 
@@ -100,7 +105,7 @@ void AP_Proximity_RPLidarA2::update(void)
 }
 
 // get maximum distance (in meters) of sensor
-float AP_Proximity_RPLidarA2::distance_max_m() const
+float AP_Proximity_RPLidarA2::distance_max() const
 {
     switch (model) {
     case Model::UNKNOWN:
@@ -109,31 +114,31 @@ float AP_Proximity_RPLidarA2::distance_max_m() const
         return 8.0f;
     case Model::A2:
         return 16.0f;
-    case Model::A2M12:
     case Model::C1:
         return 12.0f;
     case Model::S1:
         return 40.0f;
     case Model::S2:
+        return 30.0f;
+    case Model::S3:
         return 50.0f;
     }
     return 0.0f;
 }
 
 // get minimum distance (in meters) of sensor
-float AP_Proximity_RPLidarA2::distance_min_m() const
+float AP_Proximity_RPLidarA2::distance_min() const
 {
     switch (model) {
     case Model::UNKNOWN:
         return 0.0f;
     case Model::A1:
     case Model::A2:
-    case Model::A2M12:
     case Model::C1:
     case Model::S1:
-        return 0.2f;
     case Model::S2:
-        return 0.05f;
+    case Model::S3:
+        return 0.2f;
     }
     return 0.0f;
 }
@@ -156,35 +161,6 @@ void AP_Proximity_RPLidarA2::send_scan_mode_request()
     Debug(1, "Sent scan mode request");
 }
 
-#if AP_PROXIMITY_RPLIDAR_EXPRESSSCAN_ENABLED
-// send EXPRESS_SCAN request for Dense mode
-void AP_Proximity_RPLidarA2::send_express_scan_request()
-{
-    const uint8_t cmd = RPLIDAR_CMD_EXPRESS_SCAN;
-    const uint8_t payload_size = 5;
-    uint8_t payload[payload_size] {};
-
-    uint8_t checksum = 0;
-    checksum ^= RPLIDAR_PREAMBLE;
-    checksum ^= cmd;
-    checksum ^= payload_size;
-    for (uint8_t i = 0; i < sizeof(payload); i++) {
-        checksum ^= payload[i];
-    }
-
-    // 2 (preamble + cmd) + 1 (payload_size field) + payload_size + 1 (checksum)
-    uint8_t tx_buffer[2 + 1 + payload_size + 1];
-    tx_buffer[0] = RPLIDAR_PREAMBLE;
-    tx_buffer[1] = cmd;
-    tx_buffer[2] = payload_size;
-    memcpy(&tx_buffer[3], payload, sizeof(payload));
-    tx_buffer[3 + sizeof(payload)] = checksum;
-
-    _uart->write(tx_buffer, sizeof(tx_buffer));
-    Debug(1, "Sent EXPRESS (Dense) scan request");
-}
-#endif // AP_PROXIMITY_RPLIDAR_EXPRESSSCAN_ENABLED
-
 // send request for sensor health
 void AP_Proximity_RPLidarA2::send_request_for_health()                                    //not called yet
 {
@@ -199,6 +175,93 @@ void AP_Proximity_RPLidarA2::send_request_for_device_info()
     static const uint8_t tx_buffer[2] {RPLIDAR_PREAMBLE, RPLIDAR_CMD_GET_DEVICE_INFO};
     _uart->write(tx_buffer, 2);
     Debug(1, "Sent device information request");
+}
+
+// send STOP command to halt scanning
+void AP_Proximity_RPLidarA2::send_stop_scan()
+{
+    static const uint8_t tx_buffer[2] {RPLIDAR_PREAMBLE, RPLIDAR_CMD_STOP};
+    _uart->write(tx_buffer, 2);
+    Debug(1, "Sent STOP command");
+}
+
+// send MOTOR_SPEED_CTRL command to set motor RPM
+void AP_Proximity_RPLidarA2::send_motor_speed_ctrl(uint16_t rpm)
+{
+    // MOTOR_SPEED_CTRL request format:
+    // A5 A8 [payload_len=2] [rpm_low] [rpm_high] [checksum]
+    // Checksum = 0xA5 ^ 0xA8 ^ 0x02 ^ rpm_low ^ rpm_high
+    
+    uint8_t rpm_low = rpm & 0xFF;
+    uint8_t rpm_high = (rpm >> 8) & 0xFF;
+    
+    uint8_t checksum = 0xA5 ^ 0xA8 ^ 0x02 ^ rpm_low ^ rpm_high;
+    
+    uint8_t tx_buffer[6] {
+        RPLIDAR_PREAMBLE,
+        RPLIDAR_CMD_MOTOR_SPEED_CTRL,
+        0x02,           // payload length
+        rpm_low,        // RPM low byte
+        rpm_high,       // RPM high byte
+        checksum        // checksum
+    };
+    
+    _uart->write(tx_buffer, 6);
+    
+    float hz = rpm / 60.0f;
+    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Set motor speed: %u RPM (%.1f Hz)", rpm, hz);
+    Debug(1, "Sent MOTOR_SPEED_CTRL: %u RPM (%.1f Hz)", rpm, hz);
+}
+
+// send request for EXPRESS_SCAN (high-speed scanning mode)
+void AP_Proximity_RPLidarA2::send_express_scan_request()
+{
+    // EXPRESS_SCAN requires 5 bytes of payload: working_mode + 4 reserved bytes
+    uint8_t tx_buffer[7] {
+        RPLIDAR_PREAMBLE,
+        RPLIDAR_CMD_EXPRESS_SCAN,
+        5,          // payload length
+        _working_mode,  // working mode (from GET_LIDAR_CONF or default 0)
+        0, 0, 0     // reserved bytes
+    };
+    
+    // Calculate checksum according to protocol
+    uint8_t checksum = 0;
+    for (uint8_t i = 0; i < 6; i++) {
+        checksum ^= tx_buffer[i];
+    }
+    tx_buffer[6] = checksum;
+    
+    _uart->write(tx_buffer, 7);
+    
+    if (_working_mode == 0) {
+        Debug(1, "Sent EXPRESS_SCAN request (mode=%u, legacy)", _working_mode);
+    } else {
+        Debug(1, "Sent EXPRESS_SCAN request (mode=%u, optimal)", _working_mode);
+    }
+}
+
+// send request for LIDAR configuration
+void AP_Proximity_RPLidarA2::send_request_for_lidar_conf()
+{
+    // GET_LIDAR_CONF with type 0x7C to query recommended scan mode
+    // According to protocol: type 0x7C returns recommended mode ID (uint16)
+    static const uint8_t tx_buffer[7] {
+        RPLIDAR_PREAMBLE,
+        RPLIDAR_CMD_GET_LIDAR_CONF,
+        4,          // payload length (type field)
+        0x7C, 0, 0, 0  // type 0x7C = recommended scan mode
+    };
+    _uart->write(tx_buffer, 7);
+    Debug(1, "Sent GET_LIDAR_CONF request (type=0x7C for recommended mode)");
+}
+
+// send request for sample rate information
+void AP_Proximity_RPLidarA2::send_request_for_samplerate()
+{
+    static const uint8_t tx_buffer[2] {RPLIDAR_PREAMBLE, RPLIDAR_CMD_GET_SAMPLERATE};
+    _uart->write(tx_buffer, 2);
+    Debug(1, "Sent GET_SAMPLERATE request");
 }
 
 void AP_Proximity_RPLidarA2::consume_bytes(uint16_t count)
@@ -216,13 +279,20 @@ void AP_Proximity_RPLidarA2::consume_bytes(uint16_t count)
 
 void AP_Proximity_RPLidarA2::reset()
 {
+    // Send STOP command before resetting to gracefully halt scanning
+    if (_state == State::AWAITING_SCAN_DATA || 
+        _state == State::AWAITING_EXPRESS_SCAN_DATA) {
+        send_stop_scan();
+        hal.scheduler->delay(10);  // Wait at least 10ms as per protocol
+    }
+    
     _state = State::RESET;
     _byte_count = 0;
-    _sync_error = 0;
-#if AP_PROXIMITY_RPLIDAR_EXPRESSSCAN_ENABLED
-    _use_dense_express = false;
-    _express_stream_len = 0;
-#endif
+    _is_s3_mode = false;
+    _working_mode = 0;
+    _best_scan_mode_id = 0;
+    _last_scan_start_ms = 0;
+    _scan_frequency_hz = 0.0f;
 }
 
 bool AP_Proximity_RPLidarA2::make_first_byte_in_payload(uint8_t desired_byte)
@@ -247,15 +317,6 @@ bool AP_Proximity_RPLidarA2::make_first_byte_in_payload(uint8_t desired_byte)
 void AP_Proximity_RPLidarA2::get_readings()
 {
     Debug(2, "             CURRENT STATE: %u ", (unsigned)_state);
-
-#if AP_PROXIMITY_RPLIDAR_EXPRESSSCAN_ENABLED
-    // Express mode reads directly into _express_stream, bypassing _payload
-    if (_state == State::AWAITING_EXPRESS_DATA) {
-        handle_express_data();
-        return;
-    }
-#endif
-
     const uint32_t nbytes = _uart->available();
     if (nbytes == 0) {
         return;
@@ -308,7 +369,9 @@ void AP_Proximity_RPLidarA2::get_readings()
             // reset data ... so now we'll just drop that stuff on
             // the floor.
             consume_bytes(63);
-            send_request_for_device_info();
+            
+            // 按照官方推荐流程：先检查健康状态
+            send_request_for_health();
             _state = State::AWAITING_RESPONSE;
             continue;
         }
@@ -327,39 +390,35 @@ void AP_Proximity_RPLidarA2::get_readings()
             static const _descriptor SCAN_DATA_DESCRIPTOR[] {
                 { RPLIDAR_PREAMBLE, 0x5A, 0x05, 0x00, 0x00, 0x40, 0x81 }
             };
+            static const _descriptor EXPRESS_SCAN_DESCRIPTOR[] {
+                { RPLIDAR_PREAMBLE, 0x5A, 0x54, 0x00, 0x00, 0x40, 0x85 }
+            };
             static const _descriptor HEALTH_DESCRIPTOR[] {
                 { RPLIDAR_PREAMBLE, 0x5A, 0x03, 0x00, 0x00, 0x00, 0x06 }
             };
             static const _descriptor DEVICE_INFO_DESCRIPTOR[] {
                 { RPLIDAR_PREAMBLE, 0x5A, 0x14, 0x00, 0x00, 0x00, 0x04 }
             };
-#if AP_PROXIMITY_RPLIDAR_EXPRESSSCAN_ENABLED
-            static const _descriptor EXPRESS_DATA_DESCRIPTOR[] {
-                { RPLIDAR_PREAMBLE, 0x5A, 0x54, 0x00, 0x00, 0x40, 0x85 }
+            static const _descriptor SAMPLERATE_DESCRIPTOR[] {
+                { RPLIDAR_PREAMBLE, 0x5A, 0x04, 0x00, 0x00, 0x00, 0x15 }
             };
-#endif
             Debug(2,"LIDAR descriptor found");
-            if (memcmp((void*)&_payload[0], SCAN_DATA_DESCRIPTOR, sizeof(_descriptor)) == 0) {
+            if (memcmp((void*)&_payload[0], EXPRESS_SCAN_DESCRIPTOR, sizeof(_descriptor)) == 0) {
+                _state = State::AWAITING_EXPRESS_SCAN_DATA;
+                _is_s3_mode = true;
+            } else if (memcmp((void*)&_payload[0], SCAN_DATA_DESCRIPTOR, sizeof(_descriptor)) == 0) {
                 _state = State::AWAITING_SCAN_DATA;
             } else if (memcmp((void*)&_payload[0], DEVICE_INFO_DESCRIPTOR, sizeof(_descriptor)) == 0) {
                 _state = State::AWAITING_DEVICE_INFO;
             } else if (memcmp((void*)&_payload[0], HEALTH_DESCRIPTOR, sizeof(_descriptor)) == 0) {
                 _state = State::AWAITING_HEALTH;
-#if AP_PROXIMITY_RPLIDAR_EXPRESSSCAN_ENABLED
-            } else if (_use_dense_express && memcmp((void*)&_payload[0], EXPRESS_DATA_DESCRIPTOR, sizeof(_descriptor)) == 0) {
-                _state = State::AWAITING_EXPRESS_DATA;
-                _express_stream_len = 0;
-                _sync_error = 0;
-                const uint16_t express_bytes = _byte_count - sizeof(_descriptor);
-                if (express_bytes != 0) {
-                    memcpy(_express_stream, &_payload[sizeof(_descriptor)], express_bytes);
-                    _express_stream_len = express_bytes;
-                }
-                _byte_count = 0;
-                break;
-#endif
+            } else if (memcmp((void*)&_payload[0], SAMPLERATE_DESCRIPTOR, sizeof(_descriptor)) == 0) {
+                _state = State::AWAITING_SAMPLERATE;
             } else {
-                // unknown descriptor.  Ignore it.
+                // unknown descriptor. Check if it's LIDAR_CONF (variable length)
+                if (_payload[0] == RPLIDAR_PREAMBLE && _payload[1] == 0x5A && _payload[6] == 0x20) {
+                    _state = State::AWAITING_LIDAR_CONF;
+                }
             }
             consume_bytes(sizeof(_descriptor));
             break;
@@ -386,12 +445,52 @@ void AP_Proximity_RPLidarA2::get_readings()
             }
             parse_response_health();
             consume_bytes(sizeof(_payload.sensor_health));
+            
+            // 根据健康状态决定下一步
+            // status: 0=正常, 1=警告, 2=错误, 3=硬件故障
+            if (_payload.sensor_health.status >= 2) {
+                // 如果有错误或故障，执行RESET
+                GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "RPLidar health issue (status=%u), resetting...", 
+                              _payload.sensor_health.status);
+                reset_rplidar();
+                _last_reset_ms = AP_HAL::millis();
+                _state = State::RESET;
+            } else {
+                // 健康状态正常，继续获取设备信息
+                send_request_for_device_info();
+                _state = State::AWAITING_RESPONSE;
+            }
             break;
 
-#if AP_PROXIMITY_RPLIDAR_EXPRESSSCAN_ENABLED
-        case State::AWAITING_EXPRESS_DATA:
-            break;  // handled above, before _payload read
-#endif
+        case State::AWAITING_EXPRESS_SCAN_DATA:
+            if (_byte_count < sizeof(_payload.express_scan)) {
+                return;
+            }
+            parse_response_express_scan();
+            consume_bytes(sizeof(_payload.express_scan));
+            break;
+
+        case State::AWAITING_SAMPLERATE:
+            if (_byte_count < sizeof(_payload.samplerate)) {
+                return;
+            }
+            parse_response_samplerate();
+            consume_bytes(sizeof(_payload.samplerate));
+            // After getting sample rate, try EXPRESS_SCAN
+            send_express_scan_request();
+            _state = State::AWAITING_RESPONSE;
+            break;
+
+        case State::AWAITING_LIDAR_CONF:
+            // GET_LIDAR_CONF response has variable length; minimum 4 bytes for type field
+            if (_byte_count < 4) {
+                return;
+            }
+            parse_response_lidar_conf();
+            // For now, skip variable-length parsing and move to EXPRESS_SCAN
+            // In a more complete implementation, would parse the full response
+            consume_bytes(MIN(_byte_count, (uint16_t)sizeof(_payload.lidar_conf)));
+            break;
         }
     }
 }
@@ -400,6 +499,8 @@ void AP_Proximity_RPLidarA2::parse_response_device_info()
 {
     Debug(1, "Received DEVICE_INFO");
     const char *device_type = "UNKNOWN";
+    const char *mode_name = "SCAN";  // 默认模式
+    
     switch (_payload.device_info.model) {
     case 0x18:
         model = Model::A1;
@@ -409,13 +510,9 @@ void AP_Proximity_RPLidarA2::parse_response_device_info()
         model = Model::A2;
         device_type = "A2";
         break;
-    case 0x2C:
-        model = Model::A2M12;
-        device_type = "A2M12";
-        break;
     case 0x41:
-        model=Model::C1;
-        device_type="C1";
+        model = Model::C1;
+        device_type = "C1";
         break;
     case 0x61:
         model = Model::S1;
@@ -424,29 +521,37 @@ void AP_Proximity_RPLidarA2::parse_response_device_info()
     case 0x71:
         model = Model::S2;
         device_type = "S2";
+        _is_s3_mode = true;  // S-series use EXPRESS_SCAN
+        mode_name = "EXPRESS_SCAN";
+        break;
+    case 0x81:
+        model = Model::S3;
+        device_type = "S3";
+        _is_s3_mode = true;  // S3 supports EXPRESS_SCAN
+        mode_name = "EXPRESS_SCAN";
         break;
     default:
         Debug(1, "Unknown device (%u)", _payload.device_info.model);
     }
-    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "RPLidar %s hw=%u fw=%u.%u", device_type, _payload.device_info.hardware, _payload.device_info.firmware_minor, _payload.device_info.firmware_major);
-
-#if AP_PROXIMITY_RPLIDAR_EXPRESSSCAN_ENABLED
-    // enable Dense EXPRESS path
-    _use_dense_express = (model == Model::S2);
-    if (_use_dense_express) {
-        _express_stream_len = 0;
-        send_express_scan_request();
+    
+    // 在Mission Planner消息窗口显示雷达型号和固件信息
+    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "RPLidar %s detected | HW=%u FW=%u.%u | %s",
+                  device_type,
+                  _payload.device_info.hardware,
+                  _payload.device_info.firmware_major,
+                  _payload.device_info.firmware_minor,
+                  mode_name);
+    
+    // If S-series, follow official workflow: GET_LIDAR_CONF → EXPRESS_SCAN with best mode
+    if (_is_s3_mode) {
+        // Query LIDAR configuration to get best scan mode
+        send_request_for_lidar_conf();
+        _state = State::AWAITING_RESPONSE;
     } else {
+        // For non-S-series, use traditional SCAN mode
         send_scan_mode_request();
+        _state = State::AWAITING_RESPONSE;
     }
-#else
-    if (model == Model::S2) {
-        GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "RPLidar S2 ExpressScan disabled");
-        return;
-    }
-    send_scan_mode_request();
-#endif
-    _state = State::AWAITING_RESPONSE;
 }
 
 void AP_Proximity_RPLidarA2::parse_response_data()
@@ -473,6 +578,30 @@ void AP_Proximity_RPLidarA2::parse_response_data()
     const float angle_sign = (params.orientation == 1) ? -1.0f : 1.0f;
     const float angle_deg = wrap_360(_payload.sensor_scan.angle_q6/64.0f * angle_sign + params.yaw_correction);
     const float distance_m = (_payload.sensor_scan.distance_q2/4000.0f);
+    
+    // 检测新的一圈扫描开始（startbit=1），计算实际扫描频率
+    if (_payload.sensor_scan.startbit == 1) {
+        uint32_t current_ms = AP_HAL::millis();
+        if (_last_scan_start_ms > 0) {
+            uint32_t delta_ms = current_ms - _last_scan_start_ms;
+            if (delta_ms > 0) {
+                // 计算实际扫描频率
+                _scan_frequency_hz = 1000.0f / delta_ms;
+                
+                // 每10圈输出一次频率信息到Mission Planner
+                static uint8_t freq_report_counter = 0;
+                freq_report_counter++;
+                if (freq_report_counter >= 10) {
+                    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Scan Freq: %.2f Hz (%.1f RPM)", 
+                                  _scan_frequency_hz, 
+                                  _scan_frequency_hz * 60.0f);
+                    freq_report_counter = 0;
+                }
+            }
+        }
+        _last_scan_start_ms = current_ms;
+    }
+    
 #if RP_DEBUG_LEVEL >= 2
     const float quality = _payload.sensor_scan.quality;
     Debug(2, "   D%02.2f A%03.1f Q%0.2f", distance_m, angle_deg, quality);
@@ -494,7 +623,7 @@ void AP_Proximity_RPLidarA2::parse_response_data()
             _last_face = face;
             _last_distance_valid = false;
         }
-        if (distance_m > distance_min_m()) {
+        if (distance_m > distance_min()) {
             // update shortest distance
             if (!_last_distance_valid || (distance_m < _last_distance_m)) {
                 _last_distance_m = distance_m;
@@ -516,292 +645,150 @@ void AP_Proximity_RPLidarA2::parse_response_health()
     Debug(1, "LIDAR Healthy");
 }
 
-#if AP_PROXIMITY_RPLIDAR_EXPRESSSCAN_ENABLED
-// verify Dense capsulated (Express) block checksum
-bool AP_Proximity_RPLidarA2::verify_cabin_checksum(const uint8_t *buf, size_t len)
+void AP_Proximity_RPLidarA2::parse_response_express_scan()
 {
-    if (buf == nullptr) {
-        return false;
-    }
-
-    uint8_t checksum = 0;
-    for (size_t i = sizeof(_express_header); i < len; i++) {
-        checksum ^= buf[i];
-    }
-
-    const uint8_t expected_b0 = uint8_t((EXPRESS_SYNC1 << 4) | (checksum & 0x0F));
-    const uint8_t expected_b1 = uint8_t((EXPRESS_SYNC2 << 4) | ((checksum >> 4) & 0x0F));
-
-    return (buf[0] == expected_b0) && (buf[1] == expected_b1);
-}
-
-
-// parse Dense capsulated Express block
-void AP_Proximity_RPLidarA2::parse_response_express(const uint8_t *buf)
-{
-    if (buf == nullptr) {
+    // EXPRESS_SCAN 密实格式：
+    // - 84 字节总长
+    // - sync1 (0xA) + ChkSum[3:0] in byte 0
+    // - sync2 (0x5) + ChkSum[7:4] in byte 1
+    // - start_angle_q6 (14-bit) + S flag (1-bit) in bytes 2-3
+    // - 40 x cabin (distance) in bytes 4-83
+    
+    const uint8_t sync1 = _payload.express_scan.sync1_chk_low & 0x0F;
+    const uint8_t sync2 = _payload.express_scan.sync2_chk_high & 0x0F;
+    
+    if (sync1 != 0xA || sync2 != 0x5) {
+        Debug(1, "EXPRESS_SCAN: Invalid sync (0x%X, 0x%X)", sync1, sync2);
         return;
     }
-
+    
+    // Extract angle and S flag
+    const uint16_t angle_raw = _payload.express_scan.start_angle_and_s;
+    const uint16_t angle_q6 = (angle_raw & 0x3FFF);  // 14 bits
+    const uint8_t s_flag = (angle_raw >> 14) & 0x01;   // bit 14
+    
+    const float base_angle = angle_q6 / 64.0f;
+    
     _last_distance_received_ms = AP_HAL::millis();
-
-    // start_angle_q6: 16-bit, Q6 format at bytes [2..3]
-    const uint16_t start_angle_q6 = (uint16_t)buf[2] | ((uint16_t)buf[3] << 8);
-    const float start_angle_deg_raw = start_angle_q6 / 64.0f; // Q6 -> degrees
-
-    const float angle_sign = (params.orientation == 1) ? -1.0f : 1.0f;
-
-    // cabins: 40 cabins * 2-byte distance (mm) starting at buf[4]
-    const uint8_t *cab = buf + 4;
-    static constexpr int NUM_CABINS = 40;
-    // S2 Dense Express default: 32000 samples/s at 10Hz = 0.1125 deg/cabin
-    static constexpr float DENSE_CABIN_ANGLE_STEP_DEG = 0.1125f;
-
-    // find the shortest valid cabin; rescan only if that cabin is ignored
-    const float dist_min_m_local = distance_min_m();
-    const uint8_t *cab_start = cab;
-    bool have_min = false;
-    float min_distance_m = 0.0f;
-    int min_i = 0;
-
-    for (int i = 0; i < NUM_CABINS; i++) {
-        const uint16_t dist_mm = (uint16_t)cab[0] | ((uint16_t)cab[1] << 8);
-        cab += 2;
-        if (dist_mm == 0) {
+    
+    // 检测新的一圈扫描开始（S=1），计算实际扫描频率
+    if (s_flag == 1) {
+        uint32_t current_ms = AP_HAL::millis();
+        if (_last_scan_start_ms > 0) {
+            uint32_t delta_ms = current_ms - _last_scan_start_ms;
+            if (delta_ms > 0) {
+                // 计算实际扫描频率：60秒 / 每圈耗时(秒) = RPM，再除以60得到Hz
+                _scan_frequency_hz = 1000.0f / delta_ms;
+                
+                // 每10圈输出一次频率信息到Mission Planner
+                static uint8_t freq_report_counter = 0;
+                freq_report_counter++;
+                if (freq_report_counter >= 10) {
+                    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Scan Freq: %.2f Hz (%.1f RPM)", 
+                                  _scan_frequency_hz, 
+                                  _scan_frequency_hz * 60.0f);
+                    freq_report_counter = 0;
+                }
+            }
+        }
+        _last_scan_start_ms = current_ms;
+    }
+    
+    // Process 40 cabin samples
+    for (uint8_t i = 0; i < 40; i++) {
+        const uint16_t distance_mm = _payload.express_scan.cabin[i].distance;
+        
+        if (distance_mm == 0) {
+            // Invalid point
             continue;
         }
-        const float distance_m = dist_mm * 0.001f;
-        if (distance_m <= dist_min_m_local) {
-            continue;
-        }
-        if (!have_min || distance_m < min_distance_m) {
-            have_min = true;
-            min_distance_m = distance_m;
-            min_i = i;
+        
+        // Calculate angle for this point: increment by approximately 9 degrees per sample (360/40)
+        const float angle_deg = wrap_360(base_angle + (i * 9.0f));
+        const float distance_m = distance_mm / 1000.0f;
+        
+        // Apply orientation and yaw correction
+        const float angle_sign = (params.orientation == 1) ? -1.0f : 1.0f;
+        const float corrected_angle = wrap_360(angle_deg * angle_sign + params.yaw_correction);
+        
+        if (!ignore_reading(corrected_angle, distance_m)) {
+            const AP_Proximity_Boundary_3D::Face face = frontend.boundary.get_face(corrected_angle);
+            
+            // Update boundary
+            frontend.boundary.set_face_attributes(face, corrected_angle, distance_m, state.instance);
+            
+            // Update OA database
+            database_push(corrected_angle, distance_m);
         }
     }
+    
+    Debug(2, "EXPRESS_SCAN: base_angle=%.1f S=%u", base_angle, s_flag);
+}
 
-    if (!have_min) {
+void AP_Proximity_RPLidarA2::parse_response_samplerate()
+{
+    const uint16_t tstandard = _payload.samplerate.tstandard;
+    const uint16_t texpress = _payload.samplerate.texpress;
+    
+    Debug(1, "Sample Rate - Standard: %u µs, Express: %u µs", tstandard, texpress);
+    
+    // 计算扫描频率（Hz）
+    // 标准模式：每点耗时tstandard微秒，一圈约400点
+    // 高速模式：每点耗时texpress微秒，一圈约400点
+    float freq_standard = (tstandard > 0) ? (1000000.0f / tstandard / 400.0f) : 0.0f;
+    float freq_express = (texpress > 0) ? (1000000.0f / texpress / 400.0f) : 0.0f;
+    
+    // 在Mission Planner消息窗口显示工作模式和扫描频率
+    if (_is_s3_mode) {
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Mode: EXPRESS_SCAN | Freq: %.1f Hz (%.0f pts/s)", 
+                      freq_express, 
+                      (texpress > 0) ? (1000000.0f / texpress) : 0.0f);
+        _scan_frequency_hz = freq_express;
+    } else {
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Mode: SCAN | Freq: %.1f Hz (%.0f pts/s)", 
+                      freq_standard,
+                      (tstandard > 0) ? (1000000.0f / tstandard) : 0.0f);
+        _scan_frequency_hz = freq_standard;
+    }
+}
+
+void AP_Proximity_RPLidarA2::parse_response_lidar_conf()
+{
+    // GET_LIDAR_CONF response contains configuration information
+    const uint32_t conf_type = _payload.lidar_conf.type;
+    Debug(1, "LIDAR_CONF type: 0x%X", (unsigned)conf_type);
+    
+    // Type 0x7C: Recommended scan mode ID (uint16)
+    if (conf_type == 0x7C && _byte_count >= 6) {
+        // Response format: type(4 bytes) + mode_id(2 bytes)
+        _best_scan_mode_id = _payload.lidar_conf.data[0] | (_payload.lidar_conf.data[1] << 8);
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Best scan mode ID: %u", _best_scan_mode_id);
+        
+        // Update working mode to use the best mode
+        _working_mode = (uint8_t)_best_scan_mode_id;
+        
+        // Set motor speed to 600 RPM (10 Hz) for S-series
+        if (_is_s3_mode) {
+            send_motor_speed_ctrl(600);  // 600 RPM = 10 Hz
+            hal.scheduler->delay(50);    // Wait 50ms after setting speed
+        }
+        
+        // Now get sample rate info
+        send_request_for_samplerate();
+        _state = State::AWAITING_RESPONSE;
         return;
     }
-
-    const float min_cab_angle_raw = start_angle_deg_raw + min_i * DENSE_CABIN_ANGLE_STEP_DEG;
-    float min_angle_deg = wrap_360(min_cab_angle_raw * angle_sign + params.yaw_correction);
-
-    if (ignore_reading(min_angle_deg, min_distance_m)) {
-        // fallback: rescan with per-cabin ignore filter
-        have_min = false;
-        cab = cab_start;
-
-        for (int i = 0; i < NUM_CABINS; i++) {
-            const uint16_t dist_mm = (uint16_t)cab[0] | ((uint16_t)cab[1] << 8);
-            cab += 2;
-            if (dist_mm == 0) {
-                continue;
-            }
-            const float distance_m = dist_mm * 0.001f;
-            if (distance_m <= dist_min_m_local) {
-                continue;
-            }
-            const float cab_angle_raw = start_angle_deg_raw + i * DENSE_CABIN_ANGLE_STEP_DEG;
-            const float angle_deg = wrap_360(cab_angle_raw * angle_sign + params.yaw_correction);
-            if (ignore_reading(angle_deg, distance_m)) {
-                continue;
-            }
-            if (!have_min || distance_m < min_distance_m) {
-                have_min = true;
-                min_distance_m = distance_m;
-                min_angle_deg = angle_deg;
-            }
-        }
-
-        if (!have_min) {
-            return;
-        }
+    
+    // Type 0x70: Number of supported scan modes (uint16)
+    if (conf_type == 0x70 && _byte_count >= 6) {
+        const uint16_t num_modes = _payload.lidar_conf.data[0] | (_payload.lidar_conf.data[1] << 8);
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Supported scan modes: %u", num_modes);
     }
-
-    const AP_Proximity_Boundary_3D::Face face = frontend.boundary.get_face(min_angle_deg);
-
-    if (face != _last_face) {
-        // distance is for a new face, the previous one can be updated now
-        if (_last_distance_valid) {
-            frontend.boundary.set_face_attributes(_last_face, _last_angle_deg, _last_distance_m, state.instance);
-        } else {
-            // reset distance from last face
-            frontend.boundary.reset_face(face, state.instance);
-        }
-
-        // initialize the new face
-        _last_face = face;
-        _last_distance_valid = false;
-    }
-
-    // update shortest distance for this face
-    if (!_last_distance_valid || (min_distance_m < _last_distance_m)) {
-        _last_distance_m = min_distance_m;
-        _last_distance_valid = true;
-        _last_angle_deg = min_angle_deg;
-    }
-    // update OA database
-    database_push(_last_angle_deg, _last_distance_m);
+    
+    // For other types or if parsing fails, proceed with default mode
+    // Get sample rate and then start EXPRESS_SCAN
+    send_request_for_samplerate();
+    _state = State::AWAITING_RESPONSE;
 }
-
-bool AP_Proximity_RPLidarA2::express_time_exceeded(uint32_t start_us) const
-{
-    static constexpr uint32_t MAX_US = 1000;
-    return (AP_HAL::micros() - start_us) > MAX_US;
-}
-
-void AP_Proximity_RPLidarA2::ensure_express_stream_space(uint16_t need)
-{
-    if (_express_stream_len + need <= EXPRESS_STREAM_BUFFER_SIZE) {
-        return;
-    }
-
-    uint16_t keep = EXPRESS_STREAM_BUFFER_SIZE / 2;
-    keep = MIN(keep, _express_stream_len);
-
-    if (keep == 0) {
-        _express_stream_len = 0;
-        _sync_error = 0;
-        Debug(1, "EXPRESS stream overflow, dropping all data");
-        return;
-    }
-
-    const uint16_t src = _express_stream_len - keep;
-    if (src != 0) {
-        memmove(_express_stream, _express_stream + src, keep);
-    }
-    _express_stream_len = keep;
-    _sync_error = 0;
-    Debug(1, "EXPRESS stream overflow, dropping old data");
-}
-
-void AP_Proximity_RPLidarA2::handle_express_data()
-{
-    const uint32_t start_us = AP_HAL::micros();
-
-    uint16_t bytes_read_total = 0;
-
-    while (_uart->available() && bytes_read_total < EXPRESS_MAX_BYTES_CONSUME) {
-        if (express_time_exceeded(start_us)) {
-            break;
-        }
-
-        const uint16_t remaining = uint16_t(EXPRESS_MAX_BYTES_CONSUME - bytes_read_total);
-        uint16_t space = EXPRESS_STREAM_BUFFER_SIZE - _express_stream_len;
-        if (space == 0) {
-            ensure_express_stream_space(1);
-            space = EXPRESS_STREAM_BUFFER_SIZE - _express_stream_len;
-            if (space == 0) {
-                break;
-            }
-        }
-        const uint16_t to_read = MIN(space, remaining);
-
-        if (to_read == 0) {
-            break;
-        }
-
-        const uint16_t n = _uart->read(_express_stream + _express_stream_len, to_read);
-        if (n == 0) {
-            break;
-        }
-
-        _express_stream_len += n;
-        bytes_read_total += n;
-    }
-
-    // scan the stream buffer for valid headers and process full blocks
-    uint16_t idx = 0;
-
-    while (_express_stream_len >= idx + 2) {
-        if (express_time_exceeded(start_us)) {
-            break;
-        }
-
-        // search for a header candidate (upper nibbles 0xA / 0x5)
-        while (idx + 1 < _express_stream_len) {
-            if (express_time_exceeded(start_us)) {
-                break;
-            }
-            const uint8_t b0 = _express_stream[idx];
-            const uint8_t b1 = _express_stream[idx + 1];
-            if ((b0 >> 4) == EXPRESS_SYNC1 && (b1 >> 4) == EXPRESS_SYNC2) {
-                // header candidate found
-                break;
-            }
-            idx++;
-        }
-
-        if (express_time_exceeded(start_us)) {
-            break;
-        }
-
-        if (idx + 1 >= _express_stream_len) {
-            // no header candidate found, drop all accumulated data
-            if (_express_stream_len > 0) {
-                Debug(1, "EXPRESS: no header candidate, dropping %u bytes", unsigned(_express_stream_len));
-                _express_stream[0] = _express_stream[_express_stream_len - 1];
-                _express_stream_len = 1;
-            } else {
-                _express_stream_len = 0;
-            }
-            _sync_error = 0;
-            return;
-        }
-
-        // idx now points to a header candidate
-        if (_express_stream_len - idx < EXPRESS_BLOCK_SIZE) {
-            // not enough bytes for a full block
-            // move remaining bytes to the front and wait for more data
-            if (idx > 0) {
-                memmove(_express_stream,
-                        _express_stream + idx,
-                        _express_stream_len - idx);
-                _express_stream_len -= idx;
-            }
-            return;
-        }
-
-        // pointer to the candidate block
-        uint8_t *blk = _express_stream + idx;
-
-        if (!verify_cabin_checksum(blk, EXPRESS_BLOCK_SIZE)) {
-            // upper nibbles match but checksum is invalid
-            // advance by one byte and try to resynchronise
-            Debug(1, "EXPRESS/DENSE checksum error");
-            _sync_error++;
-
-            if (_sync_error > 10) {
-                reset_rplidar();
-                _express_stream_len = 0;
-                return;
-            }
-
-            idx++;
-            continue;
-        }
-
-        // valid block found
-        _sync_error = 0;
-        parse_response_express(blk);
-
-        // consume this block and look for the next one
-        idx += EXPRESS_BLOCK_SIZE;
-    }
-
-    // compact any remaining unprocessed bytes to the front of the buffer
-    if (idx > 0 && idx <= _express_stream_len) {
-        const uint16_t remaining = _express_stream_len - idx;
-        if (remaining > 0) {
-            memmove(_express_stream,
-                    _express_stream + idx,
-                    remaining);
-        }
-        _express_stream_len = remaining;
-    }
-}
-#endif // AP_PROXIMITY_RPLIDAR_EXPRESSSCAN_ENABLED
 
 #endif // AP_PROXIMITY_RPLIDARA2_ENABLED

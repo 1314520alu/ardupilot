@@ -28,14 +28,27 @@
 
 /*
 
-# to connect device to SITL:
-./Tools/autotest/sim_vehicle.py -v Rover --gdb --debug -A --serial5=uart:/dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0:115200
-param set SERIAL5_PROTOCOL 11
-param set SERIAL5_BAUD 115200
+# 配置示例 - RPLIDAR S3雷达（默认波特率1M）
+# 连接至SERIAL3端口：
+./Tools/autotest/sim_vehicle.py -v ArduCopter -A "--serial3=sim:rplidars3" --map --console
+
+param set SERIAL3_PROTOCOL 11      # Lidar360协议
+param set SERIAL3_BAUD 1000000     # S3默认波特率1M (1000000)
+param set PRX1_TYPE 5              # RPLidar类型
+reboot
+
+# 真实硬件连接至SERIAL3：
+param set SERIAL3_PROTOCOL 11
+param set SERIAL3_BAUD 1000000
 param set PRX1_TYPE 5
 reboot
 
-# short outer-two wires on JST plug to get it to spin
+# 其他型号参考配置：
+# A1/A2: 115200 baud
+# C1/S1: 115200 baud  
+# S2/S3: 1000000 baud (1M)
+
+# 短接JST插头的外侧两根线使电机旋转
 
 */
 
@@ -59,8 +72,8 @@ public:
     void update(void) override;
 
     // get maximum and minimum distances (in meters) of sensor
-    float distance_max_m() const override;
-    float distance_min_m() const override;
+    float distance_max() const override;
+    float distance_min() const override;
 
 private:
 
@@ -70,77 +83,56 @@ private:
         AWAITING_SCAN_DATA,
         AWAITING_HEALTH,
         AWAITING_DEVICE_INFO,
-#if AP_PROXIMITY_RPLIDAR_EXPRESSSCAN_ENABLED
-        AWAITING_EXPRESS_DATA,
-#endif
+        AWAITING_EXPRESS_SCAN_DATA,
+        AWAITING_LIDAR_CONF,
+        AWAITING_SAMPLERATE,
     } _state = State::RESET;
-
-#if AP_PROXIMITY_RPLIDAR_EXPRESSSCAN_ENABLED
-    // Dense capsulated block size (EXPRESS/DENSE mode)
-    static constexpr uint16_t EXPRESS_BLOCK_SIZE = 84;
-    // Express/Dense capsule sync nibbles (upper 4 bits)
-    static constexpr uint8_t EXPRESS_SYNC1 = 0x0A;
-    static constexpr uint8_t EXPRESS_SYNC2 = 0x05;
-
-    // S2 Dense Express is ~4 blocks/update at 200Hz; allow 2x headroom.
-    static constexpr uint16_t EXPRESS_STREAM_BUFFER_SIZE = EXPRESS_BLOCK_SIZE * 8;
-    static constexpr uint16_t EXPRESS_MAX_BYTES_CONSUME  = EXPRESS_BLOCK_SIZE * 8;
-#endif
 
     // send request for something from sensor
     void send_request_for_health();
     void send_scan_mode_request();
     void send_request_for_device_info();
-#if AP_PROXIMITY_RPLIDAR_EXPRESSSCAN_ENABLED
     void send_express_scan_request();
-#endif
+    void send_request_for_lidar_conf();
+    void send_request_for_samplerate();
+    void send_stop_scan();
+    void send_motor_speed_ctrl(uint16_t rpm);
 
     void parse_response_data();
     void parse_response_health();
     void parse_response_device_info();
-#if AP_PROXIMITY_RPLIDAR_EXPRESSSCAN_ENABLED
-    void parse_response_express(const uint8_t *buf);
-#endif
+    void parse_response_express_scan();
+    void parse_response_lidar_conf();
+    void parse_response_samplerate();
 
     void get_readings();
     void reset_rplidar();
     void reset();
-#if AP_PROXIMITY_RPLIDAR_EXPRESSSCAN_ENABLED
-    void handle_express_data();
-    bool express_time_exceeded(uint32_t start_us) const;
-    void ensure_express_stream_space(uint16_t need);
-#endif
 
     // remove bytes from read buffer:
     void consume_bytes(uint16_t count);
 
-#if AP_PROXIMITY_RPLIDAR_EXPRESSSCAN_ENABLED
-    // verify Dense capsulated (Express) block checksum
-    bool verify_cabin_checksum(const uint8_t *buf, size_t len);
-#endif
-
     uint8_t _sync_error;
     uint16_t _byte_count;
-
-#if AP_PROXIMITY_RPLIDAR_EXPRESSSCAN_ENABLED
-    uint8_t _express_stream[EXPRESS_STREAM_BUFFER_SIZE];
-    uint16_t _express_stream_len;
-#endif
 
     // request related variables
     uint32_t  _last_distance_received_ms;     ///< system time of last distance measurement received from sensor
     uint32_t  _last_reset_ms;
+
+    // S3-specific parameters
+    bool _is_s3_mode;                         ///< true if device is running in S3/S-series mode
+    uint8_t _working_mode;                    ///< current EXPRESS_SCAN working mode (0=legacy)
+    uint16_t _best_scan_mode_id;              ///< best scan mode ID from GET_LIDAR_CONF
+    
+    // Scan frequency tracking
+    uint32_t _last_scan_start_ms;             ///< timestamp of last scan start (S=1 flag)
+    float _scan_frequency_hz;                 ///< calculated scan frequency in Hz
 
     // face related variables
     AP_Proximity_Boundary_3D::Face _last_face;///< last face requested
     float _last_angle_deg;                    ///< yaw angle (in degrees) of _last_distance_m
     float _last_distance_m;                   ///< shortest distance for _last_face
     bool _last_distance_valid;                ///< true if _last_distance_m is valid
-
-#if AP_PROXIMITY_RPLIDAR_EXPRESSSCAN_ENABLED
-    // use Dense EXPRESS_SCAN path
-    bool _use_dense_express = false;
-#endif
 
     struct PACKED _device_info {
         uint8_t model;
@@ -164,13 +156,17 @@ private:
         uint16_t error_code;                  ///< the related error code
     };
 
-#if AP_PROXIMITY_RPLIDAR_EXPRESSSCAN_ENABLED
-    // Express/Dense capsule sync header (2 bytes)
-    struct PACKED _express_header {
-        uint8_t sync1_checksum_low;   // upper nibble = 0xA
-        uint8_t sync2_checksum_high;  // upper nibble = 0x5
+    // EXPRESS_SCAN dense format: 84 bytes containing 40 cabin samples
+    struct PACKED _cabin {
+        uint16_t distance;                    ///< distance in millimeters (0 = invalid)
     };
-#endif
+
+    struct PACKED _express_scan_packet {
+        uint8_t sync1_chk_low;                ///< sync1=0xA in bits[3:0], ChkSum[3:0] in bits[7:4]
+        uint8_t sync2_chk_high;               ///< sync2=0x5 in bits[3:0], ChkSum[7:4] in bits[7:4]
+        uint16_t start_angle_and_s;           ///< start_angle_q6 (14 bits) + S flag (1 bit)
+        _cabin cabin[40];                     ///< 40 distance measurements
+    };
 
     struct PACKED _descriptor {
         uint8_t bytes[7];
@@ -185,6 +181,18 @@ private:
         uint8_t bytes[63];
     };
 
+    // GET_SAMPLERATE response: 4 bytes
+    struct PACKED _samplerate_response {
+        uint16_t tstandard;                   ///< time for single measurement in SCAN mode (microseconds)
+        uint16_t texpress;                    ///< time for single measurement in EXPRESS_SCAN mode (microseconds)
+    };
+
+    // GET_LIDAR_CONF response can be variable length
+    struct PACKED _lidar_conf_response {
+        uint32_t type;                        ///< configuration type
+        uint8_t data[124];                    ///< variable payload (up to 124 bytes)
+    };
+
     union PACKED {
         DEFINE_BYTE_ARRAY_METHODS
         _sensor_scan sensor_scan;
@@ -192,9 +200,9 @@ private:
         _descriptor descriptor;
         _rpi_information information;
         _device_info device_info;
-#if AP_PROXIMITY_RPLIDAR_EXPRESSSCAN_ENABLED
-        _express_header express_header;
-#endif
+        _express_scan_packet express_scan;
+        _samplerate_response samplerate;
+        _lidar_conf_response lidar_conf;
         uint8_t forced_buffer_size[256]; // just so we read(...) efficiently
     } _payload;
     static_assert(sizeof(_payload) >= 63, "Needed for parsing out reboot data");
@@ -203,10 +211,10 @@ private:
         UNKNOWN,
         A1,
         A2,
-        A2M12,
         C1,
         S1,
         S2,
+        S3,
     } model = Model::UNKNOWN;
 
     bool make_first_byte_in_payload(uint8_t desired_byte);
