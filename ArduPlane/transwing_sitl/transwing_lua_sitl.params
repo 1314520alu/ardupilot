@@ -1,0 +1,34 @@
+# Transwing Lua dynamic mix SITL helper parameters.
+# Load after scripts/transwing_dynamic_mix.lua has created TW_ parameters.
+
+SCR_ENABLE,1
+
+# Observe script-calculated motor outputs on isolated scripting outputs.
+SERVO13_FUNCTION,94
+SERVO14_FUNCTION,95
+SERVO15_FUNCTION,96
+SERVO16_FUNCTION,97
+
+# Keep script in log-only mode for first run.
+TW_ENABLE,1
+TW_LOG_ONLY,1
+TW_FOLD_CH,10
+TW_PWM_FW,2000
+TW_PWM_Q,1000
+TW_RATE_UP,4.5
+TW_RATE_DN,4.5
+TW_TIMEOUT,25
+TW_OUT_GAIN,0.2
+TW_THR,0
+TW_ROLL,0
+TW_PITCH,0
+TW_YAW,0
+TW_GUARD,1
+TW_SAFE_MIN,55
+TW_BLEND_AS,10
+TW_FW_AS,14
+TW_ATT_DANG,55
+TW_DESC_DANG,-5
+TW_SAT_PWM,1980
+TW_ACCEL_MIN,55
+TW_ATT_ABORT,35

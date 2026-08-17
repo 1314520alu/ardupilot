@@ -81,7 +81,7 @@ private:
         S3_WAIT_MOTOR_SETTLE,
     } _state = State::RESET;
 
-    // S3-only multi-step bring-up (Slamtec recommended order, adapted for legacy SCAN).
+    // S3-only bring-up (health, sample rate, motor RPM, EXPRESS dense); A-series use legacy SCAN here.
     enum class S3Bootstrap : uint8_t {
         None = 0,
         SentHealth,

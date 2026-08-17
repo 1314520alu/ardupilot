@@ -1,0 +1,23 @@
+# Transwing Mission Planner visual SITL parameters.
+# Keep ArduPilot's quadplane-tilt default motor and tilt-servo outputs intact.
+# Do not map Lua Scripting outputs onto SERVO12/SERVO13, because the default
+# quadplane-tilt SITL model uses those outputs for tilt mechanisms.
+
+SCR_ENABLE,1
+
+# Keep Lua in observer/log mode for flight visualization.
+TW_ENABLE,1
+TW_LOG_ONLY,1
+TW_PWM_FW,2000
+TW_PWM_Q,1000
+TW_RATE_UP,4.5
+TW_RATE_DN,4.5
+TW_GUARD,1
+TW_SAFE_MIN,60
+TW_BLEND_AS,18
+TW_FW_AS,25
+TW_ATT_DANG,35
+TW_DESC_DANG,-5
+TW_SAT_PWM,1900
+TW_ACCEL_MIN,55
+TW_ATT_ABORT,25
