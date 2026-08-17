@@ -18,6 +18,7 @@
 #include <SITL/SIM_Plane.h>
 #include <SITL/SIM_Glider.h>
 #include <SITL/SIM_QuadPlane.h>
+#include <SITL/SIM_TranswingQuadPlane.h>
 #include <SITL/SIM_Rover.h>
 #include <SITL/SIM_BalanceBot.h>
 #include <SITL/SIM_Sailboat.h>
@@ -126,6 +127,7 @@ static const struct {
     const char *name;
     Aircraft *(*constructor)(const char *frame_str);
 } model_constructors[] = {
+    { "quadplane-transwing", TranswingQuadPlane::create },
     { "quadplane",          QuadPlane::create },
 #if AP_SIM_XPLANE_ENABLED
     { "xplane",             XPlane::create },

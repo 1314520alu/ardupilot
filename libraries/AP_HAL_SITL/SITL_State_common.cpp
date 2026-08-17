@@ -166,6 +166,15 @@ SITL::SerialDevice *SITL_State_Common::create_serial_sim(const char *name, const
         rplidara2 = NEW_NOTHROW SITL::PS_RPLidarA2();
         return rplidara2;
 #endif
+#endif
+#if AP_SIM_PS_RPLIDARS3_ENABLED
+    } else if (streq(name, "rplidars3")) {
+        if (rplidars3 != nullptr) {
+            AP_HAL::panic("Only one rplidars3 at a time");
+        }
+        rplidars3 = NEW_NOTHROW SITL::PS_RPLidarS3();
+        return rplidars3;
+#endif
 #if AP_SIM_PS_RPLIDARA1_ENABLED
     } else if (streq(name, "rplidara1")) {
         if (rplidara1 != nullptr) {
@@ -464,6 +473,14 @@ void SITL_State_Common::sim_update(void)
 #if AP_SIM_PS_RPLIDARA2_ENABLED
     if (rplidara2 != nullptr) {
         rplidara2->update(sitl_model->get_location());
+    }
+#endif
+
+#endif
+
+#if AP_SIM_PS_RPLIDARS3_ENABLED
+    if (rplidars3 != nullptr) {
+        rplidars3->update(sitl_model->get_location());
     }
 #endif
 

@@ -14,12 +14,18 @@
  */
 
 /*
- * ArduPilot device driver for SLAMTEC RPLIDAR A2 (16m range version)
+ * ArduPilot device driver for SLAMTEC RPLIDAR A2 / A-series and compatible
+ * models (A1, A2, C1, S1, S3). A-series use legacy SCAN; S3 uses EXPRESS_SCAN dense (0x85).
  *
  * ALL INFORMATION REGARDING PROTOCOL WAS DERIVED FROM RPLIDAR DATASHEET:
  *
  * https://www.slamtec.com/en/Lidar
  * http://bucket.download.slamtec.com/63ac3f0d8c859d3a10e51c6b3285fcce25a47357/LR001_SLAMTEC_rplidar_protocol_v1.0_en.pdf
+ *
+ * RPLIDAR S3: see AP_Proximity_RPLidarA2.cpp file header (EXPRESS_SCAN dense / 0x85,
+ * GET_HEALTH, GET_SAMPLERATE, HQ motor, STOP before RESET). On CUAV-X7 use a UART with
+ * SERIALn_PROTOCOL=Lidar360(11), baud 1000000 (460800 if model byte 0x82), PRXn_TYPE=RPLidarA2(5),
+ * and set PRXn_MAX=40 for 40m OA range.
  *
  * Author: Steven Josefs, IAV GmbH
  * Based on the LightWare SF40C ArduPilot device driver from Randy Mackay
@@ -68,11 +74,14 @@ private:
         RESET = 56,
         AWAITING_RESPONSE,
         AWAITING_SCAN_DATA,
+        AWAITING_DENSE_CAPSULE,
         AWAITING_HEALTH,
         AWAITING_DEVICE_INFO,
 #if AP_PROXIMITY_RPLIDAR_EXPRESSSCAN_ENABLED
         AWAITING_EXPRESS_DATA,
 #endif
+        AWAITING_SAMPLE_RATE,
+        S3_WAIT_MOTOR_SETTLE,
     } _state = State::RESET;
 
 #if AP_PROXIMITY_RPLIDAR_EXPRESSSCAN_ENABLED
@@ -87,20 +96,39 @@ private:
     static constexpr uint16_t EXPRESS_MAX_BYTES_CONSUME  = EXPRESS_BLOCK_SIZE * 8;
 #endif
 
+    // S3-only bring-up (health, sample rate, motor RPM, EXPRESS dense); A-series use legacy SCAN here.
+    enum class S3Bootstrap : uint8_t {
+        None = 0,
+        SentHealth,
+        SentSampleRate,
+        SentMotor,
+    };
+
     // send request for something from sensor
+    void send_stop();
     void send_request_for_health();
+    void send_request_for_sample_rate();
     void send_scan_mode_request();
+    void send_s3_express_scan_dense();
     void send_request_for_device_info();
 #if AP_PROXIMITY_RPLIDAR_EXPRESSSCAN_ENABLED
     void send_express_scan_request();
 #endif
+    void send_s3_motor_rpm(uint16_t rpm);
+    void send_command_with_payload_xor(uint8_t cmd, const void *payload, uint8_t payload_len);
 
     void parse_response_data();
+    void parse_response_dense_capsule();
     void parse_response_health();
     void parse_response_device_info();
 #if AP_PROXIMITY_RPLIDAR_EXPRESSSCAN_ENABLED
     void parse_response_express(const uint8_t *buf);
 #endif
+    void parse_response_sample_rate();
+
+    void handle_proximity_sample(float angle_deg, float distance_m);
+
+    void try_send_s3_gcs_pending();
 
     void get_readings();
     void reset_rplidar();
@@ -130,6 +158,16 @@ private:
     // request related variables
     uint32_t  _last_distance_received_ms;     ///< system time of last distance measurement received from sensor
     uint32_t  _last_reset_ms;
+    S3Bootstrap _s3_bootstrap{S3Bootstrap::None};
+    uint32_t _s3_deadline_ms{0};
+    uint16_t _s3_express_sample_us{0};
+    bool _s3_dense_have_prev{false};
+    uint8_t _s3_dense_prev_payload[84];
+    int8_t _s3_dense_last_sync{0};
+
+    // STATUSTEXT for Mission Planner: deferred until MAVLink active; keep text short ASCII (MP UTF-8 chunking).
+    bool _s3_pending_gcs_connected_msg{false};
+    bool _s3_pending_gcs_express_msg{false};
 
     // face related variables
     AP_Proximity_Boundary_3D::Face _last_face;///< last face requested
@@ -171,6 +209,22 @@ private:
         uint8_t sync2_checksum_high;  // upper nibble = 0x5
     };
 #endif
+    struct PACKED _sample_rate {
+        uint16_t std_sample_duration_us;
+        uint16_t express_sample_duration_us;
+    };
+
+    // Slamtec dense express capsule (SL_LIDAR_ANS_TYPE_MEASUREMENT_DENSE_CAPSULED = 0x85)
+    struct PACKED _dense_cabin {
+        uint16_t distance_mm;
+    };
+    struct PACKED _dense_capsule_meas {
+        uint8_t s_checksum_1;
+        uint8_t s_checksum_2;
+        uint16_t start_angle_sync_q6;
+        _dense_cabin cabins[40];
+    };
+    static_assert(sizeof(_dense_capsule_meas) == 84U, "Slamtec dense express capsule");
 
     struct PACKED _descriptor {
         uint8_t bytes[7];
@@ -189,13 +243,14 @@ private:
         DEFINE_BYTE_ARRAY_METHODS
         _sensor_scan sensor_scan;
         _sensor_health sensor_health;
+        _sample_rate sample_rate;
         _descriptor descriptor;
         _rpi_information information;
         _device_info device_info;
 #if AP_PROXIMITY_RPLIDAR_EXPRESSSCAN_ENABLED
         _express_header express_header;
 #endif
-        uint8_t forced_buffer_size[256]; // just so we read(...) efficiently
+        uint8_t forced_buffer_size[2048]; // just so we read(...) efficiently
     } _payload;
     static_assert(sizeof(_payload) >= 63, "Needed for parsing out reboot data");
 
@@ -207,6 +262,7 @@ private:
         C1,
         S1,
         S2,
+        S3,
     } model = Model::UNKNOWN;
 
     bool make_first_byte_in_payload(uint8_t desired_byte);

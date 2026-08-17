@@ -112,7 +112,7 @@ public:
         SerialProtocol_Gimbal = 8,                   // SToRM32, Siyi custom serial protocols
         SerialProtocol_Rangefinder = 9,
         SerialProtocol_FrSky_SPort_Passthrough = 10, // FrSky SPort Passthrough (OpenTX) protocol (X-receivers)
-        SerialProtocol_Lidar360 = 11,                // Lightware SF40C, TeraRanger Tower or RPLidarA2
+        SerialProtocol_Lidar360 = 11,                // Lightware SF40C, TeraRanger Tower or RPLidar (A2/S1/S3)
         SerialProtocol_Aerotenna_USD1      = 12, // USD1 support - deprecated, users should use Rangefinder
         SerialProtocol_Beacon = 13,
         SerialProtocol_Volz = 14,                    // Volz servo protocol

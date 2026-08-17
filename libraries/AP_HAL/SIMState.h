@@ -45,6 +45,7 @@
 #include <SITL/SIM_Frsky_D.h>
 #include <SITL/SIM_CRSF.h>
 #include <SITL/SIM_PS_RPLidarA2.h>
+#include <SITL/SIM_PS_RPLidarS3.h>
 #include <SITL/SIM_PS_TeraRangerTower.h>
 #include <SITL/SIM_PS_LightWare_SF45B.h>
 
@@ -184,6 +185,11 @@ private:
 #if AP_SIM_PS_RPLIDARA2_ENABLED
     // simulated RPLidarA2:
     SITL::PS_RPLidarA2 *rplidara2;
+#endif
+
+#if HAL_SIM_PS_RPLIDARS3_ENABLED
+    // simulated RPLidarS3:
+    SITL::PS_RPLidarS3 *rplidars3;
 #endif
 
     // simulated FETtec OneWire ESCs:
