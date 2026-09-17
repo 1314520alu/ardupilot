@@ -65,6 +65,16 @@
 
 class HAL_SITL;
 
+/*
+  reply sent by simulated peripherals for each multicast state packet
+  consumed: servo feedback, plus a timestamp echo used for
+  simulated-peripheral lockstep
+ */
+struct sitl_mcast_ack {
+    uint64_t timestamp_us;   // echo of the consumed state timestamp
+    float servos[SITL_NUM_CHANNELS];  // nan means channel not driven
+};
+
 class HALSITL::SITL_State_Common {
     friend class HALSITL::Scheduler;
     friend class HALSITL::Util;
@@ -234,9 +244,6 @@ public:
     // voltage from the sensor
     float _sonar_pin_voltage() const;
 
-    // multicast state
-    int mc_out_fd = -1;
-    
     // send out SITL state as UDP multicast
     void multicast_state_open(void);
     void multicast_state_send(void);
@@ -245,7 +252,13 @@ public:
     // the TCP queue is full:
     uint32_t _serial_0_outqueue_full_count;
 
+    // Expose the selected model to standalone simulation frontends which use
+    // the SITL command-line factory without running an ArduPilot vehicle.
+    SITL::Aircraft *get_physics_model() const { return sitl_model; }
+    void enable_model_command_line() { model_command_line_enabled = true; }
+
 protected:
+    bool model_command_line_enabled;
     enum vehicle_type _vehicle;
 
     void sim_update(void);

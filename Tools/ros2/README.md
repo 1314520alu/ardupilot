@@ -59,8 +59,8 @@ The ROS 2 tutorials contain more details regarding [ROS 2 workspaces](https://do
 
 ```bash
 cd ~/ros2_ws/src
-wget https://raw.githubusercontent.com/ArduPilot/ardupilot/master/Tools/ros2/ros2.humble.repos
-vcs import --recursive < ros2.humble.repos
+wget https://raw.githubusercontent.com/ArduPilot/ardupilot/master/Tools/ros2/ros2.repos
+vcs import --recursive < ros2.repos
 ```
 
 ### ROS 2 Jazzy repos
@@ -80,7 +80,7 @@ cd ~/ros2_ws
 source /opt/ros/humble/setup.bash
 sudo apt update
 rosdep update
-rosdep install --rosdistro ${ROS_DISTRO} --from-paths src
+rosdep install --rosdistro ${ROS_DISTRO} --from-paths src --ignore-src --skip-keys microxrcedds_agent
 ```
 
 ### ROS 2 Jazzy dependencies
@@ -90,7 +90,7 @@ cd ~/ros2_ws
 source /opt/ros/jazzy/setup.bash
 sudo apt update
 rosdep update
-rosdep install --rosdistro ${ROS_DISTRO} --from-paths src
+rosdep install --rosdistro ${ROS_DISTRO} --from-paths src --ignore-src --skip-keys microxrcedds_agent
 ```
 
 ### 4. Build

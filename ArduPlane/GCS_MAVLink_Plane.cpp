@@ -587,7 +587,11 @@ MAV_RESULT GCS_MAVLINK_Plane::handle_command_int_do_reposition(const mavlink_com
     // location is valid load and set
     if (((int32_t)packet.param2 & MAV_DO_REPOSITION_FLAGS_CHANGE_MODE) ||
         (plane.control_mode == &plane.mode_guided)) {
-        plane.set_mode(plane.mode_guided, ModeReason::GCS_COMMAND);
+        if (!plane.set_mode(plane.mode_guided, ModeReason::GCS_COMMAND)) {
+            // e.g. GUIDED blocked by FLTMODE_GCSBLOCK; don't touch the
+            // current mode's navigation target
+            return MAV_RESULT_FAILED;
+        }
 #if AP_PLANE_OFFBOARD_GUIDED_SLEW_ENABLED
         plane.guided_state.target_heading_type = GUIDED_HEADING_NONE;
 #endif
@@ -746,16 +750,6 @@ MAV_RESULT GCS_MAVLINK_Plane::handle_command_int_packet(const mavlink_command_in
     case MAV_CMD_GUIDED_CHANGE_ALTITUDE:
     case MAV_CMD_GUIDED_CHANGE_HEADING:
         return handle_command_int_guided_slew_commands(packet);
-#endif
-
-#if AP_SCRIPTING_ENABLED && AP_FOLLOW_ENABLED
-    case MAV_CMD_DO_FOLLOW:
-        // param1: sysid of target to follow
-        if ((packet.param1 > 0) && (packet.param1 <= 255)) {
-            plane.g2.follow.set_target_sysid((uint8_t)packet.param1);
-            return MAV_RESULT_ACCEPTED;
-        }
-        return MAV_RESULT_DENIED;
 #endif
 
 #if AP_ICENGINE_ENABLED
