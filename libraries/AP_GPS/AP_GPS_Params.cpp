@@ -46,6 +46,7 @@ const AP_Param::GroupInfo AP_GPS::Params::var_info[] = {
     // @User: Advanced
     AP_GROUPINFO("RATE_MS", 3, AP_GPS::Params, rate_ms, 200),
 
+#if AP_GPS_ADVANCED_CONFIG_ENABLED
     // @Param: POS_X
     // @DisplayName: Antenna X position offset
     // @Description: X position of the first GPS antenna in body frame. Positive X is forward of the origin. Use antenna phase centroid location if provided by the manufacturer.
@@ -79,6 +80,7 @@ const AP_Param::GroupInfo AP_GPS::Params::var_info[] = {
     // @User: Advanced
     // @RebootRequired: True
     AP_GROUPINFO("DELAY_MS", 5, AP_GPS::Params, delay_ms, 0),
+#endif
 
 #if AP_GPS_SBF_ENABLED
     // @Param: COM_PORT
@@ -119,6 +121,10 @@ const AP_Param::GroupInfo AP_GPS::Params::var_info[] = {
 AP_GPS::Params::Params(void)
 {
     AP_Param::setup_object_defaults(this, var_info);
+#if !AP_GPS_ADVANCED_CONFIG_ENABLED
+    antenna_offset.set(Vector3f{0, 0, 0});
+    delay_ms.set(0);
+#endif
 }
 
 #endif  // AP_GPS_ENABLED

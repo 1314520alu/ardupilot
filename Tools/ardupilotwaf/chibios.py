@@ -738,7 +738,8 @@ def build(bld):
         'cortex-m4' : 'libarm_cortexM4lf_math.a',
         'cortex-m7' : 'libarm_cortexM7lfdp_math.a',
     }
-    if bld.env.CORTEX in DSP_LIBS:
+    # AP_Periph on small MCUs: skip CMSIS-DSP (not needed, saves flash if referenced)
+    if bld.env.CORTEX in DSP_LIBS and not bld.env.AP_PERIPH:
         libname = DSP_LIBS[bld.env.CORTEX]
         # we need to copy the library on cygwin as it doesn't handle linking outside build tree
         shutil.copyfile(os.path.join(bld.env.SRCROOT,'libraries/AP_GyroFFT/CMSIS_5/lib',libname),

@@ -1,0 +1,5 @@
+# ZY M323 GPS — STM32F103CBT6 bootloader
+
+include ../f103-periph/hwdef-bl.inc
+
+define HAL_CAN_BAUDRATE_DEFAULT 500000

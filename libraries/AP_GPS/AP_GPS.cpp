@@ -132,12 +132,14 @@ const AP_Param::GroupInfo AP_GPS::var_info[] = {
 
     // 1 was GPS_TYPE2
 
+#if AP_GPS_ADVANCED_CONFIG_ENABLED
     // @Param: _NAVFILTER
     // @DisplayName: Navigation filter setting
     // @Description: Navigation filter engine setting
     // @Values: 0:Portable,2:Stationary,3:Pedestrian,4:Automotive,5:Sea,6:Airborne1G,7:Airborne2G,8:Airborne4G
     // @User: Advanced
     AP_GROUPINFO("_NAVFILTER", 2, AP_GPS, _navfilter, GPS_ENGINE_AIRBORNE_4G),
+#endif
 
 #if GPS_MAX_RECEIVERS > 1
     // @Param: _AUTO_SWITCH
@@ -150,6 +152,7 @@ const AP_Param::GroupInfo AP_GPS::var_info[] = {
 
     // 4 was _MIN_GPS, removed Feb 2024
 
+#if AP_GPS_ADVANCED_CONFIG_ENABLED
     // @Param: _SBAS_MODE
     // @DisplayName: SBAS Mode
     // @Description: This sets the SBAS (satellite based augmentation system) mode if available on this GPS. If set to 2 then the SBAS mode is not changed in the GPS. Otherwise the GPS will be reconfigured to enable/disable SBAS. Disabling SBAS may be worthwhile in some parts of the world where an SBAS signal is available but the baseline is too long to be useful.
@@ -171,6 +174,7 @@ const AP_Param::GroupInfo AP_GPS::var_info[] = {
     // @Values: 0:send to first GPS,1:send to 2nd GPS,127:send to all
     // @User: Advanced
     AP_GROUPINFO("_INJECT_TO",   7, AP_GPS, _inject_to, GPS_RTK_INJECT_TO_ALL),
+#endif
 
 #if AP_GPS_SBP2_ENABLED || AP_GPS_SBP_ENABLED
     // @Param: _SBP_LOGMASK
@@ -181,6 +185,7 @@ const AP_Param::GroupInfo AP_GPS::var_info[] = {
     AP_GROUPINFO("_SBP_LOGMASK", 8, AP_GPS, _sbp_logmask, -256),
 #endif //AP_GPS_SBP2_ENABLED || AP_GPS_SBP_ENABLED
 
+#if AP_GPS_ADVANCED_CONFIG_ENABLED
     // @Param: _RAW_DATA
     // @DisplayName: Raw data logging
     // @Description: Handles logging raw data; on uBlox chips that support raw data this will log RXM messages into logger; on Septentrio this will log on the equipment's SD card and when set to 2, the autopilot will try to stop logging after disarming and restart after arming
@@ -206,6 +211,7 @@ const AP_Param::GroupInfo AP_GPS::var_info[] = {
     // @Values: 0:Disables automatic configuration,1:Enable automatic configuration for Serial GPSes only,2:Enable automatic configuration for DroneCAN as well
     // @User: Advanced
     AP_GROUPINFO("_AUTO_CONFIG", 13, AP_GPS, _auto_config, 1),
+#endif
 
     // 14 was GPS_RATE_MS
 
@@ -236,12 +242,14 @@ const AP_Param::GroupInfo AP_GPS::var_info[] = {
     // Had key 21, no longer used
 #endif
 
+#if AP_GPS_ADVANCED_CONFIG_ENABLED
     // @Param: _DRV_OPTIONS
     // @DisplayName: driver options
     // @Description: Additional backend specific options
     // @Bitmask: 0:Use UART2 for moving baseline on ublox,1:Use base station for GPS yaw on SBF,2:Use baudrate 115200,3:Use dedicated CAN port b/w GPSes for moving baseline,4:Use ellipsoid height instead of AMSL, 5:Override GPS satellite health of L5 band from L1 health, 6:Enable RTCM full parse even for a single channel, 7:Disable automatic full RTCM parsing when RTCM seen on more than one channel
     // @User: Advanced
     AP_GROUPINFO("_DRV_OPTIONS", 22, AP_GPS, _driver_options, 0),
+#endif
 
     // 23 was GPS_COM_PORT
 
@@ -289,6 +297,18 @@ AP_GPS::AP_GPS()
                     "GPS initilisation blob is too large to be completely sent before the baud rate changes");
 
     AP_Param::setup_object_defaults(this, var_info);
+
+#if !AP_GPS_ADVANCED_CONFIG_ENABLED
+    // compiled-in defaults when advanced params are not exposed
+    _navfilter.set(GPS_ENGINE_AIRBORNE_4G);
+    _sbas_mode.set(SBAS_Mode::DoNotChange);
+    _min_elevation.set(-100);
+    _inject_to.set(GPS_RTK_INJECT_TO_ALL);
+    _raw_data.set(0);
+    _save_config.set(2);
+    _auto_config.set(1);
+    _driver_options.set(0);
+#endif
 
     if (_singleton != nullptr) {
         AP_HAL::panic("AP_GPS must be singleton");

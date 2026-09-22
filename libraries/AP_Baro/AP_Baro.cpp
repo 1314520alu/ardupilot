@@ -129,12 +129,14 @@ const AP_Param::GroupInfo AP_Baro::var_info[] = {
     AP_GROUPINFO("_PRIMARY", 6, AP_Baro, _primary_baro, 0),
 #endif // HAL_BUILD_AP_PERIPH
 
+#if AP_BARO_PROBE_EXTERNAL_I2C_BUSES
     // @Param: _EXT_BUS
     // @DisplayName: External baro bus
     // @Description: This selects the bus number for looking for an I2C barometer. When set to -1 it will probe all external i2c buses based on the BARO_PROBE_EXT parameter.
     // @Values: -1:Disabled,0:Bus0,1:Bus1,6:Bus6
     // @User: Advanced
     AP_GROUPINFO("_EXT_BUS", 7, AP_Baro, _ext_bus, HAL_BARO_EXTERNAL_BUS_DEFAULT),
+#endif
 
     // @Param{Sub}: _SPEC_GRAV
     // @DisplayName: Specific Gravity (For water depth measurement)
@@ -280,6 +282,9 @@ AP_Baro::AP_Baro()
     _singleton = this;
 
     AP_Param::setup_object_defaults(this, var_info);
+#if !AP_BARO_PROBE_EXTERNAL_I2C_BUSES
+    _ext_bus.set(HAL_BARO_EXTERNAL_BUS_DEFAULT);
+#endif
     _field_elevation_active = _field_elevation;
 }
 

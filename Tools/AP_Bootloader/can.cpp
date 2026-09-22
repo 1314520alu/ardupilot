@@ -40,7 +40,10 @@ static uint32_t canard_memory_pool[4096/4];
 static uint8_t initial_node_id = HAL_CAN_DEFAULT_NODE_ID;
 
 // can config for 1MBit
-static uint32_t baudrate = 1000000U;
+#ifndef HAL_CAN_BAUDRATE_DEFAULT
+#define HAL_CAN_BAUDRATE_DEFAULT 1000000U
+#endif
+static uint32_t baudrate = HAL_CAN_BAUDRATE_DEFAULT;
 
 #if HAL_USE_CAN
 static CANConfig cancfg = {

@@ -121,3 +121,9 @@
 #ifndef AP_GPS_GPS2_RTK_SENDING_ENABLED
 #define AP_GPS_GPS2_RTK_SENDING_ENABLED HAL_GCS_ENABLED && AP_GPS_ENABLED && GPS_MAX_RECEIVERS > 1 && (AP_GPS_SBF_ENABLED || AP_GPS_ERB_ENABLED)
 #endif
+
+// When 0, hide rarely-changed GPS_* / GPS1_POS params (keep compiled-in defaults).
+// Useful on fixed AP_Periph boards that only need TYPE/RATE/PORT.
+#ifndef AP_GPS_ADVANCED_CONFIG_ENABLED
+#define AP_GPS_ADVANCED_CONFIG_ENABLED 1
+#endif

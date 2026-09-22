@@ -19,6 +19,10 @@
 #include <utility>
 #include <stdio.h>
 
+#include <AP_HAL/AP_HAL.h>
+#include <AP_HAL/Device.h>
+#include <AP_HAL/I2CDevice.h>
+#include <AP_HAL/Semaphores.h>
 #include <AP_Math/AP_Math.h>
 #include <AP_Math/crc.h>
 #include <AP_BoardConfig/AP_BoardConfig.h>
@@ -132,13 +136,24 @@ bool AP_Baro_MS56XX::_init()
 
     // high retries for init
     _dev->set_retries(10);
-    
+#if defined(HAL_USE_I2C) || defined(HAL_I2C_DEVICE_LIST)
+    // F103 I2C often needs stop between write and read for PROM words
+    if (_dev->bus_type() == AP_HAL::Device::BUS_TYPE_I2C) {
+        static_cast<AP_HAL::I2CDevice*>(_dev.get())->set_split_transfers(true);
+    }
+#endif
+
     uint16_t prom[8];
 
-    _dev->transfer(&CMD_MS56XX_RESET, 1, nullptr, 0);
-    hal.scheduler->delay(4);
+    const bool reset_ok = _dev->transfer(&CMD_MS56XX_RESET, 1, nullptr, 0);
+    hal.scheduler->delay(10);
 
     if (!_read_prom(prom)) {
+        // keep short — CAN LogMessage + tiny F103 pool
+        printf("%s fail a=0x%02x rst=%u z=%u p1=%u\n",
+               name(), _dev->get_bus_address(), unsigned(reset_ok),
+               (prom[0]|prom[1]|prom[2]|prom[3]|prom[4]|prom[5]|prom[6]|prom[7]) ? 0U : 1U,
+               unsigned(prom[1]));
         _dev->get_semaphore()->give();
         return false;
     }
