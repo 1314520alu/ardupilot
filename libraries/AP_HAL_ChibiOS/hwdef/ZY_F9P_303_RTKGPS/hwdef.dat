@@ -1,0 +1,88 @@
+# ZY F9P RTK GPS — STM32F303CBT6 AP_Periph (128KB flash)
+# Dual F9P moving-baseline heading: F9P UART2 cross-link (direct),
+# UART1 → this MCU → DroneCAN (Fix + RelPosHeading). No mag/baro.
+
+include ../f303-periph/hwdef.inc
+
+# F303CBT6 = 128KB (stock f303-periph assumes 256KB / CCT6)
+undef FLASH_SIZE_KB
+FLASH_SIZE_KB 128
+
+# BL=20KB, params in last 4KB of flash
+undef FLASH_RESERVE_START_KB
+FLASH_RESERVE_START_KB 20
+undef STORAGE_FLASH_PAGE
+STORAGE_FLASH_PAGE 62
+
+APJ_BOARD_ID AP_HW_ZY_F9P_303_RTKGPS
+
+define CAN_APP_NODE_NAME "org.ardupilot.ZY_F9P_303_RTKGPS"
+define HAL_CAN_BAUDRATE_DEFAULT 500000
+define HAL_CAN_DEFAULT_NODE_ID 30
+define HAL_PERIPH_PRINTF_TO_CAN 1
+
+define AP_BOOTLOADER_FLASHING_ENABLED 0
+undef ROMFS
+define HAL_NO_ROMFS_SUPPORT
+
+# CAN memory pool (RAM). 3000→6000 for Fix2/RelPosHeading under bus load.
+undef HAL_CAN_POOL_SIZE
+define HAL_CAN_POOL_SIZE 6000
+undef HAL_MONITOR_THREAD_ENABLED
+define HAL_MONITOR_THREAD_ENABLED 0
+
+# No embedded defaults.parm/ROMFS (saves ~flash; CBT6 is tight). Defaults set in AP_Periph.cpp.
+undef AP_PARAM_MAX_EMBEDDED_PARAM
+define AP_PARAM_MAX_EMBEDDED_PARAM 0
+define AP_FILESYSTEM_ROMFS_ENABLED 0
+define AP_FILESYSTEM_SYS_ENABLED 0
+define AP_FILESYSTEM_PARAM_ENABLED 0
+
+# Apply MB UART2 / GNSS / rate defaults at boot (see AP_Periph.cpp)
+define HAL_PERIPH_F9P_MB_UART2_DEFAULTS 1
+
+# Default local GPS role = MB Rover (18). Base node: set GPS_TYPE=17 via DroneCAN.
+define HAL_GPS1_TYPE_DEFAULT 18
+
+# GPS only — no compass / baro / other sensors
+define AP_PERIPH_GPS_ENABLED 1
+define AP_PERIPH_MAG_ENABLED 0
+define AP_PERIPH_BARO_ENABLED 0
+define AP_PERIPH_AIRSPEED_ENABLED 0
+define AP_PERIPH_RANGEFINDER_ENABLED 0
+define AP_PERIPH_ADSB_ENABLED 0
+define AP_PERIPH_MSP_ENABLED 0
+
+define AP_COMPASS_BACKEND_DEFAULT_ENABLED 0
+define AP_BARO_BACKEND_DEFAULT_ENABLED 0
+
+# ublox F9P only
+define AP_GPS_BACKEND_DEFAULT_ENABLED 0
+define AP_GPS_UBLOX_ENABLED 1
+define AP_GPS_NOVA_ENABLED 0
+define AP_GPS_SBF_ENABLED 0
+define AP_GPS_GSOF_ENABLED 0
+define AP_GPS_NMEA_ENABLED 0
+define AP_GPS_SIRF_ENABLED 0
+define AP_GPS_ERB_ENABLED 0
+define AP_GPS_SBP_ENABLED 0
+define AP_GPS_SBP2_ENABLED 0
+define AP_GPS_MAV_ENABLED 0
+define AP_GPS_DRONECAN_ENABLED 0
+
+# Moving baseline: parse RELPOSNED, publish RelPosHeading on CAN
+define GPS_MOVING_BASELINE 1
+
+# F9P prefers 5Hz; leave headroom for RELPOSNED + PVT
+define GPS_MAX_RATE_MS 200
+
+# larger GPS UART RX for UBX + occasional RTCM bleed
+undef HAL_UART_MIN_RX_SIZE
+define HAL_UART_MIN_RX_SIZE 512
+undef HAL_UART_MIN_TX_SIZE
+define HAL_UART_MIN_TX_SIZE 256
+
+# Detailed F9P / moving-baseline debug → DroneCAN LogMessage (Mission Planner Messages)
+define UBLOX_CFG_DEBUGGING 1
+define UBLOX_MB_DEBUGGING 1
+define AP_PERIPH_GPS_DEBUG_ENABLED 1

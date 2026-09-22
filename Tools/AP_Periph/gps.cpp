@@ -9,13 +9,129 @@
 #include <dronecan_msgs.h>
 #include <AP_GPS/RTCM3_Parser.h>
 
-#define DEBUG_PRINTS 0
+#ifndef AP_PERIPH_GPS_DEBUG_ENABLED
+#define AP_PERIPH_GPS_DEBUG_ENABLED 0
+#endif
+
+#define DEBUG_PRINTS AP_PERIPH_GPS_DEBUG_ENABLED
 
 #if DEBUG_PRINTS
- # define Debug(fmt, args ...)  do {can_printf(fmt "\n", ## args);} while(0)
+ # define Debug(fmt, args ...)  do {can_printf(fmt, ## args);} while(0)
 #else
  # define Debug(fmt, args ...)
 #endif
+
+#if AP_PERIPH_GPS_DEBUG_ENABLED
+static const char *gps_status_str(AP_GPS::GPS_Status st)
+{
+    switch (st) {
+    case AP_GPS::NO_GPS: return "NO_GPS";
+    case AP_GPS::NO_FIX: return "NO_FIX";
+    case AP_GPS::GPS_OK_FIX_2D: return "FIX_2D";
+    case AP_GPS::GPS_OK_FIX_3D: return "FIX_3D";
+    case AP_GPS::GPS_OK_FIX_3D_DGPS: return "DGPS";
+    case AP_GPS::GPS_OK_FIX_3D_RTK_FLOAT: return "RTK_FLOAT";
+    case AP_GPS::GPS_OK_FIX_3D_RTK_FIXED: return "RTK_FIXED";
+    default: return "?";
+    }
+}
+
+/*
+  Boot + status-change + periodic F9P/MB diagnostics on CAN LogMessage
+ */
+static void gps_debug_update(AP_GPS &gps)
+{
+    static bool banner_done;
+    static uint8_t last_status = 255;
+    static bool last_yaw;
+    static uint32_t last_periodic_ms;
+    static uint16_t relpos_ok_count;
+    static uint16_t relpos_fail_count;
+    static uint32_t boot_ms;
+
+    const uint32_t now = AP_HAL::millis();
+    if (boot_ms == 0) {
+        boot_ms = now;
+    }
+
+    if (!banner_done && now - boot_ms > 500) {
+        banner_done = true;
+        can_printf("F9PDBG boot type=%u port OK MB=%u",
+                   unsigned(gps.get_type(0)),
+#if GPS_MOVING_BASELINE
+                   1U
+#else
+                   0U
+#endif
+            );
+        can_printf("F9PDBG UART2=direct RTCM; watch CFG/MB lines");
+    }
+
+    const auto st = gps.status(0);
+    if (uint8_t(st) != last_status) {
+        can_printf("F9PDBG status %s->%s sats=%u",
+                   last_status == 255 ? "-" : gps_status_str(AP_GPS::GPS_Status(last_status)),
+                   gps_status_str(st),
+                   unsigned(gps.num_sats(0)));
+        last_status = uint8_t(st);
+    }
+
+    const bool yaw = gps.have_gps_yaw(0);
+    if (yaw != last_yaw) {
+        float yaw_deg = 0, yaw_acc = 0, dist = 0, down = 0;
+        uint32_t ts = 0;
+#if GPS_MOVING_BASELINE
+        if (gps.get_RelPosHeading(ts, yaw_deg, dist, down, yaw_acc)) {
+            can_printf("F9PDBG yaw %s hdg=%d dist_cm=%d acc_cdeg=%d",
+                       yaw ? "ON" : "OFF",
+                       int(yaw_deg),
+                       int(dist * 100.0f),
+                       int(yaw_acc * 100.0f));
+        } else
+#endif
+        {
+            can_printf("F9PDBG yaw %s", yaw ? "ON" : "OFF");
+        }
+        last_yaw = yaw;
+    }
+
+#if GPS_MOVING_BASELINE
+    {
+        float yaw_deg = 0, yaw_acc = 0, dist = 0, down = 0;
+        uint32_t ts = 0;
+        if (gps.get_RelPosHeading(ts, yaw_deg, dist, down, yaw_acc)) {
+            relpos_ok_count++;
+        } else if (st >= AP_GPS::GPS_OK_FIX_3D) {
+            relpos_fail_count++;
+        }
+    }
+#endif
+
+    // first 2 minutes: every 5s; then every 30s
+    const uint32_t period_ms = (now - boot_ms < 120000U) ? 5000U : 30000U;
+    if (now - last_periodic_ms >= period_ms) {
+        last_periodic_ms = now;
+        if (gps.status(0) >= AP_GPS::GPS_OK_FIX_2D) {
+            can_printf("F9PDBG %s sats=%u hdop=%u",
+                       gps_status_str(st),
+                       unsigned(gps.num_sats(0)),
+                       unsigned(gps.get_hdop(0)));
+        } else {
+            can_printf("F9PDBG %s sats=%u (no pos)",
+                       gps_status_str(st),
+                       unsigned(gps.num_sats(0)));
+        }
+#if GPS_MOVING_BASELINE
+        can_printf("F9PDBG relpos ok=%u fail=%u yaw=%u",
+                   unsigned(relpos_ok_count),
+                   unsigned(relpos_fail_count),
+                   yaw ? 1U : 0U);
+        relpos_ok_count = 0;
+        relpos_fail_count = 0;
+#endif
+    }
+}
+#endif // AP_PERIPH_GPS_DEBUG_ENABLED
 
 /*
   handle gnss::RTCMStream
@@ -40,7 +156,7 @@ void AP_Periph_FW::handle_MovingBaselineData(CanardInstance* canard_instance, Ca
         return;
     }
     gps.inject_MBL_data(msg.data.data, msg.data.len);
-    Debug("MovingBaselineData: len=%u\n", msg.data.len);
+    Debug("MBData len=%u", msg.data.len);
 }
 #endif // GPS_MOVING_BASELINE
 
@@ -66,6 +182,9 @@ void AP_Periph_FW::can_gps_update(void)
         return;
     }
     gps.update();
+#if AP_PERIPH_GPS_DEBUG_ENABLED
+    gps_debug_update(gps);
+#endif
     send_moving_baseline_msg();
     send_relposheading_msg();
     if (last_gps_update_ms == gps.last_message_time_ms()) {
@@ -300,6 +419,19 @@ void AP_Periph_FW::send_relposheading_msg() {
         return;
     }
     last_relposheading_ms = curr_timestamp;
+#if AP_PERIPH_GPS_DEBUG_ENABLED
+    {
+        static uint32_t last_rph_dbg_ms;
+        const uint32_t now = AP_HAL::millis();
+        if (now - last_rph_dbg_ms > 2000) {
+            last_rph_dbg_ms = now;
+            can_printf("F9PDBG RelPosH hdg=%d d_cm=%d acc_cdeg=%d",
+                       int(reported_heading),
+                       int(relative_distance * 100.0f),
+                       int(reported_heading_acc * 100.0f));
+        }
+    }
+#endif
     ardupilot_gnss_RelPosHeading relpos {};
     relpos.timestamp.usec = uint64_t(curr_timestamp)*1000LLU;
     relpos.reported_heading_deg = reported_heading;

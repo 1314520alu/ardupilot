@@ -465,6 +465,10 @@ AP_HW_PixSurveyA2-IND                6104
 # IDs 6600-6699 reserved for Eagle Eye Drones
 
 # IDs 6900-6909 reserved for Easy Aerial
+# Local TF02PRO UART→DroneCAN adapter (GD32F103 / private)
+AP_HW_TF02PRO_PERIPH                 6900
+# Local ZY dual-F9P RTK GPS (STM32F303CBT6 / private)
+AP_HW_ZY_F9P_303_RTKGPS              6901
 
 # IDs 6960-6969 reserved for ViaDrone
 

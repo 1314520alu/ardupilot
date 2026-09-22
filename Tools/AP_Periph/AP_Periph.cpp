@@ -82,6 +82,16 @@ const struct LogStructure AP_Periph_FW::log_structure[] = {
 };
 #endif
 
+#if HAL_PERIPH_PRINTF_TO_CAN
+#include <stdarg.h>
+extern int (*vprintf_console_hook)(const char *fmt, va_list arg);
+static int periph_printf_to_can(const char *fmt, va_list ap)
+{
+    can_vprintf(MAV_SEVERITY_DEBUG, fmt, ap);
+    return 1;
+}
+#endif
+
 void AP_Periph_FW::init()
 {
     
@@ -100,9 +110,29 @@ void AP_Periph_FW::init()
 
     load_parameters();
 
+#ifndef HAL_PERIPH_F9P_MB_UART2_DEFAULTS
+#define HAL_PERIPH_F9P_MB_UART2_DEFAULTS 0
+#endif
+#if HAL_PERIPH_F9P_MB_UART2_DEFAULTS
+    // Compile-time defaults for dual-F9P UART2 moving baseline (avoid ROMFS on CBT6)
+    AP_Param::set_default_by_name("GPS_DRV_OPTIONS", 1);  // UART2 RTCM between F9Ps
+    AP_Param::set_default_by_name("GPS1_RATE_MS", 200);   // 5 Hz
+    AP_Param::set_default_by_name("GPS_RATE_MS", 200);
+    AP_Param::set_default_by_name("GPS1_GNSS_MODE", 77);  // GPS+GAL+BDS+QZSS
+    AP_Param::set_default_by_name("GPS_AUTO_CONFIG", 1);
+#endif
+
     stm32_watchdog_pat();
 
     can_start();
+
+#if HAL_PERIPH_PRINTF_TO_CAN
+    // send printf()/sensor probe text as DroneCAN debug.LogMessage
+    vprintf_console_hook = periph_printf_to_can;
+    can_printf("AP_Periph start node=%u baud=%lu",
+               unsigned(g.can_node.get()),
+               (unsigned long)g.can_baudrate[0].get());
+#endif
 
 #if HAL_GCS_ENABLED
     stm32_watchdog_pat();
@@ -157,6 +187,23 @@ void AP_Periph_FW::init()
         gps.set_log_gps_bit(MASK_LOG_GPS);
 #endif
         gps.init();
+#if AP_PERIPH_GPS_DEBUG_ENABLED
+        can_printf("F9PDBG gps.init type=%u port=%d baud=%u MB=%d",
+                   unsigned(gps.get_type(0)),
+                   int(g.gps_port.get()),
+                   unsigned(AP_SERIALMANAGER_GPS_BAUD),
+#if GPS_MOVING_BASELINE
+                   1
+#else
+                   0
+#endif
+            );
+#endif
+    } else {
+#if AP_PERIPH_GPS_DEBUG_ENABLED
+        can_printf("F9PDBG GPS disabled type=%u port=%d",
+                   unsigned(gps.get_type(0)), int(g.gps_port.get()));
+#endif
     }
 #endif  // AP_PERIPH_GPS_ENABLED
 
@@ -164,12 +211,45 @@ void AP_Periph_FW::init()
     dac.init();
 #endif
 
-#if AP_PERIPH_MAG_ENABLED
-    compass.init();
+#if HAL_PERIPH_PRINTF_TO_CAN
+    // Quick probe of mag + MS5611 addresses on bus0
+    {
+        static const uint8_t addrs[] = { 0x0D, 0x1E, 0x76, 0x77 };
+        can_printf("I2C probe...");
+        for (uint8_t i = 0; i < sizeof(addrs); i++) {
+            auto dev = hal.i2c_mgr->get_device(0, addrs[i]);
+            if (!dev) {
+                continue;
+            }
+            WITH_SEMAPHORE(dev->get_semaphore());
+            dev->set_retries(1);
+            uint8_t cmd = 0x1E; // MS56xx RESET; harmless NACK on mag
+            const bool ack = dev->transfer(&cmd, 1, nullptr, 0);
+            can_printf("I2C 0x%02x %s", unsigned(addrs[i]), ack ? "ACK" : "NAK");
+        }
+        for (uint8_t i = 0; i < 20; i++) {
+            can_update();
+            hal.scheduler->delay(2);
+        }
+    }
 #endif
 
 #if AP_PERIPH_BARO_ENABLED
     baro.init();
+#if HAL_PERIPH_PRINTF_TO_CAN
+    can_printf("BARO n=%u healthy=%u",
+               unsigned(baro.num_instances()),
+               baro.healthy() ? 1U : 0U);
+#endif
+#endif
+
+#if AP_PERIPH_MAG_ENABLED
+    compass.init();
+#if HAL_PERIPH_PRINTF_TO_CAN
+    can_printf("MAG count=%u healthy=%u",
+               unsigned(compass.get_count()),
+               compass.healthy() ? 1U : 0U);
+#endif
 #endif
 
 #if AP_PERIPH_IMU_ENABLED
@@ -316,6 +396,15 @@ void AP_Periph_FW::init()
     scripting.init();
 #endif
     start_ms = AP_HAL::millis();
+
+#if HAL_PERIPH_PRINTF_TO_CAN
+    can_printf("init done");
+    // flush queued LogMessage frames before entering main loop
+    for (uint8_t i = 0; i < 20; i++) {
+        can_update();
+        hal.scheduler->delay(2);
+    }
+#endif
 }
 
 #if (defined(HAL_PERIPH_NEOPIXEL_COUNT_WITHOUT_NOTIFY) && HAL_PERIPH_NEOPIXEL_COUNT_WITHOUT_NOTIFY == 8) || AP_PERIPH_NOTIFY_ENABLED
