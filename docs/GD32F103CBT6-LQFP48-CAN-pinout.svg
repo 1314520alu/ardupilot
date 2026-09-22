@@ -1,0 +1,122 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="980" viewBox="0 0 900 980">
+  <defs>
+    <style>
+      .title { font: 700 22px sans-serif; fill: #111; }
+      .sub { font: 14px sans-serif; fill: #333; }
+      .chip { fill: #f5f5f5; stroke: #222; stroke-width: 2; }
+      .die { fill: #e8e8e8; stroke: #444; stroke-width: 1; }
+      .n { font: 700 11px monospace; fill: #111; }
+      .p { font: 10px monospace; fill: #222; }
+      .can0 { fill: #ffe8e0; stroke: #d33; stroke-width: 2.5; }
+      .can1 { fill: #e0f0ff; stroke: #06c; stroke-width: 2.5; }
+      .swd { fill: #e8ffe8; stroke: #080; stroke-width: 2; }
+      .leg { font: 13px sans-serif; fill: #222; }
+      .box { fill: #fff; stroke: #ccc; }
+    </style>
+  </defs>
+
+  <rect width="900" height="980" fill="#fff"/>
+  <text x="450" y="36" text-anchor="middle" class="title">GD32F103CBT6 / STM32F103CBT6  LQFP48 TOP VIEW</text>
+  <text x="450" y="58" text-anchor="middle" class="sub">CAN / SWD ˘gûipπÂ Pin1 π:∆	</text>
+
+  <!-- package -->
+  <rect x="250" y="200" width="400" height="400" rx="8" class="chip"/>
+  <rect x="310" y="260" width="280" height="280" class="die"/>
+  <circle cx="275" cy="225" r="8" fill="#222"/>
+  <text x="450" y="380" text-anchor="middle" class="title" style="font-size:18px">GD32F103CBT6</text>
+  <text x="450" y="405" text-anchor="middle" class="sub">LQFP48 ∑ TOP VIEW</text>
+  <text x="450" y="428" text-anchor="middle" class="sub">Pin1 œ Ê
+“</text>
+
+  <!-- LEFT pins 1-12 (top to bottom) -->
+  <g id="left">
+    <text x="240" y="218" text-anchor="end" class="n">1</text><text x="195" y="218" text-anchor="end" class="p">VBAT</text>
+    <text x="240" y="248" text-anchor="end" class="n">2</text><text x="195" y="248" text-anchor="end" class="p">PC13</text>
+    <text x="240" y="278" text-anchor="end" class="n">3</text><text x="195" y="278" text-anchor="end" class="p">PC14</text>
+    <text x="240" y="308" text-anchor="end" class="n">4</text><text x="195" y="308" text-anchor="end" class="p">PC15</text>
+    <text x="240" y="338" text-anchor="end" class="n">5</text><text x="195" y="338" text-anchor="end" class="p">PD0/OSC_IN</text>
+    <text x="240" y="368" text-anchor="end" class="n">6</text><text x="195" y="368" text-anchor="end" class="p">PD1/OSC_OUT</text>
+    <text x="240" y="398" text-anchor="end" class="n">7</text><text x="195" y="398" text-anchor="end" class="p">NRST</text>
+    <text x="240" y="428" text-anchor="end" class="n">8</text><text x="195" y="428" text-anchor="end" class="p">VSSA</text>
+    <text x="240" y="458" text-anchor="end" class="n">9</text><text x="195" y="458" text-anchor="end" class="p">VDDA</text>
+    <text x="240" y="488" text-anchor="end" class="n">10</text><text x="195" y="488" text-anchor="end" class="p">PA0</text>
+    <text x="240" y="518" text-anchor="end" class="n">11</text><text x="195" y="518" text-anchor="end" class="p">PA1</text>
+    <text x="240" y="548" text-anchor="end" class="n">12</text><text x="195" y="548" text-anchor="end" class="p">PA2</text>
+  </g>
+
+  <!-- BOTTOM pins 13-24 -->
+  <g id="bottom">
+    <text x="275" y="630" text-anchor="middle" class="n">13</text><text x="275" y="646" text-anchor="middle" class="p">PA3</text>
+    <text x="305" y="630" text-anchor="middle" class="n">14</text><text x="305" y="646" text-anchor="middle" class="p">PA4</text>
+    <text x="335" y="630" text-anchor="middle" class="n">15</text><text x="335" y="646" text-anchor="middle" class="p">PA5</text>
+    <text x="365" y="630" text-anchor="middle" class="n">16</text><text x="365" y="646" text-anchor="middle" class="p">PA6</text>
+    <text x="395" y="630" text-anchor="middle" class="n">17</text><text x="395" y="646" text-anchor="middle" class="p">PA7</text>
+    <text x="425" y="630" text-anchor="middle" class="n">18</text><text x="425" y="646" text-anchor="middle" class="p">PB0</text>
+    <text x="455" y="630" text-anchor="middle" class="n">19</text><text x="455" y="646" text-anchor="middle" class="p">PB1</text>
+    <text x="485" y="630" text-anchor="middle" class="n">20</text><text x="485" y="646" text-anchor="middle" class="p">PB2</text>
+    <text x="515" y="630" text-anchor="middle" class="n">21</text><text x="515" y="646" text-anchor="middle" class="p">PB10</text>
+    <text x="545" y="630" text-anchor="middle" class="n">22</text><text x="545" y="646" text-anchor="middle" class="p">PB11</text>
+    <text x="575" y="630" text-anchor="middle" class="n">23</text><text x="575" y="646" text-anchor="middle" class="p">VSS</text>
+    <text x="605" y="630" text-anchor="middle" class="n">24</text><text x="605" y="646" text-anchor="middle" class="p">VDD</text>
+  </g>
+
+  <!-- RIGHT pins 25-36 (bottom to top) -->
+  <g id="right">
+    <text x="660" y="548" class="n">25</text><text x="690" y="548" class="p">PB12</text>
+    <text x="660" y="518" class="n">26</text><text x="690" y="518" class="p">PB13</text>
+    <text x="660" y="488" class="n">27</text><text x="690" y="488" class="p">PB14</text>
+    <text x="660" y="458" class="n">28</text><text x="690" y="458" class="p">PB15</text>
+    <text x="660" y="428" class="n">29</text><text x="690" y="428" class="p">PA8</text>
+    <text x="660" y="398" class="n">30</text><text x="690" y="398" class="p">PA9</text>
+    <text x="660" y="368" class="n">31</text><text x="690" y="368" class="p">PA10</text>
+    <rect x="652" y="328" width="200" height="28" rx="4" class="can0"/>
+    <text x="660" y="348" class="n">32</text><text x="690" y="348" class="p">PA11 = CAN_RX ÿ§</text>
+    <rect x="652" y="298" width="200" height="28" rx="4" class="can0"/>
+    <text x="660" y="318" class="n">33</text><text x="690" y="318" class="p">PA12 = CAN_TX ÿ§</text>
+    <rect x="652" y="268" width="175" height="28" rx="4" class="swd"/>
+    <text x="660" y="288" class="n">34</text><text x="690" y="288" class="p">PA13 SWDIO</text>
+    <text x="660" y="248" class="n">35</text><text x="690" y="248" class="p">VSS</text>
+    <text x="660" y="218" class="n">36</text><text x="690" y="218" class="p">VDD</text>
+  </g>
+
+  <!-- TOP pins 37-48 (right to left) -->
+  <g id="top">
+    <rect x="575" y="145" width="70" height="42" rx="4" class="swd"/>
+    <text x="610" y="162" text-anchor="middle" class="n">37</text>
+    <text x="610" y="178" text-anchor="middle" class="p">PA14</text>
+    <text x="610" y="192" text-anchor="middle" class="p">SWCLK</text>
+
+    <text x="545" y="168" text-anchor="middle" class="n">38</text><text x="545" y="184" text-anchor="middle" class="p">PA15</text>
+    <text x="515" y="168" text-anchor="middle" class="n">39</text><text x="515" y="184" text-anchor="middle" class="p">PB3</text>
+    <text x="485" y="168" text-anchor="middle" class="n">40</text><text x="485" y="184" text-anchor="middle" class="p">PB4</text>
+    <text x="455" y="168" text-anchor="middle" class="n">41</text><text x="455" y="184" text-anchor="middle" class="p">PB5</text>
+    <text x="425" y="168" text-anchor="middle" class="n">42</text><text x="425" y="184" text-anchor="middle" class="p">PB6</text>
+    <text x="395" y="168" text-anchor="middle" class="n">43</text><text x="395" y="184" text-anchor="middle" class="p">PB7</text>
+    <text x="365" y="168" text-anchor="middle" class="n">44</text><text x="365" y="184" text-anchor="middle" class="p">BOOT0</text>
+
+    <rect x="295" y="145" width="55" height="42" rx="4" class="can1"/>
+    <text x="322" y="162" text-anchor="middle" class="n">45</text>
+    <text x="322" y="178" text-anchor="middle" class="p">PB8</text>
+    <text x="322" y="192" text-anchor="middle" class="p">CAN_RX</text>
+
+    <rect x="240" y="145" width="55" height="42" rx="4" class="can1"/>
+    <text x="267" y="162" text-anchor="middle" class="n">46</text>
+    <text x="267" y="178" text-anchor="middle" class="p">PB9</text>
+    <text x="267" y="192" text-anchor="middle" class="p">CAN_TX</text>
+
+    <text x="215" y="168" text-anchor="middle" class="n">47</text><text x="215" y="184" text-anchor="middle" class="p">VSS</text>
+    <text x="185" y="168" text-anchor="middle" class="n">48</text><text x="185" y="184" text-anchor="middle" class="p">VDD</text>
+  </g>
+
+  <!-- legend -->
+  <rect x="80" y="700" width="740" height="230" rx="8" class="box"/>
+  <text x="100" y="730" class="leg" style="font-weight:700">˛ã / ˘gπ’</text>
+  <rect x="100" y="750" width="28" height="18" class="can0"/>
+  <text x="140" y="764" class="leg">¢ÿ§ CAN  Pin32 PA11=RXPin33 PA12=TXpP(Ÿƒ	</text>
+  <rect x="100" y="785" width="28" height="18" class="can1"/>
+  <text x="140" y="799" class="leg">›Õ  CAN  Pin45 PB8=RXPin46 PB9=TX</text>
+  <rect x="100" y="820" width="28" height="18" class="swd"/>
+  <text x="140" y="834" class="leg">ˇSWD  Pin34 PA13=SWDIOPin37 PA14=SWCLKÁU„	</text>
+  <text x="100" y="870" class="leg">ûi˘gH~ØG“= œ = Pin1ç	ˆàpŒ CAN 6—h TXD/RXD ﬁK0 MCU</text>
+  <text x="100" y="898" class="leg">æn‚œHdocs/GD32F103CBT6-LQFP48-CAN-pinout.svg</text>
+</svg>
