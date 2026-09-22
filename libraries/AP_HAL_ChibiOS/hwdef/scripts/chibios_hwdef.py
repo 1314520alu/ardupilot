@@ -486,9 +486,13 @@ class ChibiOSHWDef(hwdef.HWDef):
             return self.get_AFIO()
 
         def get_CR_F1(self):
-            '''return CR FLAGS for STM32F1xx'''
-            # Check Speed
-            if self.sig_dir != "INPUT" or self.af is not None:
+            '''return CR FLAGS for STM32F1xx / GD32F1xx-compatible GPIO CRL/CRH'''
+            # F1 MODE bits: 00=input. PIN_SPEED_* sets MODE!=0 (output/AF-out).
+            # AF *inputs* (USART_RX, CAN_RX, …) must stay MODE=00. Adding SPEED
+            # turns them into OD outputs — breaks CAN RX on GD32F103 especially.
+            if self.sig_dir == "INPUT":
+                speed_str = ""
+            elif self.af is not None:
                 speed_values = ['SPEED_LOW', 'SPEED_MEDIUM', 'SPEED_HIGH']
                 v = 'SPEED_MEDIUM'
                 for e in self.extra:
@@ -500,8 +504,8 @@ class ChibiOSHWDef(hwdef.HWDef):
             else:
                 speed_str = ""
             if self.af is not None:
-                if self.label.endswith('_RX'):
-                    # uart RX is configured as a input, and can be pullup, pulldown or float
+                if self.label.endswith('_RX') or self.sig_dir == "INPUT":
+                    # AF RX / CAN_RX: floating or pull input (MODE=00)
                     if 'PULLUP' in self.extra or 'PULLDOWN' in self.extra:
                         v = 'PUD'
                     else:
@@ -1177,7 +1181,10 @@ class ChibiOSHWDef(hwdef.HWDef):
                 self.env_vars['CPU_FLAGS'].append('-DARM_MATH_CM7')
 
         if not self.mcu_series.startswith("STM32F1") and not self.is_bootloader_fw():
-            self.env_vars['CPU_FLAGS'].append('-u_printf_float')
+            # skip soft-float printf on <=128KB parts (saves ~10KB); keep ChibiOS float printf
+            flash_kb = self.get_config('FLASH_SIZE_KB', type=int, required=False)
+            if flash_kb is None or flash_kb > 128:
+                self.env_vars['CPU_FLAGS'].append('-u_printf_float')
             build_info['ENV_UDEFS'] = "-DCHPRINTF_USE_FLOAT=1"
 
         # setup build variables

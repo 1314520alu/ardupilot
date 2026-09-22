@@ -44,6 +44,16 @@
 #define STM32_PPRE2                         STM32_PPRE2_DIV2
 #define STM32_ADCPRE                        STM32_ADCPRE_DIV4
 #define STM32_HPRE                          STM32_HPRE_DIV1
+#elif STM32_HSECLK == 12000000U
+/* 12 MHz HSE × 6 = 72 MHz SYSCLK */
+#define STM32_SW                            STM32_SW_PLL
+#define STM32_PLLSRC                        STM32_PLLSRC_HSE
+#define STM32_PLLXTPRE                      STM32_PLLXTPRE_DIV1
+#define STM32_PLLMUL_VALUE                  6
+#define STM32_PPRE1                         STM32_PPRE1_DIV2
+#define STM32_PPRE2                         STM32_PPRE2_DIV2
+#define STM32_ADCPRE                        STM32_ADCPRE_DIV4
+#define STM32_HPRE                          STM32_HPRE_DIV1
 #elif STM32_HSECLK == 16000000U
 #define STM32_SW                            STM32_SW_PLL
 #define STM32_PLLSRC                        STM32_PLLSRC_PREDIV1

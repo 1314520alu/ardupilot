@@ -9,6 +9,22 @@
 #define AP_RANGEFINDER_DEFAULT_ORIENTATION ROTATION_PITCH_270
 #endif
 
+#ifndef AP_RANGEFINDER_HIDE_UNUSED_PARAMS
+#define AP_RANGEFINDER_HIDE_UNUSED_PARAMS 0
+#endif
+
+#if AP_RANGEFINDER_HIDE_UNUSED_PARAMS
+#define RFND_GROUPINFO_OPT(name, idx, clazz, element, def) \
+    AP_GROUPINFO_FLAGS(name, idx, clazz, element, def, AP_PARAM_FLAG_HIDDEN)
+#define RFND_GROUPINFO_OPT_ENABLE(name, idx, clazz, element, def) \
+    AP_GROUPINFO_FLAGS(name, idx, clazz, element, def, AP_PARAM_FLAG_ENABLE | AP_PARAM_FLAG_HIDDEN)
+#else
+#define RFND_GROUPINFO_OPT(name, idx, clazz, element, def) \
+    AP_GROUPINFO(name, idx, clazz, element, def)
+#define RFND_GROUPINFO_OPT_ENABLE(name, idx, clazz, element, def) \
+    AP_GROUPINFO_FLAGS(name, idx, clazz, element, def, AP_PARAM_FLAG_ENABLE)
+#endif
+
 // table of user settable parameters
 const AP_Param::GroupInfo AP_RangeFinder_Params::var_info[] = {
     // @Param: TYPE
@@ -17,14 +33,14 @@ const AP_Param::GroupInfo AP_RangeFinder_Params::var_info[] = {
     // @SortValues: AlphabeticalZeroAtTop
     // @Values: 0:None,1:Analog,2:MaxbotixI2C,3:LidarLite-I2C,5:PWM,6:BBB-PRU,7:LightWareI2C,8:LightWareSerial,9:Bebop,10:MAVLink,11:USD1_Serial,12:LeddarOne,13:MaxbotixSerial,14:TeraRangerI2C,15:LidarLiteV3-I2C,16:VL53L0X or VL53L1X,17:NMEA,18:WASP-LRF,19:BenewakeTF02,20:Benewake-Serial,21:LidarLightV3HP,22:PWM,23:BlueRoboticsPing,24:DroneCAN,25:BenewakeTFminiPlus-I2C,26:LanbaoPSK-CM8JL65-CC5,27:BenewakeTF03,28:VL53L1X-ShortRange,29:LeddarVu8-Serial,30:HC-SR04,31:GYUS42v2,32:MSP,33:USD1_CAN,34:Benewake_CAN,35:TeraRangerSerial,36:Lua_Scripting,37:NoopLoop_TOFSense,38:NoopLoop_TOFSense_CAN,39:NRA24_CAN,40:NoopLoop_TOFSenseF_I2C,41:JRE_Serial,42:Ainstein_LR_D1,43:RDS02UF,44:HexsoonRadar,100:SITL
     // @User: Standard
-    AP_GROUPINFO_FLAGS("TYPE", 1, AP_RangeFinder_Params, type, 0, AP_PARAM_FLAG_ENABLE),
+    RFND_GROUPINFO_OPT_ENABLE("TYPE", 1, AP_RangeFinder_Params, type, 0),
 
     // @Param: PIN
     // @DisplayName: Rangefinder pin
     // @Description: Analog or PWM input pin that rangefinder is connected to. Analog RSSI or Airspeed ports can be used for Analog inputs (some autopilots provide others also), Non-IOMCU Servo/MotorOutputs can be used for PWM input when configured as "GPIOs". Values for some autopilots are given as examples. Search wiki for "Analog pins" for analog pin or "GPIOs", if PWM input type, to determine pin number.
     // @Values: -1:Not Used,11:Pixracer,13:Pixhawk ADC4,14:Pixhawk ADC3,15:Pixhawk ADC6/Pixhawk2 ADC,50:AUX1,51:AUX2,52:AUX3,53:AUX4,54:AUX5,55:AUX6,103:Pixhawk SBUS
     // @User: Standard
-    AP_GROUPINFO("PIN",     2, AP_RangeFinder_Params, pin, -1),
+    RFND_GROUPINFO_OPT("PIN",     2, AP_RangeFinder_Params, pin, -1),
 
     // @Param: SCALING
     // @DisplayName: Rangefinder scaling
@@ -32,7 +48,7 @@ const AP_Param::GroupInfo AP_RangeFinder_Params::var_info[] = {
     // @Units: m/V
     // @Increment: 0.001
     // @User: Standard
-    AP_GROUPINFO("SCALING", 3, AP_RangeFinder_Params, scaling, 3.0f),
+    RFND_GROUPINFO_OPT("SCALING", 3, AP_RangeFinder_Params, scaling, 3.0f),
 
     // @Param: OFFSET
     // @DisplayName: rangefinder offset
@@ -40,14 +56,14 @@ const AP_Param::GroupInfo AP_RangeFinder_Params::var_info[] = {
     // @Units: V
     // @Increment: 0.001
     // @User: Standard
-    AP_GROUPINFO("OFFSET",  4, AP_RangeFinder_Params, offset, 0.0f),
+    RFND_GROUPINFO_OPT("OFFSET",  4, AP_RangeFinder_Params, offset, 0.0f),
 
     // @Param: FUNCTION
     // @DisplayName: Rangefinder function
     // @Description: Control over what function is used to calculate distance. For a linear function, the distance is (voltage-offset)*scaling. For a inverted function the distance is (offset-voltage)*scaling. For a hyperbolic function the distance is scaling/(voltage-offset). The functions return the distance in meters.
     // @Values: 0:Linear,1:Inverted,2:Hyperbolic
     // @User: Standard
-    AP_GROUPINFO("FUNCTION", 5, AP_RangeFinder_Params, function, 0),
+    RFND_GROUPINFO_OPT("FUNCTION", 5, AP_RangeFinder_Params, function, 0),
 
     // @Param: MIN
     // @DisplayName: Rangefinder minimum distance
@@ -70,7 +86,7 @@ const AP_Param::GroupInfo AP_RangeFinder_Params::var_info[] = {
     // @Description: Digital pin that enables/disables rangefinder measurement for the pwm rangefinder. A value of -1 means no pin. If this is set, then the pin is set to 1 to enable the rangefinder and set to 0 to disable it. This is used to enable powersaving when out of range. Some common values are given, but see the Wiki's "GPIOs" page for how to determine the pin number for a given autopilot.
     // @Values: -1:Not Used,50:AUX1,51:AUX2,52:AUX3,53:AUX4,54:AUX5,55:AUX6,111:PX4 FMU Relay1,112:PX4 FMU Relay2,113:PX4IO Relay1,114:PX4IO Relay2,115:PX4IO ACC1,116:PX4IO ACC2
     // @User: Standard
-    AP_GROUPINFO("STOP_PIN", 8, AP_RangeFinder_Params, stop_pin, -1),
+    RFND_GROUPINFO_OPT("STOP_PIN", 8, AP_RangeFinder_Params, stop_pin, -1),
 
     // 9 was SETTLE
 
@@ -79,7 +95,7 @@ const AP_Param::GroupInfo AP_RangeFinder_Params::var_info[] = {
     // @Description: This parameter sets whether an analog rangefinder is ratiometric. Most analog rangefinders are ratiometric, meaning that their output voltage is influenced by the supply voltage. Some analog rangefinders (such as the SF/02) have their own internal voltage regulators so they are not ratiometric.
     // @Values: 0:No,1:Yes
     // @User: Standard
-    AP_GROUPINFO("RMETRIC", 10, AP_RangeFinder_Params, ratiometric, 1),
+    RFND_GROUPINFO_OPT("RMETRIC", 10, AP_RangeFinder_Params, ratiometric, 1),
 
     // @Param: PWRRNG
     // @DisplayName: Powersave range
@@ -87,7 +103,7 @@ const AP_Param::GroupInfo AP_RangeFinder_Params::var_info[] = {
     // @Units: m
     // @Range: 0 32767
     // @User: Standard
-    AP_GROUPINFO("PWRRNG", 11, AP_RangeFinder_Params, powersave_range, 0),
+    RFND_GROUPINFO_OPT("PWRRNG", 11, AP_RangeFinder_Params, powersave_range, 0),
 
     // @Param: GNDCLR
     // @DisplayName: Distance from the range finder to the ground
@@ -129,14 +145,14 @@ const AP_Param::GroupInfo AP_RangeFinder_Params::var_info[] = {
     // @Range: -5 5
     // @Increment: 0.01
     // @User: Advanced
-    AP_GROUPINFO("POS", 49, AP_RangeFinder_Params, pos_offset, 0.0f),
+    RFND_GROUPINFO_OPT("POS", 49, AP_RangeFinder_Params, pos_offset, 0.0f),
 
     // @Param: ORIENT
     // @DisplayName: Rangefinder orientation
     // @Description: Orientation of rangefinder
     // @Values: 0:Forward, 1:Forward-Right, 2:Right, 3:Back-Right, 4:Back, 5:Back-Left, 6:Left, 7:Forward-Left, 24:Up, 25:Down
     // @User: Advanced
-    AP_GROUPINFO("ORIENT", 53, AP_RangeFinder_Params, orientation, AP_RANGEFINDER_DEFAULT_ORIENTATION),
+    RFND_GROUPINFO_OPT("ORIENT", 53, AP_RangeFinder_Params, orientation, AP_RANGEFINDER_DEFAULT_ORIENTATION),
 
     AP_GROUPEND
 };

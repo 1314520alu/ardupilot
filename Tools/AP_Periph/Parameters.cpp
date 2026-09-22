@@ -55,6 +55,10 @@ extern const AP_HAL::HAL &hal;
 #define HAL_PERIPH_EFI_BAUDRATE_DEFAULT 115200
 #endif
 
+#ifndef HAL_CAN_BAUDRATE_DEFAULT
+#define HAL_CAN_BAUDRATE_DEFAULT 1000000
+#endif
+
 #ifndef HAL_DEFAULT_MAV_SYSTEM_ID
 #define MAV_SYSTEM_ID 3
 #else
@@ -73,6 +77,27 @@ extern const AP_HAL::HAL &hal;
 #define AP_PERIPH_PROBE_CONTINUOUS 0
 #endif
 
+#ifndef AP_PERIPH_HIDE_INTERNAL_PARAMS
+#define AP_PERIPH_HIDE_INTERNAL_PARAMS 0
+#endif
+
+#ifndef HAL_PERIPH_RANGEFINDER_MAX_RATE_DEFAULT
+#define HAL_PERIPH_RANGEFINDER_MAX_RATE_DEFAULT 50
+#endif
+
+#if AP_PERIPH_HIDE_INTERNAL_PARAMS
+// Same as GSCALAR/GARRAY but not shown in DroneCAN GUI / param download
+#define GSCALAR_OPT(v, name, def) \
+    { name, &AP_PARAM_VEHICLE_NAME.g.v, {def_value : def}, AP_PARAM_FLAG_HIDDEN, \
+      Parameters::k_param_ ## v, AP_PARAM_VEHICLE_NAME.g.v.vtype }
+#define GARRAY_OPT(v, index, name, def) \
+    { name, &AP_PARAM_VEHICLE_NAME.g.v[index], {def_value : def}, AP_PARAM_FLAG_HIDDEN, \
+      Parameters::k_param_ ## v ## index, AP_PARAM_VEHICLE_NAME.g.v[index].vtype }
+#else
+#define GSCALAR_OPT(v, name, def) GSCALAR(v, name, def)
+#define GARRAY_OPT(v, index, name, def) GARRAY(v, index, name, def)
+#endif
+
 /*
  *  AP_Periph parameter definitions
  *
@@ -83,7 +108,7 @@ const AP_Param::Info AP_Periph_FW::var_info[] = {
     // @DisplayName: Eeprom format version number
     // @Description: This value is incremented when changes are made to the eeprom format
     // @User: Advanced
-    GSCALAR(format_version,         "FORMAT_VERSION", 0),
+    GSCALAR_OPT(format_version,         "FORMAT_VERSION", 0),
 
     // @Param: CAN_NODE
     // @DisplayName: DroneCAN node ID used by this node on all networks
@@ -99,7 +124,7 @@ const AP_Param::Info AP_Periph_FW::var_info[] = {
     // @Range: 10000 1000000
     // @User: Advanced
     // @RebootRequired: True
-    GARRAY(can_baudrate,     0, "CAN_BAUDRATE", 1000000),
+    GARRAY(can_baudrate,     0, "CAN_BAUDRATE", HAL_CAN_BAUDRATE_DEFAULT),
 
 #if AP_CAN_SLCAN_ENABLED
     // @Param: CAN_SLCAN_CPORT
@@ -133,7 +158,7 @@ const AP_Param::Info AP_Periph_FW::var_info[] = {
     // @Param: CAN2_BAUDRATE
     // @CopyFieldsFrom: CAN_BAUDRATE
     // @DisplayName: Bitrate of CAN2 interface
-    GARRAY(can_baudrate,     1, "CAN2_BAUDRATE", 1000000),
+    GARRAY(can_baudrate,     1, "CAN2_BAUDRATE", HAL_CAN_BAUDRATE_DEFAULT),
 
     // @Param: CAN2_PROTOCOL
     // @CopyFieldsFrom: CAN_PROTOCOL
@@ -150,7 +175,7 @@ const AP_Param::Info AP_Periph_FW::var_info[] = {
     // @Param: CAN3_BAUDRATE
     // @DisplayName: Bitrate of CAN3 interface
     // @CopyFieldsFrom: CAN_BAUDRATE
-    GARRAY(can_baudrate,    2, "CAN3_BAUDRATE", 1000000),
+    GARRAY(can_baudrate,    2, "CAN3_BAUDRATE", HAL_CAN_BAUDRATE_DEFAULT),
 
     // @Param: CAN3_PROTOCOL
     // @CopyFieldsFrom: CAN_PROTOCOL
@@ -203,7 +228,7 @@ const AP_Param::Info AP_Periph_FW::var_info[] = {
     // @Description: Debug
     // @Bitmask: 0:Show free stack space, 1:Auto Reboot after 15sec, 2:Enable sending stats
     // @User: Advanced
-    GSCALAR(debug, "DEBUG", 0),
+    GSCALAR_OPT(debug, "DEBUG", 0),
 
 
     // @Param: BRD_SERIAL_NUM
@@ -309,7 +334,7 @@ const AP_Param::Info AP_Periph_FW::var_info[] = {
     // @Increment: 1
     // @User: Standard
     // @RebootRequired: True
-    GARRAY(rangefinder_baud, 0, "RNGFND_BAUDRATE", HAL_PERIPH_RANGEFINDER_BAUDRATE_DEFAULT),
+    GARRAY_OPT(rangefinder_baud, 0, "RNGFND_BAUDRATE", HAL_PERIPH_RANGEFINDER_BAUDRATE_DEFAULT),
 
     // @Param: RNGFND_PORT
     // @DisplayName: Rangefinder Serial Port
@@ -318,7 +343,7 @@ const AP_Param::Info AP_Periph_FW::var_info[] = {
     // @Increment: 1
     // @User: Advanced
     // @RebootRequired: True
-    GARRAY(rangefinder_port, 0, "RNGFND_PORT", AP_PERIPH_RANGEFINDER_PORT_DEFAULT),
+    GARRAY_OPT(rangefinder_port, 0, "RNGFND_PORT", AP_PERIPH_RANGEFINDER_PORT_DEFAULT),
 
 #if RANGEFINDER_MAX_INSTANCES > 1
     // @Param: RNGFND2_BAUDRATE
@@ -341,13 +366,13 @@ const AP_Param::Info AP_Periph_FW::var_info[] = {
 #endif
 
     // @Param: RNGFND_MAX_RATE
-    // @DisplayName: Rangefinder max rate
-    // @Description: This is the maximum rate we send rangefinder data in Hz. Zero means no limit
+    // @DisplayName: Rangefinder output rate
+    // @Description: Maximum rate for publishing rangefinder (obstacle avoidance) data over DroneCAN in Hz. Zero means no limit
     // @Units: Hz
     // @Range: 0 200
     // @Increment: 1
-    // @User: Advanced
-    GSCALAR(rangefinder_max_rate, "RNGFND_MAX_RATE", 50),
+    // @User: Standard
+    GSCALAR(rangefinder_max_rate, "RNGFND_MAX_RATE", HAL_PERIPH_RANGEFINDER_MAX_RATE_DEFAULT),
     
     // Rangefinder driver
     // @Group: RNGFND
@@ -698,7 +723,7 @@ const AP_Param::Info AP_Periph_FW::var_info[] = {
     // @Description: Bitmask of AP Periph Options
     // @Bitmask: 0: Enable continuous sensor probe
     // @User: Standard
-    GSCALAR(options, "OPTIONS", AP_PERIPH_PROBE_CONTINUOUS),
+    GSCALAR_OPT(options, "OPTIONS", AP_PERIPH_PROBE_CONTINUOUS),
 
 #if AP_PERIPH_RPM_STREAM_ENABLED
     // @Param: RPM_MSG_RATE

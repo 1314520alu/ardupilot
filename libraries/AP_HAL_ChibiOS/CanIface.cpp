@@ -927,6 +927,9 @@ bool CANIface::init(const uint32_t bitrate, const CANIface::OperatingMode mode)
                 ((timings.bs1 & 15U) << 16) |
                 ((timings.bs2 & 7U)  << 20) |
                 (timings.prescaler & 1023U) |
+#if defined(HAL_CAN_LOOPBACK_DEBUG) && HAL_CAN_LOOPBACK_DEBUG
+                bxcan::BTR_LBKM |  // internal loopback: no transceiver/bus needed
+#endif
                 ((mode == SilentMode) ? bxcan::BTR_SILM : 0);
 
     can_->IER = bxcan::IER_TMEIE |   // TX mailbox empty
