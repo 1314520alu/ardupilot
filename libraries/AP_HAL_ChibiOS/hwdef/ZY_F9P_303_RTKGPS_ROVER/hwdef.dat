@@ -1,0 +1,15 @@
+# ZY F9P RTK GPS — Moving Baseline ROVER / 移动站 (GPS_TYPE=18)
+# Flash this on the Rover-antenna F303 node.
+
+include ../ZY_F9P_303_RTKGPS/hwdef.inc
+
+define CAN_APP_NODE_NAME "org.ardupilot.ZY_F9P_Rover"
+define HAL_CAN_DEFAULT_NODE_ID 30
+# 30 < Base(40): FC sorts larger node_id first → GPS1 tends to pick Base when OVRIDE=0
+
+# uBlox Moving Baseline Rover
+define HAL_GPS1_TYPE_DEFAULT 18
+# GPS+Galileo+BeiDou+GLONASS. Do not add QZSS (that would be 109).
+define HAL_GPS1_GNSS_MODE_DEFAULT 77
+# AP_Periph.cpp uses this in #if; 0 keeps the F9P debug prints out.
+define AP_PERIPH_GPS_DEBUG_ENABLED 0

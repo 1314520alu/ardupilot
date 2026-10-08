@@ -36,32 +36,30 @@
 | 天线 | 同型号、同高、同朝向；基线建议 **≥ 50 cm** |
 | CAN | 两端 120Ω；建议 **500k 或 1M**（全机一致） |
 
-## 3. 编译与刷写
+## 3. 编译与刷写（两套固件）
+
+| 板目标 | 角色 | GPS_TYPE | 默认 CAN 名 / Node ID |
+|--------|------|----------|------------------------|
+| `ZY_F9P_303_RTKGPS_BASE` | Base / 基站天线 | **17** | `org.ardupilot.ZY_F9P_Base` / 40 |
+| `ZY_F9P_303_RTKGPS_ROVER` | Rover / 移动站 | **18** | `org.ardupilot.ZY_F9P_Rover` / 30 |
 
 ```bash
-./waf configure --board ZY_F9P_303_RTKGPS
-./waf AP_Periph
-# 产物：build/ZY_F9P_303_RTKGPS/bin/AP_Periph.bin (.apj)
+./waf configure --board ZY_F9P_303_RTKGPS_BASE && ./waf AP_Periph
+./waf configure --board ZY_F9P_303_RTKGPS_ROVER && ./waf AP_Periph
 ```
 
-- Board ID：`AP_HW_ZY_F9P_303_RTKGPS` = **6901**
-- CAN 节点名：`org.ardupilot.ZY_F9P_303_RTKGPS`
-- 两颗节点刷 **同一固件**，用参数区分 Base / Rover
+- Board ID：`6901`（Base/Rover 相同，共用 bootloader）
+- 天线 A 节点刷 **BASE**，天线 B 节点刷 **ROVER**（勿对调）
 
-## 4. 节点参数（Periph）
+## 4. 节点参数（Periph，固件已写死）
 
-上电默认（代码写入，无需 defaults.parm）：
-
-| 参数 | 默认 | 说明 |
-|------|------|------|
-| `GPS_TYPE` | **18**（Rover） | Base 天线节点改为 **17** |
-| `GPS_DRV_OPTIONS` | **1** | bit0 = UART2 传 RTCM |
-| `GPS1_RATE_MS` | **200** | 5 Hz |
-| `GPS1_GNSS_MODE` | **77** | GPS+Galileo+Beidou+QZSS |
-| `GPS_AUTO_CONFIG` | **1** | 自动 VALSET |
-
-**Base 节点**：DroneCAN → 该节点 `GPS_TYPE = 17` → 重启。  
-**Rover 节点**：保持 `18`。
+| 参数 | Base | Rover | 说明 |
+|------|------|-------|------|
+| `GPS1_TYPE` / `GPS_TYPE` | **17** | **18** | MB Base / Rover |
+| `GPS_DRV_OPTIONS` | **1** | **1** | bit0 = UART2 传 RTCM |
+| `GPS1_RATE_MS` | **200** | **200** | 5 Hz |
+| `GPS1_GNSS_MODE` | **77** | **77** | GPS+Galileo+Beidou+GLONASS |
+| `GPS_AUTO_CONFIG` | **1** | **1** | 自动 VALSET |
 
 ## 5. 飞控参数
 

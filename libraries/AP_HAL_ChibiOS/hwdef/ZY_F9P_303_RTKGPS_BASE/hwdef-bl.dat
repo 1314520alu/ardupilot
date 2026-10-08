@@ -1,0 +1,3 @@
+# ZY F9P RTK GPS — Moving Baseline BASE bootloader (same PCB as Rover)
+
+include ../ZY_F9P_303_RTKGPS/hwdef-bl.dat
