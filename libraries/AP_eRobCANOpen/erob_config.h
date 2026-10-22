@@ -40,6 +40,16 @@
 #define EROB_BOOT_TIMEOUT_MS 2000u
 #endif
 
+/* Manual §5.2.1: output encoder counts per revolution. */
+#ifndef EROB_PLUS_PER_REV
+#define EROB_PLUS_PER_REV 524288
+#endif
+
+/* Consecutive servo axes on one exclusive eRob CAN driver. One SYNC producer. */
+#ifndef EROB_MAX_AXES
+#define EROB_MAX_AXES 6
+#endif
+
 /* HAL iface for EROB_CAN_BUS_INDEX. CAN2 -> 1. Do not use 0 (that is CAN1). */
 static inline unsigned erob_hal_can_iface(void)
 {

@@ -19,6 +19,7 @@
 
 #include <AP_CANManager/AP_CANManager.h>
 #include <GCS_MAVLink/GCS.h>
+#include <SRV_Channel/SRV_Channel.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -28,12 +29,40 @@ extern const AP_HAL::HAL& hal;
 const AP_Param::GroupInfo AP_eRobCANOpen::var_info[] = {
 
     // @Param: NODE
-    // @DisplayName: eRob CAN node id
-    // @Description: Node-ID of the eRob on this driver. The driver owns the whole iface. NMT, SYNC and this node's PDO, SDO, EMCY and heartbeat are the only frames it uses. Other frames on that port are discarded.
+    // @DisplayName: eRob CAN first node
+    // @Description: Node-ID of the first eRob servo on this driver. Further axes use the next Node-IDs. The driver owns the whole iface. Only NMT, SYNC and these nodes' PDO, SDO, EMCY and heartbeat are used. Other frames on that port are discarded.
     // @Range: 1 127
-    // @User: Advanced
+    // @User: Standard
     // @RebootRequired: True
     AP_GROUPINFO("NODE", 1, AP_eRobCANOpen, _node_id, 1),
+
+    // @Param: SRV
+    // @DisplayName: eRob CAN first servo
+    // @Description: First SERVO output channel for this driver, numbered like SERVO1. Axis 0 uses this channel, axis 1 uses the next channel, and so on. 0 leaves the servos at the position captured when they were enabled.
+    // @Range: 0 32
+    // @User: Standard
+    // @RebootRequired: True
+    AP_GROUPINFO("SRV", 2, AP_eRobCANOpen, _srv_first, 0),
+
+    // @Param: NUM
+    // @DisplayName: eRob CAN servo count
+    // @Description: Number of consecutive eRob servos. Node-IDs and SERVO channels both increase by one per axis. One driver sends a single SYNC for the group. CiA402 CSP is the only mode.
+    // @Range: 1 6
+    // @User: Standard
+    // @RebootRequired: True
+    AP_GROUPINFO("NUM", 3, AP_eRobCANOpen, _axis_count, 1),
+
+    // @Param: MIN
+    // @DisplayName: eRob CAN position min
+    // @Description: CSP target in plus when the servo output is at SERVOx_MIN. All axes share this end. 524288 plus is one output revolution.
+    // @User: Advanced
+    AP_GROUPINFO("MIN", 4, AP_eRobCANOpen, _pos_min, 0),
+
+    // @Param: MAX
+    // @DisplayName: eRob CAN position max
+    // @Description: CSP target in plus when the servo output is at SERVOx_MAX. All axes share this end. 524288 plus is one output revolution. Per-axis travel is not separate yet.
+    // @User: Advanced
+    AP_GROUPINFO("MAX", 5, AP_eRobCANOpen, _pos_max, 524288),
 
     AP_GROUPEND
 };
@@ -43,6 +72,9 @@ AP_eRobCANOpen::AP_eRobCANOpen()
     AP_Param::setup_object_defaults(this, var_info);
     _bus.drv = this;
     _active_node = 1;
+    _num_axes = 0;
+    _srv_base = 0;
+    _started = false;
 }
 
 uint8_t AP_eRobCANOpen::node_id() const
@@ -90,6 +122,89 @@ bool AP_eRobCANOpen::add_interface(AP_HAL::CANIface* can_iface)
 #endif
 }
 
+void AP_eRobCANOpen::setup_axes()
+{
+    int16_t node = _node_id.get();
+    int16_t num = _axis_count.get();
+    int16_t srv = _srv_first.get();
+
+    if (node < 1 || node > 127) {
+        node = 1;
+    }
+    if (num < 1) {
+        num = 1;
+    }
+    if (num > EROB_MAX_AXES) {
+        num = EROB_MAX_AXES;
+    }
+    if (node + num - 1 > 127) {
+        num = 128 - node;
+    }
+    if (srv < 0 || srv > NUM_SERVO_CHANNELS) {
+        srv = 0;
+    }
+
+    _active_node = uint8_t(node);
+    for (uint8_t i = 0; i < uint8_t(num); i++) {
+        _axis[i].node = uint8_t(node + i);
+        _axis[i].tried = false;
+        _axis[i].reported = false;
+        _axis[i].last_try_ms = 0;
+        co_master_init(&_axis[i].master, &_bus, _axis[i].node);
+        erob_init(&_axis[i].servo, &_axis[i].master);
+    }
+    // Publish after the axes exist. push_servos() runs on another thread.
+    _srv_base = uint8_t(srv);
+    _num_axes = uint8_t(num);
+}
+
+bool AP_eRobCANOpen::try_configure(uint8_t index, uint32_t now_ms)
+{
+    Axis &axis = _axis[index];
+    const erob_state_t st = erob_get_state(&axis.servo);
+    if (st == EROB_ST_ENABLED || st == EROB_ST_ENABLE_SEQ || st == EROB_ST_FAULT) {
+        return false;
+    }
+    if (axis.tried && (now_ms - axis.last_try_ms) < 5000) {
+        return false;
+    }
+    axis.tried = true;
+    axis.last_try_ms = now_ms;
+    if (erob_configure_pdo_csp(&axis.servo) == 0) {
+        // One SYNC producer for the group. Slaves do not produce SYNC.
+        if (index != 0) {
+            co_master_set_sync(&axis.master, false, 0);
+        }
+        (void)erob_enable(&axis.servo);
+    } else {
+        GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "eRob CAN: node %u configure failed",
+                      unsigned(axis.node));
+    }
+    return true;
+}
+
+void AP_eRobCANOpen::poll_axes()
+{
+    can_frame_t fr;
+    while (hal_recv(&fr, 0) == 0) {
+        uint8_t index = 0;
+        if (id_for_axis(uint16_t(fr.id), index)) {
+            co_master_handle_frame(&_axis[index].master, &fr);
+        }
+    }
+    for (uint8_t i = 0; i < _num_axes; i++) {
+        erob_poll_motion(&_axis[i].servo);
+        if (!_axis[i].reported && erob_get_state(&_axis[i].servo) == EROB_ST_ENABLED) {
+            _axis[i].reported = true;
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "eRob CAN: servo node %u enabled",
+                          unsigned(_axis[i].node));
+        }
+    }
+    if (_num_axes > 0) {
+        co_master_poll_sync(&_axis[0].master);
+    }
+}
+
 void AP_eRobCANOpen::init(uint8_t driver_index)
 {
     _driver_index = driver_index;
@@ -114,31 +229,16 @@ void AP_eRobCANOpen::loop()
     }
 
     _bus.drv = this;
-    co_master_init(&_master, &_bus, _active_node);
-    erob_init(&_servo, &_master);
+    setup_axes();
 
-    bool tried = false;
-    uint32_t last_try_ms = 0;
     while (true) {
-        const erob_state_t st = erob_get_state(&_servo);
         const uint32_t now = AP_HAL::millis();
-        if (st != EROB_ST_ENABLED && st != EROB_ST_ENABLE_SEQ && st != EROB_ST_FAULT) {
-            if (!tried || (now - last_try_ms) >= 5000) {
-                tried = true;
-                last_try_ms = now;
-                if (erob_configure_pdo_csp(&_servo) == 0) {
-                    (void)erob_enable(&_servo);
-                } else {
-                    GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "eRob CAN: node %u configure failed",
-                                  unsigned(_active_node));
-                }
+        for (uint8_t i = 0; i < _num_axes; i++) {
+            if (try_configure(i, now)) {
+                break;
             }
         }
-        erob_poll(&_servo);
-        if (!_reported && erob_get_state(&_servo) == EROB_ST_ENABLED) {
-            _reported = true;
-            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "eRob CAN: node %u enabled", unsigned(_active_node));
-        }
+        poll_axes();
         hal.scheduler->delay_microseconds(1000);
     }
 }
@@ -152,7 +252,18 @@ bool AP_eRobCANOpen::frame_for_master(const AP_HAL::CANFrame &rx, can_frame_t *f
     }
     len = rx.dlc > 8 ? 8 : rx.dlc;
     const uint16_t std_id = uint16_t(rx.id & AP_HAL::CANFrame::MaskStdID);
-    if (!erob_id_is_reserved(std_id, _active_node)) {
+    bool reserved = false;
+    if (_num_axes == 0) {
+        reserved = erob_id_is_reserved(std_id, _active_node);
+    } else {
+        for (uint8_t i = 0; i < _num_axes; i++) {
+            if (erob_id_is_reserved(std_id, _axis[i].node)) {
+                reserved = true;
+                break;
+            }
+        }
+    }
+    if (!reserved) {
         return false;
     }
     memset(fr, 0, sizeof(*fr));
@@ -164,19 +275,70 @@ bool AP_eRobCANOpen::frame_for_master(const AP_HAL::CANFrame &rx, can_frame_t *f
     return true;
 }
 
+bool AP_eRobCANOpen::id_for_axis(uint16_t std_id, uint8_t &index) const
+{
+    if (std_id == CO_COB_NMT || std_id == CO_COB_SYNC) {
+        return false;
+    }
+    for (uint8_t i = 0; i < _num_axes; i++) {
+        if (erob_id_is_reserved(std_id, _axis[i].node)) {
+            index = i;
+            return true;
+        }
+    }
+    return false;
+}
+
+void AP_eRobCANOpen::push_servos()
+{
+    if (_num_axes == 0 || _srv_base == 0) {
+        return;
+    }
+    const uint32_t disabled = SRV_Channels::get_disabled_channel_mask();
+    for (uint8_t i = 0; i < _num_axes; i++) {
+        const uint8_t chan = uint8_t(_srv_base - 1 + i);
+        if (chan >= NUM_SERVO_CHANNELS) {
+            break;
+        }
+        if ((disabled & (1U << chan)) != 0) {
+            continue;
+        }
+        SRV_Channel *ch = SRV_Channels::srv_channel(chan);
+        if (ch == nullptr) {
+            continue;
+        }
+        const uint16_t pwm = ch->get_output_pwm();
+        if (pwm == 0) {
+            continue;
+        }
+        const int32_t plus = erob_pwm_to_plus(pwm, ch->get_output_min(), ch->get_output_max(),
+                                              _pos_min.get(), _pos_max.get());
+        erob_set_target_pos(&_axis[i].servo, plus);
+    }
+}
+
 void AP_eRobCANOpen::set_target_pos(int32_t plus)
 {
-    erob_set_target_pos(&_servo, plus);
+    if (_num_axes == 0) {
+        return;
+    }
+    erob_set_target_pos(&_axis[0].servo, plus);
 }
 
 int32_t AP_eRobCANOpen::get_position() const
 {
-    return erob_get_position(&_servo);
+    if (_num_axes == 0) {
+        return 0;
+    }
+    return erob_get_position(&_axis[0].servo);
 }
 
 uint16_t AP_eRobCANOpen::get_statusword() const
 {
-    return erob_get_statusword(&_servo);
+    if (_num_axes == 0) {
+        return 0;
+    }
+    return erob_get_statusword(&_axis[0].servo);
 }
 
 int AP_eRobCANOpen::hal_send(const can_frame_t *fr)

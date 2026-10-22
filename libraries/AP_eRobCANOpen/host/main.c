@@ -138,6 +138,18 @@ int main(void)
     expect_true(!erob_id_is_reserved(0x123, node), "0x123 is not reserved");
     expect_true(!erob_id_is_reserved(0x181, 2), "another node's TPDO is not reserved");
     expect_true(erob_id_is_reserved(0x080, 2), "SYNC stays reserved for any node");
+    expect_true(erob_pwm_to_plus(1000, 1000, 2000, 0, EROB_PLUS_PER_REV) == 0,
+                "servo min maps to plus min");
+    expect_true(erob_pwm_to_plus(2000, 1000, 2000, 0, EROB_PLUS_PER_REV) == EROB_PLUS_PER_REV,
+                "servo max maps to plus max");
+    expect_true(erob_pwm_to_plus(1500, 1000, 2000, 0, EROB_PLUS_PER_REV) == EROB_PLUS_PER_REV / 2,
+                "servo mid maps to half a revolution");
+    expect_true(erob_pwm_to_plus(1500, 1000, 2000, -1000, 1000) == 0,
+                "servo mid maps to the middle of a signed span");
+    expect_true(erob_pwm_to_plus(500, 1000, 2000, 0, 100) == 0,
+                "pwm below servo min clamps");
+    expect_true(erob_pwm_to_plus(1500, 1500, 1500, 10, 20) == 10,
+                "equal pwm ends do not divide");
 
     co_master_init(&master, bus, node);
     erob_init(&servo, &master);

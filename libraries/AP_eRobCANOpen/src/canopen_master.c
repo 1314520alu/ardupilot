@@ -17,7 +17,7 @@
 #error "AP_eRobCANOpen SDO payloads are native little-endian"
 #endif
 
-static void co_master_handle(canopen_master_t *m, const can_frame_t *rx)
+void co_master_handle_frame(canopen_master_t *m, const can_frame_t *rx)
 {
     uint32_t id;
 
@@ -142,7 +142,7 @@ static int sdo_xfer(canopen_master_t *m, uint8_t cs, uint16_t index, uint8_t sub
             continue;
         }
         if (rx.is_ext || rx.id != (uint32_t)(CO_COB_SDO_TX_BASE + m->node_id)) {
-            co_master_handle(m, &rx);
+            co_master_handle_frame(m, &rx);
             continue;
         }
         if (rx.dlc < 4) {
@@ -209,7 +209,7 @@ int co_master_wait_boot(canopen_master_t *m, uint32_t timeout_ms)
     while (!m->boot_seen) {
         can_frame_t rx;
         if (can_bus_recv(m->bus, &rx, 10) == 0) {
-            co_master_handle(m, &rx);
+            co_master_handle_frame(m, &rx);
         }
         if (m->boot_seen) {
             return 0;
@@ -225,7 +225,7 @@ void co_master_poll_rx(canopen_master_t *m)
 {
     can_frame_t rx;
     while (can_bus_recv(m->bus, &rx, 0) == 0) {
-        co_master_handle(m, &rx);
+        co_master_handle_frame(m, &rx);
     }
 }
 

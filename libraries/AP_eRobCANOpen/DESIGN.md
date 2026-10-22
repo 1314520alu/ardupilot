@@ -13,6 +13,7 @@
 | 比特率 | 1 Mbps（`CAN_P2_BITRATE`） |
 | 周期 | 4 ms（4000 µs） |
 | 协议号 | `CAN_Dx_PROTOCOL = 15`（`eRobCAN`，显示 `eRob CAN`） |
+| 用途 | 多轴舵机，CiA402 CSP。不是通用 CANopen 工具 |
 | CAN1 | DroneCAN，本模块不占用 |
 | CAN2 | 协议 15（eRob CAN）时整口归该主站 |
 
@@ -123,15 +124,25 @@ RxPDO1：
 
 运行模式 `0x6060 = 8` 为 CSP。切换到位置模式前把实际位置抄到目标位置（手册 §5.3.2）。
 
-## 7. 总线
+## 7. 舵机输出
+
+`SRV_Channels::push()` 在协议为 eRob CAN 时调用 `push_servos()`。
+
+1. `CAN_Dx_EROB_SRV` 为 0 时不改目标。非 0 时是第一路 SERVO 通道号，和 `SERVO1` 的编号一致。
+2. `CAN_Dx_EROB_NUM` 路连续通道对应从 `CAN_Dx_EROB_NODE` 起的连续 Node-ID，最多 6 路。
+3. PWM 用该通道自己的 `SERVOx_MIN` / `SERVOx_MAX`。线性结果夹在 `CAN_Dx_EROB_MIN` 和 `CAN_Dx_EROB_MAX` 之间，单位 plus。PWM 仍为 0，或该通道在舵机禁用掩码里时，保持上一次目标。
+4. 各轴共用一组 MIN/MAX。每轴单独行程是后续项。
+5. 输出反转沿用 ArduPilot 舵机通道自己的反向，驱动不再翻一次。
+
+## 8. 总线
 
 1. 一个 `CAN_Dx_PROTOCOL` 独占该驱动。15 是 eRob CAN，1 是 DroneCAN。不要在同一驱动上再挂第二种协议。
 2. 只发 11-bit 帧。扩展帧、CAN FD 帧，以及不属于本节点 CANopen 的 11-bit 帧，读到后丢掉。
 3. 主站使用 NMT `0x000`、SYNC `0x080`，以及本 Node-ID 的 EMCY、四个 PDO、SDO 和心跳。
 4. `add_interface()` 拒绝 iface 1 以外的口，所以 CAN1 上不会调用 `can_bus_send`。
-5. 多轴时全总线只有一个 SYNC 生产者。一个驱动实例只服务一个 Node-ID。
+5. 多轴时全总线只有一个 SYNC 生产者。第一轴发出 SYNC，其余轴不发。
 
-## 8. 仍要客户确认
+## 9. 仍要客户确认
 
 - 出厂 Node-ID，以及是不是已经是 1 Mbps
 - 是否接受驱动按 §5.5.1 强制重映射（需要 EDS 或现场读回）

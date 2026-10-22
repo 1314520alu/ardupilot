@@ -10,6 +10,7 @@
 #include "../erob_servo.h"
 #include "../erob_config.h"
 
+#include <stdint.h>
 #include <string.h>
 
 static void on_tpdo(void *user, uint8_t pdo_num, const uint8_t *data, uint8_t dlc)
@@ -208,12 +209,11 @@ static const uint16_t enable_cw[] = {
     EROB_CW_ENABLE_OP
 };
 
-void erob_poll(erob_servo_t *s)
+void erob_poll_motion(erob_servo_t *s)
 {
     uint32_t now;
     uint16_t sw;
 
-    co_master_poll_rx(s->co);
     now = can_bus_millis(s->co->bus);
     sw = s->statusword;
 
@@ -235,7 +235,6 @@ void erob_poll(erob_servo_t *s)
                 (void)send_cw_pos(s, EROB_CW_ENABLE_OP, s->hold_pos);
             }
         }
-        co_master_poll_sync(s->co);
         return;
     }
 
@@ -244,7 +243,6 @@ void erob_poll(erob_servo_t *s)
         if ((sw & EROB_SW_FAULT_BIT) != 0) {
             s->state = EROB_ST_FAULT;
             (void)send_cw_pos(s, EROB_CW_FAULT_RESET, s->hold_pos);
-            co_master_poll_sync(s->co);
             return;
         }
         if ((now - s->enable_done_ms) < EROB_POST_ENABLE_HOLDOFF_MS) {
@@ -252,8 +250,32 @@ void erob_poll(erob_servo_t *s)
         }
         (void)send_cw_pos(s, EROB_CW_ENABLE_OP, cmd);
     }
+}
 
+void erob_poll(erob_servo_t *s)
+{
+    co_master_poll_rx(s->co);
+    erob_poll_motion(s);
     co_master_poll_sync(s->co);
+}
+
+int32_t erob_pwm_to_plus(uint16_t pwm, uint16_t pwm_min, uint16_t pwm_max,
+                         int32_t plus_min, int32_t plus_max)
+{
+    int32_t span;
+    int32_t delta;
+
+    if (pwm_max <= pwm_min) {
+        return plus_min;
+    }
+    if (pwm < pwm_min) {
+        pwm = pwm_min;
+    } else if (pwm > pwm_max) {
+        pwm = pwm_max;
+    }
+    span = (int32_t)(pwm_max - pwm_min);
+    delta = (int32_t)(pwm - pwm_min);
+    return plus_min + (int32_t)(((int64_t)(plus_max - plus_min) * (int64_t)delta) / (int64_t)span);
 }
 
 erob_state_t erob_get_state(const erob_servo_t *s)

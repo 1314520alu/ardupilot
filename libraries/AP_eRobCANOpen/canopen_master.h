@@ -87,6 +87,7 @@ int co_rpdo_send(canopen_master_t *m, uint8_t pdo_num,
 /* Block until boot-up 0x700+id / 0x00, or timeout. Other frames are dispatched. */
 int co_master_wait_boot(canopen_master_t *m, uint32_t timeout_ms);
 
+void co_master_handle_frame(canopen_master_t *m, const can_frame_t *rx);
 void co_master_poll_rx(canopen_master_t *m);
 void co_master_poll_sync(canopen_master_t *m);
 

@@ -75,8 +75,18 @@ int erob_disable(erob_servo_t *s);
 void erob_set_target_pos(erob_servo_t *s, int32_t plus);
 void erob_set_target_vel(erob_servo_t *s, int32_t plus_per_s);
 
+/* CSP state machine and RPDO. Does not read the bus or emit SYNC. */
+void erob_poll_motion(erob_servo_t *s);
+
 /* Call on the CAN2 cycle: RX, RPDO, then SYNC. */
 void erob_poll(erob_servo_t *s);
+
+/*
+ * Map one servo PWM onto the CSP target, in plus.
+ * pwm_max <= pwm_min returns plus_min. pwm outside the PWM span is clamped.
+ */
+int32_t erob_pwm_to_plus(uint16_t pwm, uint16_t pwm_min, uint16_t pwm_max,
+                         int32_t plus_min, int32_t plus_max);
 
 erob_state_t erob_get_state(const erob_servo_t *s);
 uint16_t erob_get_statusword(const erob_servo_t *s);
