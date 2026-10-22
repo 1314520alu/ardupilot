@@ -161,13 +161,33 @@ int main(void)
                 "pwm below servo min clamps");
     expect_true(erob_pwm_to_plus(1500, 1500, 1500, 10, 20) == 10,
                 "equal pwm ends do not divide");
-    expect_true(near_f(erob_position_deg(0), 0.0f), "zero plus is zero degrees");
-    expect_true(near_f(erob_position_deg(EROB_PLUS_PER_REV), 360.0f),
+    expect_true(near_f(erob_position_deg(0, EROB_PLUS_PER_REV), 0.0f), "zero plus is zero degrees");
+    expect_true(near_f(erob_position_deg(EROB_PLUS_PER_REV, EROB_PLUS_PER_REV), 360.0f),
                 "one output revolution is 360 degrees");
-    expect_true(near_f(erob_position_deg(EROB_PLUS_PER_REV / 2), 180.0f),
+    expect_true(near_f(erob_position_deg(EROB_PLUS_PER_REV / 2, EROB_PLUS_PER_REV), 180.0f),
                 "half a revolution is 180 degrees");
-    expect_true(near_f(erob_output_rpm(EROB_PLUS_PER_REV), 60.0f),
+    expect_true(near_f(erob_output_rpm(EROB_PLUS_PER_REV, EROB_PLUS_PER_REV), 60.0f),
                 "one rev per second is 60 rpm");
+    expect_true(near_f(erob_position_deg(EROB_PLUS_PER_REV, 0), 360.0f),
+                "non-positive resolution uses 524288");
+    expect_true(near_f(erob_position_deg(1048576, 1048576), 360.0f),
+                "20-bit revolution is 360 degrees");
+    expect_true(near_f(erob_output_rpm(1048576, 1048576), 60.0f),
+                "20-bit rev per second is 60 rpm");
+    {
+        float d19 = erob_position_deg(43691, EROB_PLUS_PER_REV);
+        float d20 = erob_position_deg(87381, 1048576);
+        float e19 = d19 - 30.0f;
+        float e20 = d20 - 30.0f;
+        if (e19 < 0.0f) {
+            e19 = -e19;
+        }
+        if (e20 < 0.0f) {
+            e20 = -e20;
+        }
+        expect_true(e19 < 0.01f, "19-bit 30 degrees is 43691 plus");
+        expect_true(e20 < 0.01f, "20-bit 30 degrees is 87381 plus");
+    }
     expect_true(near_f(erob_current_a(9, 5000), 0.045f), "current uses rated mA");
     expect_true(near_f(erob_torque_nm(-7, 2000), -0.014f), "torque uses rated mNm");
     {
@@ -270,7 +290,8 @@ int main(void)
                     "TPDO current converts to amps");
         expect_true(near_f(erob_torque_nm(fb->torque_permille, fb->rated_torque_mNm), -0.014f),
                     "TPDO torque converts to Nm");
-        expect_true(near_f(erob_output_rpm(fb->vel_plus_s), erob_output_rpm(333)),
+        expect_true(near_f(erob_output_rpm(fb->vel_plus_s, EROB_PLUS_PER_REV),
+                           erob_output_rpm(333, EROB_PLUS_PER_REV)),
                     "TPDO velocity converts to output rpm");
         for (d = 0; d < 40; d++) {
             can_bus_stub_advance(50);

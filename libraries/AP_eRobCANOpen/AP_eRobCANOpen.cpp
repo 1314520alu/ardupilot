@@ -54,27 +54,35 @@ const AP_Param::GroupInfo AP_eRobCANOpen::var_info[] = {
 
     // @Param: MIN
     // @DisplayName: eRob CAN position min
-    // @Description: CSP target in plus when the servo output is at SERVOx_MIN. All axes share this end. 524288 plus is one output revolution.
+    // @Description: CSP target in plus when the servo output is at SERVOx_MIN. All axes share this end. One output revolution is RES counts, default 524288. This limit stays in plus.
     // @User: Advanced
     AP_GROUPINFO("MIN", 4, AP_eRobCANOpen, _pos_min, 0),
 
     // @Param: MAX
     // @DisplayName: eRob CAN position max
-    // @Description: CSP target in plus when the servo output is at SERVOx_MAX. All axes share this end. 524288 plus is one output revolution. Per-axis travel is not separate yet.
+    // @Description: CSP target in plus when the servo output is at SERVOx_MAX. All axes share this end. One output revolution is RES counts, default 524288. This limit stays in plus. Per-axis travel is not separate yet.
     // @User: Advanced
     AP_GROUPINFO("MAX", 5, AP_eRobCANOpen, _pos_max, 524288),
 
     // @Param: GEAR
     // @DisplayName: eRob CAN gear ratio
-    // @Description: Motor revolutions per output revolution. 0 leaves motor rpm invalid. Output rpm and output degrees do not use this. Typical ratios are 50, 100, 120 and 160. All axes on this driver share it.
+    // @Description: Motor turns per output revolution. 0 leaves motor rpm invalid. Output rpm and output degrees do not use this. On eRob142 a nameplate ratio of 120 is entered as 121 (ratio + 1). All axes on this driver share it.
     // @Range: 0 1000
     // @Increment: 1
     // @User: Standard
     AP_GROUPINFO("GEAR", 7, AP_eRobCANOpen, _gear, 0),
 
+    // @Param: RES
+    // @DisplayName: eRob CAN output counts per rev
+    // @Description: Output-encoder counts in one revolution. Converts 0x6064 to degrees and 0x606C to output rpm. Default 524288 is the 19-bit scale. A high-precision single-turn encoder may be 1048576. Turn the output one revolution and read 0x6064 before changing this. 0 uses 524288. MIN and MAX stay in plus and are not rewritten. All axes share it. Manual V1.9 has no 0x608F, so this is not read from the drive.
+    // @Range: 0 16777216
+    // @Increment: 1
+    // @User: Standard
+    AP_GROUPINFO("RES", 24, AP_eRobCANOpen, _pos_res, 524288),
+
     // @Param: SV1
     // @DisplayName: eRob CAN slot 1 servo
-    // @Description: Servo output number for slot 1, so SERVO this number drives ID1. 0 leaves the slot unused. If any SVn is non-zero, slots replace NODE and BM. If every SVn is 0, NODE plus BM is used. MIN, MAX and GEAR stay shared. A duplicate servo, a value outside 1..32, or a servo with ID 0 is skipped.
+    // @Description: Servo output number for slot 1, so SERVO this number drives ID1. 0 leaves the slot unused. If any SVn is non-zero, slots replace NODE and BM. If every SVn is 0, NODE plus BM is used. MIN, MAX, GEAR and RES stay shared. A duplicate servo, a value outside 1..32, or a servo with ID 0 is skipped.
     // @Range: 0 32
     // @User: Standard
     // @RebootRequired: True
@@ -456,6 +464,15 @@ bool AP_eRobCANOpen::try_configure(uint8_t index, uint32_t now_ms)
     return true;
 }
 
+int32_t AP_eRobCANOpen::counts_per_rev() const
+{
+    const int32_t res = _pos_res.get();
+    if (res <= 0) {
+        return EROB_PLUS_PER_REV;
+    }
+    return res;
+}
+
 bool AP_eRobCANOpen::axis_faulted(uint8_t index) const
 {
     const erob_servo_t &servo = _axis[index].servo;
@@ -521,6 +538,9 @@ void AP_eRobCANOpen::publish_feedback(uint8_t index, uint32_t now_ms)
     if (fb == nullptr || (fb->valid & EROB_FB_TPDO1) == 0) {
         return;
     }
+#if HAL_LOGGING_ENABLED || HAL_GCS_ENABLED
+    const int32_t res = counts_per_rev();
+#endif
 
 #if HAL_LOGGING_ENABLED
     if (AP::logger().logging_enabled() && (now_ms - axis.last_log_ms) >= 100) {
@@ -568,7 +588,7 @@ void AP_eRobCANOpen::publish_feedback(uint8_t index, uint32_t now_ms)
             const float nan = AP::logger().quiet_nanf();
             const float gear = _gear.get();
             const bool have_vel = (fb->valid & EROB_FB_TPDO3) != 0;
-            const float out_rpm = have_vel ? erob_output_rpm(fb->vel_plus_s) : nan;
+            const float out_rpm = have_vel ? erob_output_rpm(fb->vel_plus_s, res) : nan;
             const float motor_rpm = (have_vel && is_positive(gear)) ? out_rpm * gear : nan;
             const float amps = (have_vel && (fb->valid & EROB_FB_IRATED) != 0) ?
                                erob_current_a(fb->current_permille, fb->rated_current_mA) : nan;
@@ -580,8 +600,8 @@ void AP_eRobCANOpen::publish_feedback(uint8_t index, uint32_t now_ms)
             // @Field: TimeUS: Time since system startup
             // @Field: Ax: axis index on this driver
             // @Field: Sv: servo output number, SERVO1 is 1
-            // @Field: Deg: output position from 0x6064, degrees
-            // @Field: Rpm: output speed from 0x606C, rpm
+            // @Field: Deg: output position from 0x6064, degrees, using RES
+            // @Field: Rpm: output speed from 0x606C, rpm, using RES
             // @Field: Mrpm: motor rpm, output rpm times GEAR, invalid when GEAR is 0
             // @Field: Amp: current from 0x6078 and 0x6075, ampere
             // @Field: Nm: torque from 0x6077 and 0x6076, newton metre
@@ -595,7 +615,7 @@ void AP_eRobCANOpen::publish_feedback(uint8_t index, uint32_t now_ms)
                 AP_HAL::micros64(),
                 unsigned(index),
                 unsigned(servo_num),
-                erob_position_deg(fb->pos_actual),
+                erob_position_deg(fb->pos_actual, res),
                 out_rpm,
                 motor_rpm,
                 amps,
@@ -640,7 +660,7 @@ void AP_eRobCANOpen::publish_feedback(uint8_t index, uint32_t now_ms)
     erob_named(name, sizeof(name), servo_num, 'P');
     gcs().send_named_int(name, fb->pos_actual);
     erob_named(name, sizeof(name), servo_num, 'G');
-    gcs().send_named_float(name, erob_position_deg(fb->pos_actual));
+    gcs().send_named_float(name, erob_position_deg(fb->pos_actual, res));
     if ((fb->valid & EROB_FB_TPDO2) != 0) {
         erob_named(name, sizeof(name), servo_num, 'M');
         gcs().send_named_int(name, fb->motor_enc);
@@ -648,7 +668,7 @@ void AP_eRobCANOpen::publish_feedback(uint8_t index, uint32_t now_ms)
         gcs().send_named_int(name, fb->load_enc);
     }
     if ((fb->valid & EROB_FB_TPDO3) != 0) {
-        const float out_rpm = erob_output_rpm(fb->vel_plus_s);
+        const float out_rpm = erob_output_rpm(fb->vel_plus_s, res);
         const float gear = _gear.get();
         erob_named(name, sizeof(name), servo_num, 'S');
         gcs().send_named_int(name, fb->vel_plus_s);

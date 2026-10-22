@@ -74,6 +74,7 @@ private:
     void poll_axes();
     void warn_statusword_fault(uint8_t index, uint32_t now_ms);
     bool axis_faulted(uint8_t index) const;
+    int32_t counts_per_rev() const;
     void publish_feedback(uint8_t index, uint32_t now_ms);
     bool try_configure(uint8_t index, uint32_t now_ms);
     bool frame_for_master(const AP_HAL::CANFrame &rx, can_frame_t *fr);
@@ -91,6 +92,7 @@ private:
     AP_Int32 _pos_min;
     AP_Int32 _pos_max;
     AP_Float _gear;
+    AP_Int32 _pos_res;
     AP_Int8 _slot_sv[EROB_SLOT_COUNT];
     AP_Int8 _slot_id[EROB_SLOT_COUNT];
 

@@ -40,7 +40,11 @@
 #define EROB_BOOT_TIMEOUT_MS 2000u
 #endif
 
-/* Manual §5.2.1: output encoder counts per revolution. */
+/*
+ * Manual §5.2.1 default: 19-bit output encoder, 524288 counts per revolution.
+ * CAN_Dx_EROB_RES overrides this. A non-positive RES still uses this value.
+ * HS single-turn encoders may be 20-bit (1048576); confirm on 0x6064.
+ */
 #ifndef EROB_PLUS_PER_REV
 #define EROB_PLUS_PER_REV 524288
 #endif

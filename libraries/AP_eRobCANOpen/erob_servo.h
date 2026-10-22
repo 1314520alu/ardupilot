@@ -145,9 +145,12 @@ const erob_feedback_t *erob_feedback(const erob_servo_t *s);
 /* Ignore a zero rating. A failed or zero read leaves the valid bit clear. */
 void erob_cache_rating(erob_feedback_t *fb, uint16_t index, uint32_t value);
 
-/* Load-side 19-bit scale. 524288 plus is one output revolution. */
-float erob_position_deg(int32_t plus);
-float erob_output_rpm(int32_t plus_per_s);
+/*
+ * Output angle and output rpm. counts_per_rev is encoder counts in one
+ * output revolution. A non-positive value uses EROB_PLUS_PER_REV (524288).
+ */
+float erob_position_deg(int32_t plus, int32_t counts_per_rev);
+float erob_output_rpm(int32_t plus_per_s, int32_t counts_per_rev);
 
 /* permille of rated. rated_mA is 0x6075, rated_mNm is 0x6076. */
 float erob_current_a(int16_t permille, uint32_t rated_mA);

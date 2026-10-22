@@ -525,14 +525,22 @@ void erob_cache_rating(erob_feedback_t *fb, uint16_t index, uint32_t value)
     }
 }
 
-float erob_position_deg(int32_t plus)
+static int32_t counts_or_default(int32_t counts_per_rev)
 {
-    return (float)((double)plus * 360.0 / (double)EROB_PLUS_PER_REV);
+    if (counts_per_rev <= 0) {
+        return EROB_PLUS_PER_REV;
+    }
+    return counts_per_rev;
 }
 
-float erob_output_rpm(int32_t plus_per_s)
+float erob_position_deg(int32_t plus, int32_t counts_per_rev)
 {
-    return (float)((double)plus_per_s * 60.0 / (double)EROB_PLUS_PER_REV);
+    return (float)((double)plus * 360.0 / (double)counts_or_default(counts_per_rev));
+}
+
+float erob_output_rpm(int32_t plus_per_s, int32_t counts_per_rev)
+{
+    return (float)((double)plus_per_s * 60.0 / (double)counts_or_default(counts_per_rev));
 }
 
 float erob_current_a(int16_t permille, uint32_t rated_mA)
