@@ -45,9 +45,16 @@
 #define EROB_PLUS_PER_REV 524288
 #endif
 
-/* Consecutive servo axes on one exclusive eRob CAN driver. One SYNC producer. */
+/*
+ * Explicit SV/ID slots, and the NODE+BM fallback, share this axis table.
+ * One SYNC producer. Eight slots match SV1..SV8.
+ */
 #ifndef EROB_MAX_AXES
-#define EROB_MAX_AXES 6
+#define EROB_MAX_AXES 8
+#endif
+
+#ifndef EROB_SLOT_COUNT
+#define EROB_SLOT_COUNT 8
 #endif
 
 /* One diagnostic SDO per axis. Not sent on every SYNC. */

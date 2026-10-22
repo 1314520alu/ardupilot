@@ -24,9 +24,11 @@ struct can_bus {
 /*
  * eRob CAN servo backend for one HAL iface.
  * Selecting CAN_Dx_PROTOCOL = eRobCAN gives this driver exclusive use of
- * that iface. It binds CAN2 only. SERVOx bits in the servo mask map to
- * Node-IDs as CiA402 CSP targets. Frames that are not those nodes' eRob CAN
- * traffic are discarded. This is not a general CANopen tool.
+ * that iface. It binds CAN2 only. Each SV/ID slot maps one SERVO output to
+ * one CANopen Node-ID as a CiA402 CSP target. If every SVn is 0, NODE plus
+ * the servo bitmask is the fallback. Frames that are not those nodes' eRob
+ * CAN traffic are discarded. This is not a general CANopen tool. Node-IDs
+ * are hard-set on the servos; this driver does not write 0x100B.
  */
 class AP_eRobCANOpen : public AP_CANDriver
 {
@@ -57,14 +59,21 @@ private:
         uint8_t channel;
         bool tried;
         bool reported;
+        bool fault_active;
         uint32_t last_try_ms;
         uint32_t last_log_ms;
         uint32_t last_named_ms;
+        uint32_t last_fault_ms;
     };
 
     void loop();
     void setup_axes();
+    bool slots_configured() const;
+    void add_axis(uint8_t &num, uint8_t node, uint8_t channel);
+    void probe_nodes();
     void poll_axes();
+    void warn_statusword_fault(uint8_t index, uint32_t now_ms);
+    bool axis_faulted(uint8_t index) const;
     void publish_feedback(uint8_t index, uint32_t now_ms);
     bool try_configure(uint8_t index, uint32_t now_ms);
     bool frame_for_master(const AP_HAL::CANFrame &rx, can_frame_t *fr);
@@ -82,6 +91,8 @@ private:
     AP_Int32 _pos_min;
     AP_Int32 _pos_max;
     AP_Float _gear;
+    AP_Int8 _slot_sv[EROB_SLOT_COUNT];
+    AP_Int8 _slot_id[EROB_SLOT_COUNT];
 
     uint8_t _active_node;
     uint8_t _num_axes;

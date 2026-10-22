@@ -133,13 +133,14 @@ RxPDO1：
 
 ## 7. 舵机输出
 
-`SRV_Channels::push()` 在协议为 eRob CAN 时调用 `push_servos()`。
+`SRV_Channels::push()` 在协议为 eRob CAN 时调用 `push_servos()`。Node-ID 在舵机上写死。飞控不写 `0x100B`。
 
-1. `CAN_Dx_EROB_BM` 为 0 时不改目标。位定义与 `CAN_Dx_UC_SRV_BM` 相同，bit 0 是 SERVO1。参数全名最长 16 个字符，所以这里不叫 `SRV_BM`。
-2. 置位从低到高对应从 `CAN_Dx_EROB_NODE` 起的 Node-ID，最多 6 路。通道不必连续。
-3. PWM 用该通道自己的 `SERVOx_MIN` / `SERVOx_MAX`。线性结果夹在 `CAN_Dx_EROB_MIN` 和 `CAN_Dx_EROB_MAX` 之间，单位 plus。PWM 仍为 0，或该通道在舵机禁用掩码里时，保持上一次目标。
-4. 各轴共用一组 MIN/MAX。每轴单独行程是后续项。
-5. 输出反转沿用 ArduPilot 舵机通道自己的反向，驱动不再翻一次。
+1. 主映射是 `CAN_Dx_EROB_SV1`..`SV8` 和 `CAN_Dx_EROB_ID1`..`ID8`。全名例如 `CAN_D2_EROB_SV1`，15 个字符。`SVn` 为 0 的槽不用。`SERVO<SVn>` 驱动节点 `IDn`。遥测名字是 `ER<SVn>*`，日志 `Sv` 是这个 SERVO 号。最多 8 路。
+2. 只要有一个 `SVn` 非 0，槽生效，`NODE` 和 `BM` 忽略。`SVn` 全是 0 时才用位掩码：位定义与 `CAN_Dx_UC_SRV_BM` 相同，bit 0 是 SERVO1，从低到高对应从 `NODE` 起的连续 Node-ID。参数全名最长 16 个字符，所以掩码不叫 `SRV_BM`。
+3. 初始化跳过并告警：重复 ID、重复 SERVO 号、ID 不在 1..127、`SVn` 有值但 ID 为 0、SERVO 号超出 1..32。先出现的槽保留。这些参数和 `NODE` / `BM` 一样，重启后生效。
+4. PWM 用该通道自己的 `SERVOx_MIN` / `SERVOx_MAX`。线性结果夹在共用的 `CAN_Dx_EROB_MIN` 和 `CAN_Dx_EROB_MAX` 之间，单位 plus。`GEAR` 也是共用的。PWM 仍为 0，或该通道在舵机禁用掩码里时，保持上一次目标。
+5. 状态字 bit3 置位后，该槽先在地面站发 CRITICAL（`eRob: SERVO<n> id <id> statusword fault`，5 s 限速），再发一次故障复位，之后 `push_servos()` 不再写入目标，周期帧也不再带新位置，直到重启。
+6. 输出反转沿用 ArduPilot 舵机通道自己的反向，驱动不再翻一次。直升机斜盘和尾舵只是这些 SERVO 通道的上游，本库不改混控。
 
 ## 8. 总线
 
@@ -151,9 +152,9 @@ RxPDO1：
 
 ## 9. 仍要客户确认
 
-- 出厂 Node-ID，以及是不是已经是 1 Mbps
+- 舵机上写死的 Node-ID 是否已经是 1 Mbps，以及每个 ID 对应哪个 SERVO
 - 是否接受驱动按 §5.5.1 强制重映射（需要 EDS 或现场读回）
-- 轴数与每个 Node-ID
+- 轴数。飞控用 SV/ID 槽填写，不从飞控写 0x100B
 - 模式是 CSP 还是 CSV；CSV 的 PDO 还没映射
 - 4 ms 是否允许先用 10 ms
 - plus 到角度的减速比、软限位由谁做

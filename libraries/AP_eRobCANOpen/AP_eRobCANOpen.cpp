@@ -36,7 +36,7 @@ const AP_Param::GroupInfo AP_eRobCANOpen::var_info[] = {
 
     // @Param: NODE
     // @DisplayName: eRob CAN first node
-    // @Description: Node-ID of the first eRob servo selected by the servo bitmask, counting set bits from low to high. The driver owns the whole iface. Only NMT, SYNC and these nodes' PDO, SDO, EMCY and heartbeat are used. Other frames on that port are discarded.
+    // @Description: Node-ID of the first eRob servo selected by the servo bitmask, counting set bits from low to high. Used only when SV1..SV8 are all 0. If any SVn is non-zero, the SV/ID slots are used and NODE is ignored. The driver owns the whole iface. Only NMT, SYNC and these nodes' PDO, SDO, EMCY and heartbeat are used. Other frames on that port are discarded. Node-IDs are hard-set on the servos.
     // @Range: 1 127
     // @User: Standard
     // @RebootRequired: True
@@ -44,7 +44,7 @@ const AP_Param::GroupInfo AP_eRobCANOpen::var_info[] = {
 
     // @Param: BM
     // @DisplayName: eRob CAN servo bitmask
-    // @Description: Servo outputs transmitted as eRob CAN CSP targets. Same bits as CAN_Dx_UC_SRV_BM: bit 0 is Servo 1. Set bits are taken from low to high. The lowest bit uses NODE, and each next set bit uses the next Node-ID. At most 6 axes. 0 sends no servo targets.
+    // @Description: Servo outputs transmitted as eRob CAN CSP targets when SV1..SV8 are all 0. Same bits as CAN_Dx_UC_SRV_BM: bit 0 is Servo 1. Set bits are taken from low to high. The lowest bit uses NODE, and each next set bit uses the next Node-ID. At most 8 axes. 0 sends no servo targets. If any SVn is non-zero, this mask is ignored.
     // @Bitmask: 0: Servo 1, 1: Servo 2, 2: Servo 3, 3: Servo 4, 4: Servo 5, 5: Servo 6, 6: Servo 7, 7: Servo 8, 8: Servo 9, 9: Servo 10, 10: Servo 11, 11: Servo 12, 12: Servo 13, 13: Servo 14, 14: Servo 15, 15: Servo 16, 16: Servo 17, 17: Servo 18, 18: Servo 19, 19: Servo 20, 20: Servo 21, 21: Servo 22, 22: Servo 23, 23: Servo 24, 24: Servo 25, 25: Servo 26, 26: Servo 27, 27: Servo 28, 28: Servo 29, 29: Servo 30, 30: Servo 31, 31: Servo 32
     // @User: Standard
     // @RebootRequired: True
@@ -71,6 +71,134 @@ const AP_Param::GroupInfo AP_eRobCANOpen::var_info[] = {
     // @Increment: 1
     // @User: Standard
     AP_GROUPINFO("GEAR", 7, AP_eRobCANOpen, _gear, 0),
+
+    // @Param: SV1
+    // @DisplayName: eRob CAN slot 1 servo
+    // @Description: Servo output number for slot 1, so SERVO this number drives ID1. 0 leaves the slot unused. If any SVn is non-zero, slots replace NODE and BM. If every SVn is 0, NODE plus BM is used. MIN, MAX and GEAR stay shared. A duplicate servo, a value outside 1..32, or a servo with ID 0 is skipped.
+    // @Range: 0 32
+    // @User: Standard
+    // @RebootRequired: True
+    AP_GROUPINFO("SV1", 8, AP_eRobCANOpen, _slot_sv[0], 0),
+
+    // @Param: SV2
+    // @DisplayName: eRob CAN slot 2 servo
+    // @Description: Servo output number for slot 2. 0 leaves the slot unused. See SV1.
+    // @Range: 0 32
+    // @User: Standard
+    // @RebootRequired: True
+    AP_GROUPINFO("SV2", 9, AP_eRobCANOpen, _slot_sv[1], 0),
+
+    // @Param: SV3
+    // @DisplayName: eRob CAN slot 3 servo
+    // @Description: Servo output number for slot 3. 0 leaves the slot unused. See SV1.
+    // @Range: 0 32
+    // @User: Standard
+    // @RebootRequired: True
+    AP_GROUPINFO("SV3", 10, AP_eRobCANOpen, _slot_sv[2], 0),
+
+    // @Param: SV4
+    // @DisplayName: eRob CAN slot 4 servo
+    // @Description: Servo output number for slot 4. 0 leaves the slot unused. See SV1.
+    // @Range: 0 32
+    // @User: Standard
+    // @RebootRequired: True
+    AP_GROUPINFO("SV4", 11, AP_eRobCANOpen, _slot_sv[3], 0),
+
+    // @Param: SV5
+    // @DisplayName: eRob CAN slot 5 servo
+    // @Description: Servo output number for slot 5. 0 leaves the slot unused. See SV1.
+    // @Range: 0 32
+    // @User: Standard
+    // @RebootRequired: True
+    AP_GROUPINFO("SV5", 12, AP_eRobCANOpen, _slot_sv[4], 0),
+
+    // @Param: SV6
+    // @DisplayName: eRob CAN slot 6 servo
+    // @Description: Servo output number for slot 6. 0 leaves the slot unused. See SV1.
+    // @Range: 0 32
+    // @User: Standard
+    // @RebootRequired: True
+    AP_GROUPINFO("SV6", 13, AP_eRobCANOpen, _slot_sv[5], 0),
+
+    // @Param: SV7
+    // @DisplayName: eRob CAN slot 7 servo
+    // @Description: Servo output number for slot 7. 0 leaves the slot unused. See SV1.
+    // @Range: 0 32
+    // @User: Standard
+    // @RebootRequired: True
+    AP_GROUPINFO("SV7", 14, AP_eRobCANOpen, _slot_sv[6], 0),
+
+    // @Param: SV8
+    // @DisplayName: eRob CAN slot 8 servo
+    // @Description: Servo output number for slot 8. 0 leaves the slot unused. See SV1.
+    // @Range: 0 32
+    // @User: Standard
+    // @RebootRequired: True
+    AP_GROUPINFO("SV8", 15, AP_eRobCANOpen, _slot_sv[7], 0),
+
+    // @Param: ID1
+    // @DisplayName: eRob CAN slot 1 Node-ID
+    // @Description: CANopen Node-ID driven by the servo in SV1. 1..127. The servo's ID is hard-set on the drive. This driver does not write object 0x100B. SV1 set with ID 0 is skipped. Ignored when SV1 is 0.
+    // @Range: 0 127
+    // @User: Standard
+    // @RebootRequired: True
+    AP_GROUPINFO("ID1", 16, AP_eRobCANOpen, _slot_id[0], 0),
+
+    // @Param: ID2
+    // @DisplayName: eRob CAN slot 2 Node-ID
+    // @Description: CANopen Node-ID for SV2. See ID1.
+    // @Range: 0 127
+    // @User: Standard
+    // @RebootRequired: True
+    AP_GROUPINFO("ID2", 17, AP_eRobCANOpen, _slot_id[1], 0),
+
+    // @Param: ID3
+    // @DisplayName: eRob CAN slot 3 Node-ID
+    // @Description: CANopen Node-ID for SV3. See ID1.
+    // @Range: 0 127
+    // @User: Standard
+    // @RebootRequired: True
+    AP_GROUPINFO("ID3", 18, AP_eRobCANOpen, _slot_id[2], 0),
+
+    // @Param: ID4
+    // @DisplayName: eRob CAN slot 4 Node-ID
+    // @Description: CANopen Node-ID for SV4. See ID1.
+    // @Range: 0 127
+    // @User: Standard
+    // @RebootRequired: True
+    AP_GROUPINFO("ID4", 19, AP_eRobCANOpen, _slot_id[3], 0),
+
+    // @Param: ID5
+    // @DisplayName: eRob CAN slot 5 Node-ID
+    // @Description: CANopen Node-ID for SV5. See ID1.
+    // @Range: 0 127
+    // @User: Standard
+    // @RebootRequired: True
+    AP_GROUPINFO("ID5", 20, AP_eRobCANOpen, _slot_id[4], 0),
+
+    // @Param: ID6
+    // @DisplayName: eRob CAN slot 6 Node-ID
+    // @Description: CANopen Node-ID for SV6. See ID1.
+    // @Range: 0 127
+    // @User: Standard
+    // @RebootRequired: True
+    AP_GROUPINFO("ID6", 21, AP_eRobCANOpen, _slot_id[5], 0),
+
+    // @Param: ID7
+    // @DisplayName: eRob CAN slot 7 Node-ID
+    // @Description: CANopen Node-ID for SV7. See ID1.
+    // @Range: 0 127
+    // @User: Standard
+    // @RebootRequired: True
+    AP_GROUPINFO("ID7", 22, AP_eRobCANOpen, _slot_id[6], 0),
+
+    // @Param: ID8
+    // @DisplayName: eRob CAN slot 8 Node-ID
+    // @Description: CANopen Node-ID for SV8. See ID1.
+    // @Range: 0 127
+    // @User: Standard
+    // @RebootRequired: True
+    AP_GROUPINFO("ID8", 23, AP_eRobCANOpen, _slot_id[7], 0),
 
     AP_GROUPEND
 };
@@ -129,44 +257,178 @@ bool AP_eRobCANOpen::add_interface(AP_HAL::CANIface* can_iface)
 #endif
 }
 
+static constexpr uint32_t EROB_FAULT_WARN_MS = 5000;
+
+bool AP_eRobCANOpen::slots_configured() const
+{
+    for (uint8_t i = 0; i < EROB_SLOT_COUNT; i++) {
+        if (_slot_sv[i].get() != 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void AP_eRobCANOpen::add_axis(uint8_t &num, uint8_t node, uint8_t channel)
+{
+    Axis &axis = _axis[num];
+    axis.node = node;
+    axis.channel = channel;
+    axis.tried = false;
+    axis.reported = false;
+    axis.fault_active = false;
+    axis.last_try_ms = 0;
+    axis.last_log_ms = 0;
+    axis.last_named_ms = 0;
+    axis.last_fault_ms = 0;
+    co_master_init(&axis.master, &_bus, node);
+    erob_init(&axis.servo, &axis.master);
+    num++;
+}
+
 void AP_eRobCANOpen::setup_axes()
 {
-    int16_t node = _node_id.get();
-    if (node < 1 || node > 127) {
-        node = 1;
-    }
-    _active_node = uint8_t(node);
+    static_assert(EROB_SLOT_COUNT <= EROB_MAX_AXES, "eRob slots exceed the axis table");
 
-    const uint32_t mask = uint32_t(_servo_bm.get());
     uint8_t num = 0;
-    bool truncated = false;
-    const uint8_t nchan = NUM_SERVO_CHANNELS < 32 ? NUM_SERVO_CHANNELS : 32;
-    for (uint8_t chan = 0; chan < nchan; chan++) {
-        if ((mask & (1U << chan)) == 0) {
-            continue;
+    if (slots_configured()) {
+        bool seen_id[128] {};
+        bool seen_sv[33] {};
+        bool truncated = false;
+        const uint8_t sv_max = NUM_SERVO_CHANNELS < 32 ? NUM_SERVO_CHANNELS : 32;
+        for (uint8_t i = 0; i < EROB_SLOT_COUNT; i++) {
+            const int16_t sv = _slot_sv[i].get();
+            const int16_t id = _slot_id[i].get();
+            const unsigned slot = unsigned(i + 1);
+            if (sv == 0) {
+                continue;
+            }
+            if (sv < 1 || sv > sv_max) {
+                GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "eRob CAN: slot %u SERVO %d out of range", slot, int(sv));
+                continue;
+            }
+            if (id == 0) {
+                GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "eRob CAN: slot %u ID 0 skipped", slot);
+                continue;
+            }
+            if (id < 1 || id > 127) {
+                GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "eRob CAN: slot %u ID %d out of range", slot, int(id));
+                continue;
+            }
+            if (seen_id[id]) {
+                GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "eRob CAN: slot %u duplicate ID %d skipped", slot, int(id));
+                continue;
+            }
+            if (seen_sv[sv]) {
+                GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "eRob CAN: slot %u duplicate SERVO %d skipped", slot, int(sv));
+                continue;
+            }
+            if (num >= EROB_MAX_AXES) {
+                truncated = true;
+                break;
+            }
+            seen_id[id] = true;
+            seen_sv[sv] = true;
+            add_axis(num, uint8_t(id), uint8_t(sv - 1));
         }
-        if (num >= EROB_MAX_AXES || node + num > 127) {
-            truncated = true;
-            break;
+        if (num == 0) {
+            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "eRob CAN: no servo slots");
+        } else if (truncated) {
+            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "eRob CAN: slot table limited to %u", unsigned(num));
+        } else {
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "eRob CAN: %u slots, NODE and BM ignored", unsigned(num));
         }
-        _axis[num].node = uint8_t(node + num);
-        _axis[num].channel = chan;
-        _axis[num].tried = false;
-        _axis[num].reported = false;
-        _axis[num].last_try_ms = 0;
-        _axis[num].last_log_ms = 0;
-        _axis[num].last_named_ms = 0;
-        co_master_init(&_axis[num].master, &_bus, _axis[num].node);
-        erob_init(&_axis[num].servo, &_axis[num].master);
-        num++;
+    } else {
+        int16_t node = _node_id.get();
+        if (node < 1 || node > 127) {
+            node = 1;
+        }
+        _active_node = uint8_t(node);
+
+        const uint32_t mask = uint32_t(_servo_bm.get());
+        bool truncated = false;
+        const uint8_t nchan = NUM_SERVO_CHANNELS < 32 ? NUM_SERVO_CHANNELS : 32;
+        for (uint8_t chan = 0; chan < nchan; chan++) {
+            if ((mask & (1U << chan)) == 0) {
+                continue;
+            }
+            if (num >= EROB_MAX_AXES || node + num > 127) {
+                truncated = true;
+                break;
+            }
+            add_axis(num, uint8_t(node + num), chan);
+        }
+        if (num == 0) {
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "eRob CAN: servo mask is 0");
+        } else if (truncated) {
+            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "eRob CAN: servo mask limited to %u axes", unsigned(num));
+        }
     }
-    if (num == 0) {
-        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "eRob CAN: servo mask is 0");
-    } else if (truncated) {
-        GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "eRob CAN: servo mask limited to %u axes", unsigned(num));
+    if (num > 0) {
+        _active_node = _axis[0].node;
     }
     // Publish after the axes exist. push_servos() runs on another thread.
     _num_axes = num;
+}
+
+void AP_eRobCANOpen::probe_nodes()
+{
+    if (_num_axes == 0) {
+        return;
+    }
+
+    bool alive[EROB_MAX_AXES] {};
+    // One broadcast reset so a powered servo emits boot-up. Configure repeats
+    // a per-node reset afterwards. This does not write 0x100B.
+    (void)co_nmt(&_axis[0].master, CO_NMT_RESET_COMM, 0);
+
+    const uint32_t t0 = AP_HAL::millis();
+    while ((AP_HAL::millis() - t0) < EROB_BOOT_TIMEOUT_MS) {
+        bool all = true;
+        for (uint8_t i = 0; i < _num_axes; i++) {
+            if (!alive[i]) {
+                all = false;
+                break;
+            }
+        }
+        if (all) {
+            break;
+        }
+        can_frame_t fr;
+        if (hal_recv(&fr, 20) != 0) {
+            continue;
+        }
+        if (fr.dlc < 1 || fr.data[0] != 0) {
+            continue;
+        }
+        for (uint8_t i = 0; i < _num_axes; i++) {
+            if (fr.id == uint32_t(CO_COB_HB_BASE) + _axis[i].node) {
+                alive[i] = true;
+            }
+        }
+    }
+
+    for (uint8_t i = 0; i < _num_axes; i++) {
+        if (alive[i]) {
+            continue;
+        }
+        uint32_t device_type = 0;
+        if (co_sdo_read(&_axis[i].master, 0x1000, 0x00, &device_type, 4) == 0 ||
+            _axis[i].master.boot_seen) {
+            alive[i] = true;
+        }
+        (void)device_type;
+    }
+
+    for (uint8_t i = 0; i < _num_axes; i++) {
+        const unsigned servo_num = unsigned(_axis[i].channel + 1);
+        const unsigned id = unsigned(_axis[i].node);
+        if (alive[i]) {
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "eRob: SERVO%u id %u OK", servo_num, id);
+        } else {
+            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "eRob: SERVO%u id %u no response", servo_num, id);
+        }
+    }
 }
 
 bool AP_eRobCANOpen::try_configure(uint8_t index, uint32_t now_ms)
@@ -194,6 +456,29 @@ bool AP_eRobCANOpen::try_configure(uint8_t index, uint32_t now_ms)
     return true;
 }
 
+bool AP_eRobCANOpen::axis_faulted(uint8_t index) const
+{
+    const erob_servo_t &servo = _axis[index].servo;
+    return (erob_get_statusword(&servo) & EROB_SW_FAULT_BIT) != 0 ||
+           erob_get_state(&servo) == EROB_ST_FAULT;
+}
+
+void AP_eRobCANOpen::warn_statusword_fault(uint8_t index, uint32_t now_ms)
+{
+    Axis &axis = _axis[index];
+    if (!axis_faulted(index)) {
+        axis.fault_active = false;
+        return;
+    }
+    if (axis.fault_active && (now_ms - axis.last_fault_ms) < EROB_FAULT_WARN_MS) {
+        return;
+    }
+    axis.fault_active = true;
+    axis.last_fault_ms = now_ms;
+    GCS_SEND_TEXT(MAV_SEVERITY_CRITICAL, "eRob: SERVO%u id %u statusword fault",
+                  unsigned(axis.channel + 1), unsigned(axis.node));
+}
+
 void AP_eRobCANOpen::poll_axes()
 {
     can_frame_t fr;
@@ -204,6 +489,9 @@ void AP_eRobCANOpen::poll_axes()
         }
     }
     for (uint8_t i = 0; i < _num_axes; i++) {
+        const uint32_t now_ms = AP_HAL::millis();
+        // Queue the critical text before poll_motion's one-shot fault reset.
+        warn_statusword_fault(i, now_ms);
         erob_poll_motion(&_axis[i].servo);
         erob_poll_diag(&_axis[i].servo);
         if (!_axis[i].reported && erob_get_state(&_axis[i].servo) == EROB_ST_ENABLED) {
@@ -211,7 +499,7 @@ void AP_eRobCANOpen::poll_axes()
             GCS_SEND_TEXT(MAV_SEVERITY_INFO, "eRob CAN: servo node %u enabled",
                           unsigned(_axis[i].node));
         }
-        publish_feedback(i, AP_HAL::millis());
+        publish_feedback(i, now_ms);
     }
     if (_num_axes > 0) {
         co_master_poll_sync(&_axis[0].master);
@@ -240,7 +528,7 @@ void AP_eRobCANOpen::publish_feedback(uint8_t index, uint32_t now_ms)
         // @LoggerMessage: ERB1
         // @Description: eRob CAN cyclic feedback for one mapped servo
         // @Field: TimeUS: Time since system startup
-        // @Field: Ax: axis index on this driver, low bit of the servo mask first
+        // @Field: Ax: axis index on this driver, slot order or servo-mask order
         // @Field: Nd: CANopen Node-ID
         // @Field: Sv: servo output number, SERVO1 is 1
         // @Field: SW: statusword 0x6041
@@ -441,6 +729,7 @@ void AP_eRobCANOpen::loop()
 
     _bus.drv = this;
     setup_axes();
+    probe_nodes();
 
     while (true) {
         const uint32_t now = AP_HAL::millis();
@@ -520,6 +809,11 @@ void AP_eRobCANOpen::push_servos()
         }
         const uint16_t pwm = ch->get_output_pwm();
         if (pwm == 0) {
+            continue;
+        }
+        // A faulted slot must not keep taking CSP targets. The critical
+        // text is raised on the CAN thread before any further write.
+        if (axis_faulted(i)) {
             continue;
         }
         const int32_t plus = erob_pwm_to_plus(pwm, ch->get_output_min(), ch->get_output_max(),

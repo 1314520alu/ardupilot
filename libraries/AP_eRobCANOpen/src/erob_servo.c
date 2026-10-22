@@ -305,14 +305,19 @@ void erob_poll_motion(erob_servo_t *s)
     sw = s->statusword;
 
     if (s->state == EROB_ST_ENABLE_SEQ) {
+        /* Stop the enable sequence once the drive reports a fault.
+         * One fault-reset follows the GCS critical text. No further writes.
+         */
+        if ((sw & EROB_SW_FAULT_BIT) != 0) {
+            s->state = EROB_ST_FAULT;
+            (void)send_cw_pos(s, EROB_CW_FAULT_RESET, s->hold_pos);
+            return;
+        }
         if ((now - s->enable_ts_ms) >= 50) {
             s->enable_ts_ms = now;
             if (s->enable_step < 4) {
                 (void)send_cw_pos(s, enable_cw[s->enable_step], s->hold_pos);
                 s->enable_step++;
-            } else if ((sw & EROB_SW_FAULT_BIT) != 0) {
-                s->state = EROB_ST_FAULT;
-                (void)send_cw_pos(s, EROB_CW_FAULT_RESET, s->hold_pos);
             } else if ((sw & EROB_SW_MASK) == EROB_SW_OP_ENABLED) {
                 s->state = EROB_ST_ENABLED;
                 s->enable_done_ms = now;
@@ -423,7 +428,7 @@ void erob_poll_diag(erob_servo_t *s)
         }
     }
 
-    /* Spread the four axes so they do not upload on the same tick. */
+    /* Spread the axes so they do not upload on the same tick. */
     phase = (uint32_t)(m->node_id % EROB_MAX_AXES) * 40u;
     if (s->diag_tx_ms == 0) {
         if ((now - s->enable_done_ms) < phase) {

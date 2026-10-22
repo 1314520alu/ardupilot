@@ -57,11 +57,93 @@ CAN_D2_EROB_MAX  524288
 CAN_D2_EROB_GEAR 0
 ```
 
+上面这组是旧的连续编号。`SV1`..`SV8` 全是 0 时才走它：`BM` 从低位到高位，最低位用 `NODE`，下一位用下一个 Node-ID。`1008` 是 bit 4..9，也就是 SERVO5..SERVO10，节点 1..6。
+
+任意 Node-ID 用槽，不要靠连续编号。全名 `CAN_D2_EROB_SV1`、`CAN_D2_EROB_ID1` 都是 15 个字符（上限 16）。`SVn` 是 SERVO 输出号 1..32，0 表示这个槽不用。`IDn` 是该槽的 CANopen Node-ID，1..127。飞控不写 `0x100B`，ID 在舵机上写死。改 `SV` / `ID` / `NODE` / `BM` 都要重启。`MIN`、`MAX`、`GEAR` 仍是这一路所有轴共用。
+
+只要有一个 `SVn` 不是 0，槽生效，`NODE` 和 `BM` 忽略。`SVn` 全是 0 才回到上面的 `NODE` + `BM`。初始化时跳过并在地面站告警：重复的 ID、重复的 SERVO 号、ID 超出 1..127、或者 `SVn` 有值但 `IDn` 是 0。先出现的那个槽保留。
+
 `GEAR` 默认就是 0。要电机转速时改成减速比，例如 100，不用为了它重启。
 
 `15` 是 `AP_CAN::Protocol::eRobCAN`，参数列表显示为 `eRob CAN`。一个 `CAN_Dx_PROTOCOL` 独占那个虚拟驱动：1 是 DroneCAN，15 是这组舵机。驱动只接受 HAL 接口 1（CAN2）。这不是通用 CANopen 工具，默认只做 CiA402 CSP。
 
-eRob 按舵机用。`CAN_D2_EROB_BM` 的位和 `CAN_Dx_UC_SRV_BM` 一样：bit 0 是 SERVO1。全名放不下 `SRV_BM`（`CAN_D2_EROB_SRV_BM` 有 18 个字符，上限 16），所以参数名是 `BM`。`1008` 是 bit 4..9，也就是 SERVO5..SERVO10。置位从低到高分配 Node-ID：SERVO5 是节点 1，SERVO10 是节点 6。最多 6 轴。`SRV_Channels::push()` 把这些通道的 PWM 线性映到 CSP 目标：`SERVOx_MIN` 对应 `CAN_D2_EROB_MIN`，`SERVOx_MAX` 对应 `CAN_D2_EROB_MAX`，单位是 plus。524288 plus 为一圈输出端（手册 §5.2.1）。各轴目前共用同一组 MIN/MAX。掩码为 0 时不跟舵机输出。第一轴负责发 SYNC，其余轴只收这个 SYNC。同一接口上的其它帧被丢掉。CAN1 保持 `CAN_D1_PROTOCOL 1`。使能后 500 ms 内主站仍保持实际位置，之后才跟踪舵机目标。每轴单独的行程还没做。输出角度不乘减速比；电机转速才用 `GEAR`。
+eRob 按舵机用。`CAN_D2_EROB_BM` 的位和 `CAN_Dx_UC_SRV_BM` 一样：bit 0 是 SERVO1。全名放不下 `SRV_BM`（`CAN_D2_EROB_SRV_BM` 有 18 个字符，上限 16），所以参数名是 `BM`。最多 8 轴。`SRV_Channels::push()` 把这些通道的 PWM 线性映到 CSP 目标：`SERVOx_MIN` 对应 `CAN_D2_EROB_MIN`，`SERVOx_MAX` 对应 `CAN_D2_EROB_MAX`，单位是 plus。524288 plus 为一圈输出端（手册 §5.2.1）。掩码为 0 且槽也全空时不跟舵机输出。第一轴负责发 SYNC，其余轴只收这个 SYNC。同一接口上的其它帧被丢掉。CAN1 保持 `CAN_D1_PROTOCOL 1`。使能后 500 ms 内主站仍保持实际位置，之后才跟踪舵机目标。每轴单独的行程还没做。输出角度不乘减速比；电机转速才用 `GEAR`。
+
+遥测名字仍是 `ER` + SERVO 号 + 字母。日志 `ERB1` / `ERB3` 的 `Sv` 是这个 SERVO 号。槽 `SV1=5`、`ID1=11` 时，节点 11 的数据出现在 `ER5*`，`Sv` 为 5。
+
+启动时在 CAN 线程上做一次在线检查，不写对象字典。先广播 NMT reset communication，在最多 2 s 内等这些节点的 boot-up（`0x700+id`，数据 `0x00`），提前收齐就结束。还没出现的节点再读一次 `0x1000`（SDO 超时 100 ms）。地面站原文是：
+
+```text
+eRob: SERVO5 id 12 OK
+eRob: SERVO6 id 13 no response
+```
+
+`OK` 是 INFO，`no response` 是 WARNING。之后仍按原来的流程逐轴配置 CSP。
+
+## DY1000 四个舵机，ID 不连续
+
+四个舵机对象相同，ID 在舵机上已经写好。例如 SERVO5..8 对节点 11..14：
+
+```text
+CAN_P1_DRIVER    1
+CAN_D1_PROTOCOL  1
+CAN_P2_DRIVER    2
+CAN_D2_PROTOCOL  15
+CAN_P2_BITRATE   1000000
+CAN_D2_EROB_SV1  5
+CAN_D2_EROB_ID1  11
+CAN_D2_EROB_SV2  6
+CAN_D2_EROB_ID2  12
+CAN_D2_EROB_SV3  7
+CAN_D2_EROB_ID3  13
+CAN_D2_EROB_SV4  8
+CAN_D2_EROB_ID4  14
+CAN_D2_EROB_MIN  0
+CAN_D2_EROB_MAX  524288
+CAN_D2_EROB_GEAR 0
+```
+
+`SV5`..`SV8` 和 `ID5`..`ID8` 保持 0。此时 `CAN_D2_EROB_NODE` 和 `CAN_D2_EROB_BM` 不参与映射。SERVO5 驱动节点 11，遥测是 `ER5*`。
+
+## 传统直升机斜盘
+
+传统直升机（ArduCopter Heli）是三舵斜盘加尾舵。斜盘类型在 `H_SW_TYPE`（H3 或默认的 H3_120）。本驱动不改直升机混控，只把已经算好的 SERVO PWM 送到对应节点。
+
+| 输出 | 功能 | 功能号 | 槽 |
+| --- | --- | --- | --- |
+| SERVO1 | Motor1，斜盘 | 33 | `SV1=1` |
+| SERVO2 | Motor2，斜盘 | 34 | `SV2=2` |
+| SERVO3 | Motor3，斜盘 | 35 | `SV3=3` |
+| SERVO4 | Motor4，尾舵 | 36 | `SV4=4` |
+
+60° 行程、中位两侧各 30°：`524288 * 30 / 360 = 43690.67`，取 43691。PWM 中位对应 0 plus，`SERVOx_MIN` 对应 −43691，`SERVOx_MAX` 对应 43691。下面的 ID 只是例子，改成舵机上写死的号。
+
+```text
+SERVO1_FUNCTION  33
+SERVO2_FUNCTION  34
+SERVO3_FUNCTION  35
+SERVO4_FUNCTION  36
+CAN_D2_EROB_SV1  1
+CAN_D2_EROB_ID1  11
+CAN_D2_EROB_SV2  2
+CAN_D2_EROB_ID2  12
+CAN_D2_EROB_SV3  3
+CAN_D2_EROB_ID3  13
+CAN_D2_EROB_SV4  4
+CAN_D2_EROB_ID4  14
+CAN_D2_EROB_MIN  -43691
+CAN_D2_EROB_MAX  43691
+```
+
+飞行前用 `H_SV_MAN` 核对每个舵的方向和中位。`H_SV_MAN` 飞行时必须是 0（Disabled）。方向用舵机通道自己的反向，驱动不再翻一次。
+
+状态字 bit3（`0x6041 & 0x0008`）在任一已映射舵机上置位时，包括斜盘 SERVO1..3，地面站发 CRITICAL，约每 5 s 重复一次：
+
+```text
+eRob: SERVO1 id 11 statusword fault
+```
+
+这条文字先入队，然后该槽只发一次故障复位控制字，之后不再写 CSP 目标，直到重启。不要在没有这条 CRITICAL 的情况下继续让该槽动。尾舵同样告警。这不是直升机故障保护逻辑，混控代码没有改。
 
 ## 协议范围
 
@@ -81,7 +163,7 @@ eRob 按舵机用。`CAN_D2_EROB_BM` 的位和 `CAN_Dx_UC_SRV_BM` 一样：bit 0
 
 ## 反馈
 
-DY1000 的四个舵机对象相同。每个 `CAN_Dx_EROB_BM` 置位对应一轴，缓存最新值。CSP 的 `push_servos()` 不读这些值。
+每个已映射的舵机缓存最新值。CSP 的 `push_servos()` 不读这些值。故障槽不再更新目标。
 
 Pre-op 里把 TxPDO 写成下面这张表。每条都不超过 8 字节，传输类型都是 1（每个 SYNC）：
 
@@ -154,7 +236,7 @@ Mission Planner 回放时画 `ERB1`（原始）和 `ERB3`（物理单位）。`S
 
 Mission Planner 的 MAVLink Inspector 里看 `NAMED_VALUE_INT` 和 `NAMED_VALUE_FLOAT`。这些帧同时记成 `NVI` / `NVF`。还没收到的对象不会发。四个舵机就是四组名字，对象表相同。
 
-四轴、每轴四个 TxPDO、4 ms 一拍，大约是 4000 个 TxPDO/s，再加上 RxPDO 和 SYNC。1 Mbps 上还放得下。六轴会更紧。
+四轴、每轴四个 TxPDO、4 ms 一拍，大约是 4000 个 TxPDO/s，再加上 RxPDO 和 SYNC。1 Mbps 上还放得下。八个槽都接上会更紧。
 
 使能后 500 ms 内仍下发对齐过的实际位置，不发新目标（手册 §5.1.1）。下使能与使能间隔小于 300 ms 时 `erob_disable()` 直接返回失败（手册 §5.1.2）。位置单位是 plus；负载端单圈 524288（手册 §5.2.1），所以输出角度不乘减速比。减速比只用于电机转速。
 
