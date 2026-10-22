@@ -29,5 +29,6 @@ public:
         Scripting2 = 12,
         TOFSenseP = 13,
         RadarCAN = 14,  // used by NanoRadar and Hexsoon
+        eRobCAN = 15, // ZeroErr eRob CAN. Exclusive owner of that driver.
     };
 };

@@ -30,6 +30,10 @@
   #include <AP_CANManager/AP_CANManager.h>
   #include <AP_DroneCAN/AP_DroneCAN.h>
   #include <AP_PiccoloCAN/AP_PiccoloCAN.h>
+  #include <AP_eRobCANOpen/AP_eRobCANOpen_config.h>
+  #if AP_EROB_CANOPEN_ENABLED
+    #include <AP_eRobCANOpen/AP_eRobCANOpen.h>
+  #endif
 #endif
 
 #if NUM_SERVO_CHANNELS == 0
@@ -537,6 +541,15 @@ void SRV_Channels::push()
                     continue;
                 }
                 ap_pcan->update();
+                break;
+            }
+#endif
+#if AP_EROB_CANOPEN_ENABLED
+            case AP_CAN::Protocol::eRobCAN: {
+                AP_eRobCANOpen *erob = AP_eRobCANOpen::get_erob(i);
+                if (erob != nullptr) {
+                    erob->push_servos();
+                }
                 break;
             }
 #endif
