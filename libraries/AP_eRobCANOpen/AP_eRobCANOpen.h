@@ -57,7 +57,6 @@ private:
         erob_servo_t servo;
         uint8_t node;
         uint8_t channel;
-        uint8_t slot; /* 0..7 when this axis came from SVn, else 0xFF */
         bool tried;
         bool reported;
         bool fault_active;
@@ -70,13 +69,12 @@ private:
     void loop();
     void setup_axes();
     bool slots_configured() const;
-    void add_axis(uint8_t &num, uint8_t node, uint8_t channel, uint8_t slot);
+    void add_axis(uint8_t &num, uint8_t node, uint8_t channel);
     void probe_nodes();
     void poll_axes();
     void warn_statusword_fault(uint8_t index, uint32_t now_ms);
     bool axis_faulted(uint8_t index) const;
     int32_t counts_per_rev() const;
-    int32_t axis_center(uint8_t index) const;
     void publish_feedback(uint8_t index, uint32_t now_ms);
     bool try_configure(uint8_t index, uint32_t now_ms);
     bool frame_for_master(const AP_HAL::CANFrame &rx, can_frame_t *fr);
@@ -98,7 +96,6 @@ private:
     AP_Int32 _pos_ctr;
     AP_Int8 _slot_sv[EROB_SLOT_COUNT];
     AP_Int8 _slot_id[EROB_SLOT_COUNT];
-    AP_Int32 _slot_ct[EROB_SLOT_COUNT];
 
     uint8_t _active_node;
     uint8_t _num_axes;

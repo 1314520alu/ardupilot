@@ -138,7 +138,7 @@ RxPDO1：
 1. 主映射是 `CAN_Dx_EROB_SV1`..`SV8` 和 `CAN_Dx_EROB_ID1`..`ID8`。全名例如 `CAN_D2_EROB_SV1`，15 个字符。`SVn` 为 0 的槽不用。`SERVO<SVn>` 驱动节点 `IDn`。遥测名字是 `ER<SVn>*`，日志 `Sv` 是这个 SERVO 号。最多 8 路。
 2. 只要有一个 `SVn` 非 0，槽生效，`NODE` 和 `BM` 忽略。`SVn` 全是 0 时才用位掩码：位定义与 `CAN_Dx_UC_SRV_BM` 相同，bit 0 是 SERVO1，从低到高对应从 `NODE` 起的连续 Node-ID。参数全名最长 16 个字符，所以掩码不叫 `SRV_BM`。
 3. 初始化跳过并告警：重复 ID、重复 SERVO 号、ID 不在 1..127、`SVn` 有值但 ID 为 0、SERVO 号超出 1..32。先出现的槽保留。这些参数和 `NODE` / `BM` 一样，重启后生效。
-4. PWM 用该通道自己的 `SERVOx_MIN` / `SERVOx_MAX`，线性映到共用的 `MIN` / `MAX`。这两个值是相对中心的偏移。写入 `0x607A` 的是 `中心 + 映射值`。中心默认是 `CAN_Dx_EROB_CTR`（默认 0，目标和以前一样）。`CT1`..`CT8` 非 0 时替换对应槽的中心。PWM 中点映到 `中心 + (MIN+MAX)/2`。角度是 `(0x6064 - 中心) * 360 / RES`。`GEAR` 和 `RES` 仍共用。PWM 仍为 0，或该通道在舵机禁用掩码里时，保持上一次目标。
+4. PWM 用该通道自己的 `SERVOx_MIN` / `SERVOx_MAX`，线性映到共用的 `MIN` / `MAX`。这两个值是相对 `CTR` 的偏移。写入 `0x607A` 的是 `CTR + 映射值`。`CAN_Dx_EROB_CTR` 是所有轴共用的一个中心（默认 0，目标和以前一样）。PWM 中点映到 `CTR + (MIN+MAX)/2`。角度是 `(0x6064 - CTR) * 360 / RES`。`GEAR` 和 `RES` 仍共用。PWM 仍为 0，或该通道在舵机禁用掩码里时，保持上一次目标。
 5. 状态字 bit3 置位后，该槽先在地面站发 CRITICAL（`eRob: SERVO<n> id <id> statusword fault`，5 s 限速），再发一次故障复位，之后 `push_servos()` 不再写入目标，周期帧也不再带新位置，直到重启。
 6. 输出反转沿用 ArduPilot 舵机通道自己的反向，驱动不再翻一次。直升机斜盘和尾舵只是这些 SERVO 通道的上游，本库不改混控。
 
