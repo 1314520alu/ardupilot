@@ -21,9 +21,9 @@ struct can_bus {
 };
 
 /*
- * Minimal eRob CANopen master for one HAL iface.
- * Selecting CAN_Dx_PROTOCOL = ERobCANOpen gives this driver exclusive use of
- * that iface. It binds CAN2 only. Frames that are not this node's CANopen
+ * Minimal eRob CAN master for one HAL iface.
+ * Selecting CAN_Dx_PROTOCOL = eRobCAN gives this driver exclusive use of
+ * that iface. It binds CAN2 only. Frames that are not this node's eRob CAN
  * traffic are discarded.
  */
 class AP_eRobCANOpen : public AP_CANDriver

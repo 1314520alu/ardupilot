@@ -28,7 +28,7 @@ extern const AP_HAL::HAL& hal;
 const AP_Param::GroupInfo AP_eRobCANOpen::var_info[] = {
 
     // @Param: NODE
-    // @DisplayName: eRob CANopen node id
+    // @DisplayName: eRob CAN node id
     // @Description: Node-ID of the eRob on this driver. The driver owns the whole iface. NMT, SYNC and this node's PDO, SDO, EMCY and heartbeat are the only frames it uses. Other frames on that port are discarded.
     // @Range: 1 127
     // @User: Advanced
@@ -57,7 +57,7 @@ uint8_t AP_eRobCANOpen::node_id() const
 AP_eRobCANOpen *AP_eRobCANOpen::get_erob(uint8_t driver_index)
 {
     if (driver_index >= AP::can().get_num_drivers() ||
-        AP::can().get_driver_type(driver_index) != AP_CAN::Protocol::ERobCANOpen) {
+        AP::can().get_driver_type(driver_index) != AP_CAN::Protocol::eRobCAN) {
         return nullptr;
     }
     return static_cast<AP_eRobCANOpen*>(AP::can().get_driver(driver_index));
@@ -69,11 +69,11 @@ bool AP_eRobCANOpen::add_interface(AP_HAL::CANIface* can_iface)
 
 #if HAL_NUM_CAN_IFACES < 2
     (void)can_iface;
-    GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "ERobCANopen binds CAN2 only");
+    GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "eRob CAN binds CAN2 only");
     return false;
 #else
     if (can_iface == nullptr || can_iface != hal.can[1]) {
-        GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "ERobCANopen binds CAN2 only");
+        GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "eRob CAN binds CAN2 only");
         return false;
     }
     if (_iface != nullptr) {
@@ -129,7 +129,7 @@ void AP_eRobCANOpen::loop()
                 if (erob_configure_pdo_csp(&_servo) == 0) {
                     (void)erob_enable(&_servo);
                 } else {
-                    GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "ERobCANopen: node %u configure failed",
+                    GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "eRob CAN: node %u configure failed",
                                   unsigned(_active_node));
                 }
             }
@@ -137,7 +137,7 @@ void AP_eRobCANOpen::loop()
         erob_poll(&_servo);
         if (!_reported && erob_get_state(&_servo) == EROB_ST_ENABLED) {
             _reported = true;
-            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "ERobCANopen: node %u enabled", unsigned(_active_node));
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "eRob CAN: node %u enabled", unsigned(_active_node));
         }
         hal.scheduler->delay_microseconds(1000);
     }

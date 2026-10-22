@@ -2,7 +2,7 @@
 
 零差云控 eRob（CANopen / CiA402）的最小主站。目标机是零一 X6 Ultra，仓库里的板型是 `libraries/AP_HAL_ChibiOS/hwdef/ZeroOneX6`。
 
-飞控侧由 `CAN_Dx_PROTOCOL = 15`（`ERobCANOpen`）构造 `AP_eRobCANOpen`。`AP_EROB_CANOPEN_ENABLED` 默认为 0，源码在 `src/`，由 `AP_eRobCANOpen.cpp` 在该宏为 1 时包含。ZeroOneX6 的 hwdef 打开这个宏。没选协议 15 时不会构造驱动。CAN1 上的 DroneCAN 默认参数不动。
+飞控侧由 `CAN_Dx_PROTOCOL = 15`（`eRobCAN`，参数里显示 `eRob CAN`）构造 `AP_eRobCANOpen`。`AP_EROB_CANOPEN_ENABLED` 默认为 0，源码在 `src/`，由 `AP_eRobCANOpen.cpp` 在该宏为 1 时包含。ZeroOneX6 的 hwdef 打开这个宏。没选协议 15 时不会构造驱动。CAN1 上的 DroneCAN 默认参数不动。
 
 ## 与上游 ArduPilot 的关系
 
@@ -38,11 +38,11 @@ git rebase master
 | 丝印 | MCU | 本项目 |
 | --- | --- | --- |
 | CAN1 | PD0 / PD1 | DroneCAN。默认用途不动 |
-| CAN2 | PB12 / PB13 | 协议 15 时整口归 eRob CANopen |
+| CAN2 | PB12 / PB13 | 协议 15（eRob CAN）时整口归该驱动 |
 
 `ZeroOneX6/defaults.parm` 里 `CAN_P1_DRIVER 1` 且 `CAN_P2_DRIVER 1`：两个物理口都交给虚拟驱动 1，协议仍是 DroneCAN。数值没有改，只加了注释。现有固件仍是两路 DroneCAN，直到用户改参数并重启。
 
-要用 CANopen，按 ArduPilot 的三层参数打开 CAN2，CAN1 保持不动：
+要选 eRob CAN，按 ArduPilot 的三层参数打开 CAN2，CAN1 保持不动：
 
 ```text
 CAN_P1_DRIVER    1
@@ -53,9 +53,9 @@ CAN_P2_BITRATE   1000000
 CAN_D2_EROB_NODE 1
 ```
 
-`15` 是 `AP_CAN::Protocol::ERobCANOpen`。`CAN_D2_EROB_NODE` 刚好 16 个字符。一个 `CAN_Dx_PROTOCOL` 独占那个虚拟驱动：1 是 DroneCAN，15 是本主站。驱动只接受 HAL 接口 1（CAN2）。节点号超出 1..127 时按 1 处理。
+`15` 是 `AP_CAN::Protocol::eRobCAN`，参数列表显示为 `eRob CAN`。`CAN_D2_EROB_NODE` 刚好 16 个字符。一个 `CAN_Dx_PROTOCOL` 独占那个虚拟驱动：1 是 DroneCAN，15 是本主站。驱动只接受 HAL 接口 1（CAN2）。节点号超出 1..127 时按 1 处理。
 
-选了 15 之后，这一路只跑 CANopen。主站使用 NMT `0x000`、SYNC `0x080`，以及该节点的 EMCY、PDO、SDO 和心跳。同一接口上的其它帧被丢掉，不再交给第二个协议。CAN1 保持 `CAN_D1_PROTOCOL 1`。位置目标用 `set_target_pos()`，单位是 plus；使能后 500 ms 内主站仍保持实际位置。
+选了 15 之后，这一路只跑 eRob CAN。主站使用 NMT `0x000`、SYNC `0x080`，以及该节点的 EMCY、PDO、SDO 和心跳。同一接口上的其它帧被丢掉，不再交给第二个协议。CAN1 保持 `CAN_D1_PROTOCOL 1`。位置目标用 `set_target_pos()`，单位是 plus；使能后 500 ms 内主站仍保持实际位置。
 
 ## 协议范围
 

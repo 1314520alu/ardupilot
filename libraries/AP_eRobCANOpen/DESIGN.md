@@ -12,9 +12,9 @@
 | 从站 | eRob 关节 |
 | 比特率 | 1 Mbps（`CAN_P2_BITRATE`） |
 | 周期 | 4 ms（4000 µs） |
-| 协议号 | `CAN_Dx_PROTOCOL = 15` |
+| 协议号 | `CAN_Dx_PROTOCOL = 15`（`eRobCAN`，显示 `eRob CAN`） |
 | CAN1 | DroneCAN，本模块不占用 |
-| CAN2 | 协议 15 时整口归 CANopen 主站 |
+| CAN2 | 协议 15（eRob CAN）时整口归该主站 |
 
 手册 CSP 示例把通信周期设成 1 ms（`0x1006 = 1000`）。4 ms 仍是该对象的整数微秒值。不稳定时可以先把 `EROB_SYNC_PERIOD_US` 改成 10000，不必去动 CAN1。
 
@@ -125,7 +125,7 @@ RxPDO1：
 
 ## 7. 总线
 
-1. 一个 `CAN_Dx_PROTOCOL` 独占该驱动。15 是 CANopen，1 是 DroneCAN。不要在同一驱动上再挂第二种协议。
+1. 一个 `CAN_Dx_PROTOCOL` 独占该驱动。15 是 eRob CAN，1 是 DroneCAN。不要在同一驱动上再挂第二种协议。
 2. 只发 11-bit 帧。扩展帧、CAN FD 帧，以及不属于本节点 CANopen 的 11-bit 帧，读到后丢掉。
 3. 主站使用 NMT `0x000`、SYNC `0x080`，以及本 Node-ID 的 EMCY、四个 PDO、SDO 和心跳。
 4. `add_interface()` 拒绝 iface 1 以外的口，所以 CAN1 上不会调用 `can_bus_send`。
