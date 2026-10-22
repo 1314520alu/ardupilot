@@ -28,6 +28,10 @@ FLASH_SIZE_KB 2048
 # supports upto 8MBits/s
 CANFD_SUPPORTED 8
 
+# eRob CANopen master (CAN_Dx_PROTOCOL=15). Not selected until CAN_P2_DRIVER
+# moves off the shared DroneCAN driver. See defaults.parm.
+define AP_EROB_CANOPEN_ENABLED 1
+
 # order of UARTs (and USB)
 SERIAL_ORDER OTG1 UART7 UART5 USART1 UART8 USART2 UART4 USART3 OTG2
 
