@@ -157,6 +157,7 @@ class SizeCompareBranches(BuildScriptBase):
             build_dir = os.path.join(source_dir, "build")
         shutil.rmtree(build_dir, ignore_errors=True)
         waf_configure_args = ["configure", "--board", board]
+        waf_build_args = []
         if self.waf_consistent_builds:
             waf_configure_args.append("--consistent-builds")
 
@@ -170,6 +171,7 @@ class SizeCompareBranches(BuildScriptBase):
             jobs = self.jobs
         if jobs is not None:
             waf_configure_args.extend(["-j", str(jobs)])
+            waf_build_args.extend(["-j", str(jobs)])
 
         # we can't run `./waf copter blimp plane` without error, so do
         # them one-at-a-time:
@@ -181,7 +183,7 @@ class SizeCompareBranches(BuildScriptBase):
             if not non_bootloader_configure_done:
                 self.run_waf(waf_configure_args, show_output=False, source_dir=source_dir)
                 non_bootloader_configure_done = True
-            self.run_waf([v], show_output=False, source_dir=source_dir)
+            self.run_waf([*waf_build_args, v], show_output=False, source_dir=source_dir)
         for v in vehicle:
             if v != 'bootloader':
                 continue
@@ -199,7 +201,7 @@ class SizeCompareBranches(BuildScriptBase):
                     dsdl_generated_path = os.path.join(source_dir, dsdl_generated_path)
                 shutil.rmtree(dsdl_generated_path, ignore_errors=True)
             self.run_waf(bootloader_waf_configure_args, show_output=False, source_dir=source_dir)
-            self.run_waf([v], show_output=False, source_dir=source_dir)
+            self.run_waf([*waf_build_args, v], show_output=False, source_dir=source_dir)
         self.run_program("rsync", ["rsync", "-ap", "build/", outdir], cwd=source_dir)
         if source_dir is not None:
             pathlib.Path(outdir, "scb_sourcepath.txt").write_text(source_dir)
@@ -250,6 +252,11 @@ class SizeCompareBranches(BuildScriptBase):
             board_info = self.boards_by_name[board]
 
             vehicles_to_build = self.vehicles_to_build_for_board_info(board_info)
+            if 'bootloader' in vehicles_to_build and board in self.bootloader_blacklist:
+                vehicles_to_build.remove('bootloader')
+            if not vehicles_to_build:
+                self.progress(f"Skipping {board}: no requested vehicle is built for this board")
+                continue
 
             outdir_1 = os.path.join(tmpdir, "out-master-%s" % (board,))
             tasks.append(SizeCompareBranches.Task(
@@ -845,7 +852,7 @@ def main():
                       "--jobs",
                       type=int,
                       default=None,
-                      help="Passed to waf configure -j; number of build jobs.  If running with --parallel-copies, this is divided by the number of remaining threads before being passed.")  # noqa
+                      help="Passed to waf -j; number of build jobs.  If running with --parallel-copies, this is divided by the number of remaining threads before being passed.")  # noqa
     cmd_opts, cmd_args = parser.parse_args()
 
     vehicle = []

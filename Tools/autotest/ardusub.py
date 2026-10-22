@@ -181,6 +181,10 @@ class AutoTestSub(vehicle_test_suite.TestSuite):
 
     def AltitudeHold(self):
         """Test ALT_HOLD mode"""
+        # a context so the simulated buoyancy set below is put back:
+        # MotorThrustHoverParameterIgnore calls this twice, and the second
+        # dive starts at the surface, where the extra lift stops it
+        self.context_push()
         self.dive(-5, mode='ALT_HOLD')
         self.watch_altitude_maintained()
 
@@ -224,6 +228,7 @@ class AutoTestSub(vehicle_test_suite.TestSuite):
         self.set_rc(Joystick.Throttle, 1500)
         self.watch_altitude_maintained()
         self.disarm_vehicle()
+        self.context_pop()
 
     def RngfndQuality(self):
         """Check lua Range Finder quality information flow"""
@@ -346,14 +351,14 @@ class AutoTestSub(vehicle_test_suite.TestSuite):
 
         self.disarm_vehicle()
 
-    def prepare_synthetic_seafloor_test(self, sea_floor_depth, rf_target):
+    def prepare_synthetic_seafloor_test(self, sea_floor_depth, rf_target, config_bundle=1):
         self.set_parameters({
             "SCR_ENABLE": 1,
             "RNGFND1_TYPE": 36,
             "RNGFND1_ORIENT": 25,
             "RNGFND1_MIN": 0.10,
             "RNGFND1_MAX": 30.00,
-            "SCR_USER1": 2,                 # Configuration bundle
+            "SCR_USER1": config_bundle,     # Configuration bundle, sets noise and terrain profile
             "SCR_USER2": sea_floor_depth,   # Depth in meters
             "SCR_USER3": 101,               # Output log records
             "SCR_USER4": rf_target,         # Rangefinder target in meters
@@ -413,7 +418,7 @@ class AutoTestSub(vehicle_test_suite.TestSuite):
         sea_floor_depth = 50    # Depth of sea floor at location of test
         match_distance = 15     # Desired sub distance from sea floor
         start_altitude = -sea_floor_depth+match_distance
-        end_altitude = start_altitude - 10
+        end_altitude = start_altitude
         validation_delta = 1.5  # Largest allowed distance between sub height and desired height
 
         # Load the synthetic seafloor, this will push a context and reboot
@@ -437,7 +442,7 @@ class AutoTestSub(vehicle_test_suite.TestSuite):
         self.watch_true_distance_maintained(match_distance, delta=validation_delta, timeout=5)
         self.set_rc(Joystick.Forward, 1500)
 
-        # Go south over the plateau
+        # Go south past the ridge
         self.reach_heading_manual(180)
         self.set_rc(Joystick.Forward, 1650)
         self.watch_true_distance_maintained(match_distance, delta=validation_delta, timeout=60)
@@ -451,13 +456,46 @@ class AutoTestSub(vehicle_test_suite.TestSuite):
         # Disarm before context pop
         self.disarm_vehicle()
 
+    def fly_mission_NAV_LOITER_TURNS(self, ccw=False, radius_m=15, depth_m=10):
+        '''run a mission containing a single LOITER_TURNS item, checking the
+        circle is driven in the direction the mission item asks for.  A
+        negative loiter radius asks for a counter-clockwise circle'''
+        self.wait_ready_to_arm()
+        circle_centre_loc = self.home_position_as_location()
+        self.upload_simple_relhome_mission([
+            (mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, 0, 0, -depth_m),
+            self.create_MISSION_ITEM_INT(
+                mavutil.mavlink.MAV_CMD_NAV_LOITER_TURNS,
+                p1=1,
+                p3=-radius_m if ccw else radius_m,
+                x=int(circle_centre_loc.lat*1e7),
+                y=int(circle_centre_loc.lng*1e7),
+                z=-depth_m,
+                frame=mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
+            ),
+            (mavutil.mavlink.MAV_CMD_NAV_RETURN_TO_LAUNCH, 0, 0, 0),
+        ])
+        self.arm_vehicle()
+        self.change_mode('AUTO')
+        self.wait_current_waypoint(2)
+        self.wait_circle_direction(circle_centre_loc, radius_m, ccw)
+        self.disarm_vehicle(force=True)
+
+    def mission_NAV_LOITER_TURNS(self):
+        '''test that loiter turns basically works'''
+        self.fly_mission_NAV_LOITER_TURNS()
+
+    def mission_NAV_LOITER_TURNS_ccw(self):
+        '''test that a negative loiter radius gives a counter-clockwise circle'''
+        self.fly_mission_NAV_LOITER_TURNS(ccw=True)
+
     def SimTerrainMission(self):
         """Mission at a constant height above synthetic sea floor"""
 
         sea_floor_depth = 50    # Depth of sea floor at location of test
         match_distance = 15     # Desired sub distance from sea floor
         start_altitude = -sea_floor_depth+match_distance
-        end_altitude = start_altitude - 10
+        end_altitude = start_altitude
         validation_delta = 1.5  # Largest allowed distance between sub height and desired height
 
         # Load the synthetic seafloor, this will push a context and reboot
@@ -1854,6 +1892,8 @@ class AutoTestSub(vehicle_test_suite.TestSuite):
             self.DiveMission,
             self.GripperMission,
             self.DoubleCircle,
+            self.mission_NAV_LOITER_TURNS,
+            self.mission_NAV_LOITER_TURNS_ccw,
             self.MotorThrustHoverParameterIgnore,
             self.SET_POSITION_TARGET_GLOBAL_INT,
             self.TestLogDownloadMAVProxy,

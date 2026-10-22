@@ -123,10 +123,6 @@ public:
 
     Sub(void);
 
-protected:
-
-    bool should_zero_rc_outputs_on_reboot() const override { return true; }
-
 private:
 
     // Global parameters are all contained within the 'g' class.
@@ -404,7 +400,7 @@ private:
     void rotate_body_frame_to_NE(float &x, float &y);
 #if HAL_LOGGING_ENABLED
     // methods for AP_Vehicle:
-    const AP_Int32 &get_log_bitmask() override { return g.log_bitmask; }
+    const AP_UInt32 &get_log_bitmask() override { return g.log_bitmask; }
     const struct LogStructure *get_log_structures() const override {
         return log_structure;
     }
