@@ -14,7 +14,7 @@
 | 周期 | 4 ms（4000 µs） |
 | 协议号 | `CAN_Dx_PROTOCOL = 15` |
 | CAN1 | DroneCAN，本模块不占用 |
-| CAN2 | CANopen 主站，其余 11-bit ID 为标准 CAN |
+| CAN2 | 协议 15 时整口归 CANopen 主站 |
 
 手册 CSP 示例把通信周期设成 1 ms（`0x1006 = 1000`）。4 ms 仍是该对象的整数微秒值。不稳定时可以先把 `EROB_SYNC_PERIOD_US` 改成 10000，不必去动 CAN1。
 
@@ -125,9 +125,9 @@ RxPDO1：
 
 ## 7. 总线
 
-1. 只发 11-bit 帧。扩展帧和 CAN FD 帧直接丢掉。
-2. CANopen 占用 NMT `0x000`、SYNC `0x080`，以及本 Node-ID 的 EMCY、四个 PDO、SDO 和心跳。`erob_id_is_reserved()` 是同一份判断。
-3. `CAN_Dx_EROB_OPTS` bit1 打开时，其余 11-bit ID 进 classic 队列。bit0 关掉时主站停，COB-ID 不再保留。`CAN_Dx_PROTOCOL2` 不用，原因见 README。
+1. 一个 `CAN_Dx_PROTOCOL` 独占该驱动。15 是 CANopen，1 是 DroneCAN。不要在同一驱动上再挂第二种协议。
+2. 只发 11-bit 帧。扩展帧、CAN FD 帧，以及不属于本节点 CANopen 的 11-bit 帧，读到后丢掉。
+3. 主站使用 NMT `0x000`、SYNC `0x080`，以及本 Node-ID 的 EMCY、四个 PDO、SDO 和心跳。
 4. `add_interface()` 拒绝 iface 1 以外的口，所以 CAN1 上不会调用 `can_bus_send`。
 5. 多轴时全总线只有一个 SYNC 生产者。一个驱动实例只服务一个 Node-ID。
 

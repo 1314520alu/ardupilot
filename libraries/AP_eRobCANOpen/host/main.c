@@ -135,8 +135,8 @@ int main(void)
     expect_true(erob_id_is_reserved(0x581, node), "SDO tx is reserved");
     expect_true(erob_id_is_reserved(0x601, node), "SDO rx is reserved");
     expect_true(erob_id_is_reserved(0x701, node), "heartbeat is reserved");
-    expect_true(!erob_id_is_reserved(0x123, node), "0x123 stays classic CAN");
-    expect_true(!erob_id_is_reserved(0x181, 2), "another node's TPDO stays classic");
+    expect_true(!erob_id_is_reserved(0x123, node), "0x123 is not reserved");
+    expect_true(!erob_id_is_reserved(0x181, 2), "another node's TPDO is not reserved");
     expect_true(erob_id_is_reserved(0x080, 2), "SYNC stays reserved for any node");
 
     co_master_init(&master, bus, node);

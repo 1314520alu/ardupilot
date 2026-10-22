@@ -22,8 +22,9 @@ struct can_bus {
 
 /*
  * Minimal eRob CANopen master for one HAL iface.
- * Binds CAN2 only. NMT, SYNC and this node's PDO/SDO/EMCY/heartbeat IDs are
- * consumed by the master. Other 11-bit IDs are classic CAN via read/write_classic.
+ * Selecting CAN_Dx_PROTOCOL = ERobCANOpen gives this driver exclusive use of
+ * that iface. It binds CAN2 only. Frames that are not this node's CANopen
+ * traffic are discarded.
  */
 class AP_eRobCANOpen : public AP_CANDriver
 {
@@ -39,11 +40,6 @@ public:
     void init(uint8_t driver_index) override;
     bool add_interface(AP_HAL::CANIface* can_iface) override;
 
-    // Classic 11-bit frame on this driver's iface.
-    // Returns false when classic CAN is disabled, or when CANopen currently reserves that ID.
-    bool write_classic(uint16_t std_id, const uint8_t *data, uint8_t len);
-    bool read_classic(uint16_t &std_id, uint8_t *data, uint8_t &len);
-
     void set_target_pos(int32_t plus);
     int32_t get_position() const;
     uint16_t get_statusword() const;
@@ -51,32 +47,15 @@ public:
 private:
     void loop();
     bool frame_for_master(const AP_HAL::CANFrame &rx, can_frame_t *fr);
-    void push_classic(uint16_t std_id, const uint8_t *data, uint8_t len);
     int hal_send(const can_frame_t *fr);
     int hal_recv(can_frame_t *fr, uint32_t timeout_ms);
     uint8_t node_id() const;
-
-    // CAN_Dx_EROB_OPTS. The bits are independent. Default is both.
-    enum class Option : uint8_t {
-        CANopen = 1U << 0,
-        Classic = 1U << 1,
-    };
-    bool option_set(Option opt) const;
 
     friend int can_bus_send(can_bus_t *bus, const can_frame_t *fr);
     friend int can_bus_recv(can_bus_t *bus, can_frame_t *fr, uint32_t timeout_ms);
     friend uint32_t can_bus_millis(can_bus_t *bus);
 
-    enum { CLASSIC_Q_LEN = 16 };
-
-    struct classic_frame {
-        uint16_t id;
-        uint8_t len;
-        uint8_t data[8];
-    };
-
     AP_Int8 _node_id;
-    AP_Int8 _options;
     uint8_t _active_node;
     uint8_t _driver_index;
     bool _started;
@@ -88,11 +67,6 @@ private:
     can_bus_t _bus;
     canopen_master_t _master;
     erob_servo_t _servo;
-
-    HAL_Semaphore _q_sem;
-    classic_frame _q[CLASSIC_Q_LEN];
-    uint8_t _q_head;
-    uint8_t _q_count;
 };
 
 #endif  // AP_EROB_CANOPEN_ENABLED

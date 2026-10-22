@@ -97,7 +97,7 @@ void co_master_set_sync(canopen_master_t *m, bool enable, uint32_t period_us);
 
 /*
  * True for NMT 0x000, SYNC 0x080, and this node's EMCY/PDO/SDO/heartbeat.
- * Other 11-bit IDs are classic CAN. node_id outside 1..127 reserves only NMT and SYNC.
+ * Other 11-bit IDs are not this node's CANopen traffic. node_id outside 1..127 reserves only NMT and SYNC.
  */
 bool erob_id_is_reserved(uint16_t id, uint8_t node_id);
 

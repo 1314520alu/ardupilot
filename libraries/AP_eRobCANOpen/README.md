@@ -38,7 +38,7 @@ git rebase master
 | 丝印 | MCU | 本项目 |
 | --- | --- | --- |
 | CAN1 | PD0 / PD1 | DroneCAN。默认用途不动 |
-| CAN2 | PB12 / PB13 | 协议 15：eRob CANopen，其余 11-bit ID 仍是标准 CAN |
+| CAN2 | PB12 / PB13 | 协议 15 时整口归 eRob CANopen |
 
 `ZeroOneX6/defaults.parm` 里 `CAN_P1_DRIVER 1` 且 `CAN_P2_DRIVER 1`：两个物理口都交给虚拟驱动 1，协议仍是 DroneCAN。数值没有改，只加了注释。现有固件仍是两路 DroneCAN，直到用户改参数并重启。
 
@@ -51,33 +51,11 @@ CAN_P2_DRIVER    2
 CAN_D2_PROTOCOL  15
 CAN_P2_BITRATE   1000000
 CAN_D2_EROB_NODE 1
-CAN_D2_EROB_OPTS 3
 ```
 
-`15` 是 `AP_CAN::Protocol::ERobCANOpen`。`CAN_D2_EROB_NODE` 和 `CAN_D2_EROB_OPTS` 都是 16 个字符。驱动只接受 HAL 接口 1（CAN2）。节点号超出 1..127 时按 1 处理。
+`15` 是 `AP_CAN::Protocol::ERobCANOpen`。`CAN_D2_EROB_NODE` 刚好 16 个字符。一个 `CAN_Dx_PROTOCOL` 独占那个虚拟驱动：1 是 DroneCAN，15 是本主站。驱动只接受 HAL 接口 1（CAN2）。节点号超出 1..127 时按 1 处理。
 
-`CAN_Dx_EROB_OPTS` 的两位互相独立，默认 3（两位都开）：
-
-| 值 | bit0 CANopen 主站 | bit1 标准 CAN |
-| --- | --- | --- |
-| 0 | 关 | 关 |
-| 1 | 开 | 关 |
-| 2 | 关 | 开 |
-| 3 | 开 | 开 |
-
-关掉其中一位不会动另一位，也不会动 CAN1 的 DroneCAN。协议仍是 15 时，驱动占着 CAN2。bit0 关掉后主站停发 SYNC，原来的 COB-ID 也变成标准 CAN。bit1 关掉后 `write_classic()` / `read_classic()` 直接失败，非保留 ID 被丢掉。
-
-## 标准 CAN 和 CANopen
-
-两条总线角色：
-
-- CAN1 继续 DroneCAN（29-bit）。本驱动不在 CAN1 上收发。
-- CAN2 的主协议是 CANopen。主站占用 NMT `0x000`、SYNC `0x080`，以及该节点的 EMCY、TPDO/RPDO 1..4、SDO `0x580+id` / `0x600+id`、心跳 `0x700+id`。
-- 同一条 CAN2 上，bit1 打开时，不在这张表里的 11-bit 帧走 `write_classic()` / `read_classic()`。bit0 关掉时这张表也不再保留。扩展帧和 CAN FD 帧在这个驱动里丢掉。
-
-没有把 CANopen 放到 `CAN_Dx_PROTOCOL2`。那条 11-bit 辅路会把帧发到主驱动的每一个接口上。ZeroOneX6 默认把 CAN1 和 CAN2 都挂在驱动 1 上，辅路会把 CANopen 打到 CAN1。辅路也只有一个，而且会收到全部 11-bit 帧，没法按 COB-ID 拆开。
-
-classic 队列 16 帧。没人读时丢掉最旧的一帧。`write_classic()` 拒绝保留 ID。位置目标用 `set_target_pos()`，单位是 plus；使能后 500 ms 内主站仍保持实际位置。
+选了 15 之后，这一路只跑 CANopen。主站使用 NMT `0x000`、SYNC `0x080`，以及该节点的 EMCY、PDO、SDO 和心跳。同一接口上的其它帧被丢掉，不再交给第二个协议。CAN1 保持 `CAN_D1_PROTOCOL 1`。位置目标用 `set_target_pos()`，单位是 plus；使能后 500 ms 内主站仍保持实际位置。
 
 ## 协议范围
 
@@ -128,6 +106,6 @@ make -C libraries/AP_eRobCANOpen check
 2. 参数按上面的例子设置后重启。eRob 只接 CAN2，1 Mbps，两端终端电阻。CAN1 维持 DroneCAN。
 3. 驱动线程会重试 `erob_configure_pdo_csp()`，直到伺服就绪（手册：较新固件大约 5 s）。失败时约每 5 s 再试一次。
 4. 使能后至少 500 ms 再 `set_target_pos()`。
-5. 用 CAN 分析仪看 CAN2：配置阶段没有 SYNC；运行后每 4 ms 有 `0x080`，以及本节点的 `0x200+id` / `0x180+id`。CAN1 上不应出现这些 11-bit 帧。其它 11-bit ID 仍可在 CAN2 上收发。
+5. 用 CAN 分析仪看 CAN2：配置阶段没有 SYNC；运行后每 4 ms 有 `0x080`，以及本节点的 `0x200+id` / `0x180+id`。CAN1 上不应出现这些帧。CAN2 上不要再挂别的协议。
 
 出厂 Node-ID、出厂 PDO 和减速比仍未在手册里写死。驱动会按 §5.5.1 强制重映射，但联调前仍要以客户 EDS 或 SDO 读回为准。

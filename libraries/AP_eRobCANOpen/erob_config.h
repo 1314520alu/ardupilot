@@ -2,11 +2,9 @@
 
 /*
  * Physical ports on ZeroOne X6 / X6 Ultra:
- *   CAN1 = DroneCAN. This module does not claim it.
- *   CAN2 = AP_CAN::Protocol::ERobCANOpen (15) when the user selects it.
- * Other 11-bit IDs on that port stay classic CAN; AP_eRobCANOpen demuxes them.
- * PROTOCOL2 is not used: its 11-bit aux path transmits on every iface of the
- * primary driver, and ZeroOneX6 defaults put CAN1 and CAN2 on one DroneCAN driver.
+ *   CAN1 = DroneCAN when CAN_D1_PROTOCOL is 1. This module does not claim it.
+ *   CAN2 = CANopen when that driver is CAN_Dx_PROTOCOL 15 (ERobCANOpen).
+ * One protocol owns the iface. This driver discards every frame it does not use.
  * HAL iface index is zero-based, so CAN2 is iface 1.
  */
 
