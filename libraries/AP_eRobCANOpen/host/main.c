@@ -161,6 +161,17 @@ int main(void)
                 "pwm below servo min clamps");
     expect_true(erob_pwm_to_plus(1500, 1500, 1500, 10, 20) == 10,
                 "equal pwm ends do not divide");
+    expect_true(erob_target_plus(0, 0) == 0, "center 0 leaves the mapped target unchanged");
+    expect_true(erob_target_plus(-43691, 262144) == 218453, "19-bit minus 30 deg is 218453");
+    expect_true(erob_target_plus(43691, 262144) == 305835, "19-bit plus 30 deg is 305835");
+    expect_true(erob_target_plus(0, 262144) == 262144, "symmetric MIN/MAX midpoint is CTR");
+    expect_true(erob_pwm_to_plus(1500, 1000, 2000, -43691, 43691) == 0,
+                "PWM midpoint maps to the MIN/MAX midpoint");
+    expect_true(erob_plus_rel_center(262144, 262144) == 0, "center count is zero relative");
+    expect_true(erob_plus_rel_center(218453, 262144) == -43691, "absolute low end is -30 deg");
+    expect_true(erob_plus_rel_center(305835, 262144) == 43691, "absolute high end is +30 deg");
+    expect_true(near_f(erob_position_deg(erob_plus_rel_center(262144, 262144), EROB_PLUS_PER_REV), 0.0f),
+                "center count is 0 degrees");
     expect_true(near_f(erob_position_deg(0, EROB_PLUS_PER_REV), 0.0f), "zero plus is zero degrees");
     expect_true(near_f(erob_position_deg(EROB_PLUS_PER_REV, EROB_PLUS_PER_REV), 360.0f),
                 "one output revolution is 360 degrees");

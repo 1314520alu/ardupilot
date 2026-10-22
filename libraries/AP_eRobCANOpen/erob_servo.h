@@ -137,6 +137,12 @@ void erob_poll(erob_servo_t *s);
 int32_t erob_pwm_to_plus(uint16_t pwm, uint16_t pwm_min, uint16_t pwm_max,
                          int32_t plus_min, int32_t plus_max);
 
+/* Absolute 0x607A count: center + mapped offset. Saturates to int32. */
+int32_t erob_target_plus(int32_t mapped, int32_t center);
+
+/* 0x6064 relative to center, for degrees. Saturates to int32. */
+int32_t erob_plus_rel_center(int32_t absolute, int32_t center);
+
 erob_state_t erob_get_state(const erob_servo_t *s);
 uint16_t erob_get_statusword(const erob_servo_t *s);
 int32_t erob_get_position(const erob_servo_t *s);

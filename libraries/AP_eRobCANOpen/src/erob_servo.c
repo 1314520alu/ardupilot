@@ -491,6 +491,27 @@ int32_t erob_pwm_to_plus(uint16_t pwm, uint16_t pwm_min, uint16_t pwm_max,
     return plus_min + (int32_t)(((int64_t)(plus_max - plus_min) * (int64_t)delta) / (int64_t)span);
 }
 
+static int32_t sat_i32(int64_t v)
+{
+    if (v > 2147483647LL) {
+        return 2147483647;
+    }
+    if (v < -2147483647LL - 1) {
+        return (int32_t)(-2147483647LL - 1);
+    }
+    return (int32_t)v;
+}
+
+int32_t erob_target_plus(int32_t mapped, int32_t center)
+{
+    return sat_i32((int64_t)center + (int64_t)mapped);
+}
+
+int32_t erob_plus_rel_center(int32_t absolute, int32_t center)
+{
+    return sat_i32((int64_t)absolute - (int64_t)center);
+}
+
 erob_state_t erob_get_state(const erob_servo_t *s)
 {
     return s->state;

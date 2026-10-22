@@ -54,13 +54,13 @@ const AP_Param::GroupInfo AP_eRobCANOpen::var_info[] = {
 
     // @Param: MIN
     // @DisplayName: eRob CAN position min
-    // @Description: CSP target in plus when the servo output is at SERVOx_MIN. All axes share this end. One output revolution is RES counts, default 524288. This limit stays in plus.
+    // @Description: Offset in plus from the center when the servo output is at SERVOx_MIN. The CSP target written to 0x607A is center + this mapped value. Center is CTR, or CTn when that slot is non-zero. All axes share this offset. Default 0 with CTR 0 keeps an absolute map.
     // @User: Advanced
     AP_GROUPINFO("MIN", 4, AP_eRobCANOpen, _pos_min, 0),
 
     // @Param: MAX
     // @DisplayName: eRob CAN position max
-    // @Description: CSP target in plus when the servo output is at SERVOx_MAX. All axes share this end. One output revolution is RES counts, default 524288. This limit stays in plus. Per-axis travel is not separate yet.
+    // @Description: Offset in plus from the center when the servo output is at SERVOx_MAX. The CSP target written to 0x607A is center + this mapped value. The PWM midpoint maps to center + (MIN+MAX)/2. All axes share this offset. Per-axis travel is not separate yet.
     // @User: Advanced
     AP_GROUPINFO("MAX", 5, AP_eRobCANOpen, _pos_max, 524288),
 
@@ -79,6 +79,13 @@ const AP_Param::GroupInfo AP_eRobCANOpen::var_info[] = {
     // @Increment: 1
     // @User: Standard
     AP_GROUPINFO("RES", 24, AP_eRobCANOpen, _pos_res, 524288),
+
+    // @Param: CTR
+    // @DisplayName: eRob CAN output center
+    // @Description: Absolute output-encoder counts at the reference center. 0x607A is this value plus the MIN/MAX offset mapped from servo PWM. Default 0 leaves targets absolute, as before. The PWM midpoint maps to CTR + (MIN+MAX)/2. Degrees use (0x6064 - center) * 360 / RES. A 19-bit single-turn center is 262144. CTn overrides this for one slot when non-zero. No reboot.
+    // @Increment: 1
+    // @User: Standard
+    AP_GROUPINFO("CTR", 25, AP_eRobCANOpen, _pos_ctr, 0),
 
     // @Param: SV1
     // @DisplayName: eRob CAN slot 1 servo
@@ -208,6 +215,62 @@ const AP_Param::GroupInfo AP_eRobCANOpen::var_info[] = {
     // @RebootRequired: True
     AP_GROUPINFO("ID8", 23, AP_eRobCANOpen, _slot_id[7], 0),
 
+    // @Param: CT1
+    // @DisplayName: eRob CAN slot 1 center
+    // @Description: Absolute output-encoder center in plus for slot 1. 0 uses CTR. A non-zero value replaces CTR for this slot only. It is the encoder count at mechanical center, not an offset from CTR. MIN and MAX remain offsets from this center. No reboot.
+    // @Increment: 1
+    // @User: Standard
+    AP_GROUPINFO("CT1", 26, AP_eRobCANOpen, _slot_ct[0], 0),
+
+    // @Param: CT2
+    // @DisplayName: eRob CAN slot 2 center
+    // @Description: Absolute center in plus for slot 2. 0 uses CTR. See CT1.
+    // @Increment: 1
+    // @User: Standard
+    AP_GROUPINFO("CT2", 27, AP_eRobCANOpen, _slot_ct[1], 0),
+
+    // @Param: CT3
+    // @DisplayName: eRob CAN slot 3 center
+    // @Description: Absolute center in plus for slot 3. 0 uses CTR. See CT1.
+    // @Increment: 1
+    // @User: Standard
+    AP_GROUPINFO("CT3", 28, AP_eRobCANOpen, _slot_ct[2], 0),
+
+    // @Param: CT4
+    // @DisplayName: eRob CAN slot 4 center
+    // @Description: Absolute center in plus for slot 4. 0 uses CTR. See CT1.
+    // @Increment: 1
+    // @User: Standard
+    AP_GROUPINFO("CT4", 29, AP_eRobCANOpen, _slot_ct[3], 0),
+
+    // @Param: CT5
+    // @DisplayName: eRob CAN slot 5 center
+    // @Description: Absolute center in plus for slot 5. 0 uses CTR. See CT1.
+    // @Increment: 1
+    // @User: Standard
+    AP_GROUPINFO("CT5", 30, AP_eRobCANOpen, _slot_ct[4], 0),
+
+    // @Param: CT6
+    // @DisplayName: eRob CAN slot 6 center
+    // @Description: Absolute center in plus for slot 6. 0 uses CTR. See CT1.
+    // @Increment: 1
+    // @User: Standard
+    AP_GROUPINFO("CT6", 31, AP_eRobCANOpen, _slot_ct[5], 0),
+
+    // @Param: CT7
+    // @DisplayName: eRob CAN slot 7 center
+    // @Description: Absolute center in plus for slot 7. 0 uses CTR. See CT1.
+    // @Increment: 1
+    // @User: Standard
+    AP_GROUPINFO("CT7", 32, AP_eRobCANOpen, _slot_ct[6], 0),
+
+    // @Param: CT8
+    // @DisplayName: eRob CAN slot 8 center
+    // @Description: Absolute center in plus for slot 8. 0 uses CTR. See CT1.
+    // @Increment: 1
+    // @User: Standard
+    AP_GROUPINFO("CT8", 33, AP_eRobCANOpen, _slot_ct[7], 0),
+
     AP_GROUPEND
 };
 
@@ -277,11 +340,12 @@ bool AP_eRobCANOpen::slots_configured() const
     return false;
 }
 
-void AP_eRobCANOpen::add_axis(uint8_t &num, uint8_t node, uint8_t channel)
+void AP_eRobCANOpen::add_axis(uint8_t &num, uint8_t node, uint8_t channel, uint8_t slot)
 {
     Axis &axis = _axis[num];
     axis.node = node;
     axis.channel = channel;
+    axis.slot = slot;
     axis.tried = false;
     axis.reported = false;
     axis.fault_active = false;
@@ -337,7 +401,7 @@ void AP_eRobCANOpen::setup_axes()
             }
             seen_id[id] = true;
             seen_sv[sv] = true;
-            add_axis(num, uint8_t(id), uint8_t(sv - 1));
+            add_axis(num, uint8_t(id), uint8_t(sv - 1), i);
         }
         if (num == 0) {
             GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "eRob CAN: no servo slots");
@@ -364,7 +428,7 @@ void AP_eRobCANOpen::setup_axes()
                 truncated = true;
                 break;
             }
-            add_axis(num, uint8_t(node + num), chan);
+            add_axis(num, uint8_t(node + num), chan, 0xFF);
         }
         if (num == 0) {
             GCS_SEND_TEXT(MAV_SEVERITY_INFO, "eRob CAN: servo mask is 0");
@@ -471,6 +535,18 @@ int32_t AP_eRobCANOpen::counts_per_rev() const
         return EROB_PLUS_PER_REV;
     }
     return res;
+}
+
+int32_t AP_eRobCANOpen::axis_center(uint8_t index) const
+{
+    const uint8_t slot = _axis[index].slot;
+    if (slot < EROB_SLOT_COUNT) {
+        const int32_t ct = _slot_ct[slot].get();
+        if (ct != 0) {
+            return ct;
+        }
+    }
+    return _pos_ctr.get();
 }
 
 bool AP_eRobCANOpen::axis_faulted(uint8_t index) const
@@ -600,7 +676,7 @@ void AP_eRobCANOpen::publish_feedback(uint8_t index, uint32_t now_ms)
             // @Field: TimeUS: Time since system startup
             // @Field: Ax: axis index on this driver
             // @Field: Sv: servo output number, SERVO1 is 1
-            // @Field: Deg: output position from 0x6064, degrees, using RES
+            // @Field: Deg: output angle from center, (0x6064 - center) * 360 / RES. 0 is the center.
             // @Field: Rpm: output speed from 0x606C, rpm, using RES
             // @Field: Mrpm: motor rpm, output rpm times GEAR, invalid when GEAR is 0
             // @Field: Amp: current from 0x6078 and 0x6075, ampere
@@ -615,7 +691,7 @@ void AP_eRobCANOpen::publish_feedback(uint8_t index, uint32_t now_ms)
                 AP_HAL::micros64(),
                 unsigned(index),
                 unsigned(servo_num),
-                erob_position_deg(fb->pos_actual, res),
+                erob_position_deg(erob_plus_rel_center(fb->pos_actual, axis_center(index)), res),
                 out_rpm,
                 motor_rpm,
                 amps,
@@ -660,7 +736,7 @@ void AP_eRobCANOpen::publish_feedback(uint8_t index, uint32_t now_ms)
     erob_named(name, sizeof(name), servo_num, 'P');
     gcs().send_named_int(name, fb->pos_actual);
     erob_named(name, sizeof(name), servo_num, 'G');
-    gcs().send_named_float(name, erob_position_deg(fb->pos_actual, res));
+    gcs().send_named_float(name, erob_position_deg(erob_plus_rel_center(fb->pos_actual, axis_center(index)), res));
     if ((fb->valid & EROB_FB_TPDO2) != 0) {
         erob_named(name, sizeof(name), servo_num, 'M');
         gcs().send_named_int(name, fb->motor_enc);
@@ -836,9 +912,9 @@ void AP_eRobCANOpen::push_servos()
         if (axis_faulted(i)) {
             continue;
         }
-        const int32_t plus = erob_pwm_to_plus(pwm, ch->get_output_min(), ch->get_output_max(),
-                                              _pos_min.get(), _pos_max.get());
-        erob_set_target_pos(&_axis[i].servo, plus);
+        const int32_t mapped = erob_pwm_to_plus(pwm, ch->get_output_min(), ch->get_output_max(),
+                                                _pos_min.get(), _pos_max.get());
+        erob_set_target_pos(&_axis[i].servo, erob_target_plus(mapped, axis_center(i)));
     }
 }
 

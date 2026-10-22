@@ -60,7 +60,7 @@ CAN_D2_EROB_RES  524288
 
 上面这组是旧的连续编号。`SV1`..`SV8` 全是 0 时才走它：`BM` 从低位到高位，最低位用 `NODE`，下一位用下一个 Node-ID。`1008` 是 bit 4..9，也就是 SERVO5..SERVO10，节点 1..6。
 
-任意 Node-ID 用槽，不要靠连续编号。全名 `CAN_D2_EROB_SV1`、`CAN_D2_EROB_ID1` 都是 15 个字符（上限 16）。`SVn` 是 SERVO 输出号 1..32，0 表示这个槽不用。`IDn` 是该槽的 CANopen Node-ID，1..127。飞控不写 `0x100B`，ID 在舵机上写死。改 `SV` / `ID` / `NODE` / `BM` 都要重启。`MIN`、`MAX`、`GEAR`、`RES` 仍是这一路所有轴共用。
+任意 Node-ID 用槽，不要靠连续编号。全名 `CAN_D2_EROB_SV1`、`CAN_D2_EROB_ID1` 都是 15 个字符（上限 16）。`SVn` 是 SERVO 输出号 1..32，0 表示这个槽不用。`IDn` 是该槽的 CANopen Node-ID，1..127。飞控不写 `0x100B`，ID 在舵机上写死。改 `SV` / `ID` / `NODE` / `BM` 都要重启。`MIN`、`MAX`、`GEAR`、`RES`、`CTR` 仍是这一路所有轴共用。`CT1`..`CT8` 只在非 0 时替换对应槽的中心，不用重启。
 
 只要有一个 `SVn` 不是 0，槽生效，`NODE` 和 `BM` 忽略。`SVn` 全是 0 才回到上面的 `NODE` + `BM`。初始化时跳过并在地面站告警：重复的 ID、重复的 SERVO 号、ID 超出 1..127、或者 `SVn` 有值但 `IDn` 是 0。先出现的那个槽保留。
 
@@ -70,7 +70,7 @@ CAN_D2_EROB_RES  524288
 
 `15` 是 `AP_CAN::Protocol::eRobCAN`，参数列表显示为 `eRob CAN`。一个 `CAN_Dx_PROTOCOL` 独占那个虚拟驱动：1 是 DroneCAN，15 是这组舵机。驱动只接受 HAL 接口 1（CAN2）。这不是通用 CANopen 工具，默认只做 CiA402 CSP。
 
-eRob 按舵机用。`CAN_D2_EROB_BM` 的位和 `CAN_Dx_UC_SRV_BM` 一样：bit 0 是 SERVO1。全名放不下 `SRV_BM`（`CAN_D2_EROB_SRV_BM` 有 18 个字符，上限 16），所以参数名是 `BM`。最多 8 轴。`SRV_Channels::push()` 把这些通道的 PWM 线性映到 CSP 目标：`SERVOx_MIN` 对应 `CAN_D2_EROB_MIN`，`SERVOx_MAX` 对应 `CAN_D2_EROB_MAX`，单位是 plus。一圈输出端是 `RES` 个计数。掩码为 0 且槽也全空时不跟舵机输出。第一轴负责发 SYNC，其余轴只收这个 SYNC。同一接口上的其它帧被丢掉。CAN1 保持 `CAN_D1_PROTOCOL 1`。使能后 500 ms 内主站仍保持实际位置，之后才跟踪舵机目标。每轴单独的行程还没做。输出角度不乘减速比；电机转速才用 `GEAR`。
+eRob 按舵机用。`CAN_D2_EROB_BM` 的位和 `CAN_Dx_UC_SRV_BM` 一样：bit 0 是 SERVO1。全名放不下 `SRV_BM`（`CAN_D2_EROB_SRV_BM` 有 18 个字符，上限 16），所以参数名是 `BM`。最多 8 轴。`SRV_Channels::push()` 把 PWM 线性映到 `MIN`..`MAX`（相对中心的偏移），再加上 `CTR`（该槽 `CTn` 非 0 时用 `CTn`）写入 `0x607A`。`CTR` 默认 0，目标仍是映射值本身。一圈输出端是 `RES` 个计数。掩码为 0 且槽也全空时不跟舵机输出。第一轴负责发 SYNC，其余轴只收这个 SYNC。同一接口上的其它帧被丢掉。CAN1 保持 `CAN_D1_PROTOCOL 1`。使能后 500 ms 内主站仍保持实际位置，之后才跟踪舵机目标。每轴单独的行程还没做。输出角度不乘减速比；电机转速才用 `GEAR`。
 
 遥测名字仍是 `ER` + SERVO 号 + 字母。日志 `ERB1` / `ERB3` 的 `Sv` 是这个 SERVO 号。槽 `SV1=5`、`ID1=11` 时，节点 11 的数据出现在 `ER5*`，`Sv` 为 5。
 
@@ -120,7 +120,7 @@ CAN_D2_EROB_RES  524288
 | SERVO3 | Motor3，斜盘 | 35 | `SV3=3` |
 | SERVO4 | Motor4，尾舵 | 36 | `SV4=4` |
 
-60° 行程、中位两侧各 30°。`RES` 为 524288 时，`524288 * 30 / 360 = 43690.67`，取 ±43691。`RES` 为 1048576 时，`1048576 * 30 / 360 = 87381.33`，取 ±87381。PWM 中位对应 0 plus。下面的 ID 只是例子，改成舵机上写死的号。型号参数见下一节。
+60° 行程、中位两侧各 30°。`MIN` / `MAX` 是相对中心的偏移，不是绝对编码器计数。PWM 的最小端映到 `中心 + MIN`，最大端映到 `中心 + MAX`。PWM 中点（对称安装时的 `SERVOx` 中位）映到 `中心 + (MIN+MAX)/2`。`CTR` 默认 0，这时行为和以前一样，目标就是映射值本身。`CTn` 非 0 时只替换该槽的中心。型号参数见下一节。下面的 ID 只是例子。
 
 ```text
 SERVO1_FUNCTION  33
@@ -138,6 +138,7 @@ CAN_D2_EROB_ID4  14
 CAN_D2_EROB_MIN  -43691
 CAN_D2_EROB_MAX  43691
 CAN_D2_EROB_RES  524288
+CAN_D2_EROB_CTR  0
 ```
 
 飞行前用 `H_SV_MAN` 核对每个舵的方向和中位。`H_SV_MAN` 飞行时必须是 0（Disabled）。方向用舵机通道自己的反向，驱动不再翻一次。
@@ -157,30 +158,25 @@ eRob: SERVO1 id 11 statusword fault
 | 项 | 值 |
 | --- | --- |
 | 铭牌减速比 | 120。电机转数是铭牌加 1，所以 `GEAR` 填 121 |
-| `RES` | 先填 524288。FHS 是高精度单圈输出编码器，可能是 20 bit（1048576）。输出轴转一整圈，看 `0x6064` 增量再改。驱动不读 `0x608F`，也不改这个参数 |
-| ±30°，`RES` 524288 | `MIN` −43691，`MAX` 43691 |
-| ±30°，`RES` 1048576 | `MIN` −87381，`MAX` 87381 |
+| `RES` | 524288。客户确认单圈中点是 262144，等于 `RES/2`，所以是 19 bit |
+| `CTR` | 262144。`MIN` / `MAX` 是相对它的偏移 |
+| ±30° | `MIN` −43691，`MAX` 43691。绝对目标是 218453..305835。PWM 中点是 262144，角度 0° |
 | 额定扭矩 | 178 N·m。驱动仍从 `0x6076` 读 mN·m，不把 178 写进参数 |
 | 峰值输出转速 | 16.7 rpm，大约 100 °/s。60° 全行程至少 0.6 s |
 | 刹车 | 无。掉电后斜盘不会被抱闸保住 |
 | 供电 | 48 V |
 
-19 bit 时：
-
 ```text
 CAN_D2_EROB_GEAR 121
 CAN_D2_EROB_RES  524288
+CAN_D2_EROB_CTR  262144
 CAN_D2_EROB_MIN  -43691
 CAN_D2_EROB_MAX  43691
 ```
 
-若一整圈 `0x6064` 的增量是 1048576，只改这三项，槽和 ID 不动：
+写入 `0x607A` 的绝对计数是 `CTR + 映射值`。PWM 最小端是 218453，最大端是 305835，中点是 262144。`ER5G` 和 `ERB3.Deg` 是 `(0x6064 - 中心) * 360 / RES`，中心处为 0°。`CT1`..`CT8` 默认 0，表示用 `CTR`。某一轴的机械中位不是 262144 时，把那个槽的 `CTn` 设成绝对计数；0 不能当作“中心在 0 且和 CTR 不同”，因为 0 的意思就是沿用 `CTR`。
 
-```text
-CAN_D2_EROB_RES  1048576
-CAN_D2_EROB_MIN  -87381
-CAN_D2_EROB_MAX  87381
-```
+装好后在机械中位读 `0x6064`。单圈中点应落在 262144 附近，多圈部分应为 0。若读数是 `262144 + N * 524288`，说明多圈计数不是 0，`CTR` 要填实际读数，不能只填 `RES/2`。`ER5P` 仍是原始 plus，不减中心。
 
 ## 协议范围
 
@@ -229,7 +225,7 @@ Pre-op 里把 TxPDO 写成下面这张表。每条都不超过 8 字节，传输
 
 | 量 | 公式 |
 | --- | --- |
-| 输出角度 ° | `0x6064 * 360 / RES` |
+| 输出角度 ° | `(0x6064 - 中心) * 360 / RES`。中心是该轴的 `CTn`，`CTn` 为 0 时用 `CTR` |
 | 输出转速 rpm | `0x606C * 60 / RES` |
 | 电机转速 rpm | 输出转速 × `GEAR`，仅当 `GEAR > 0`。eRob142 的 120 减速比填 121 |
 | 电流 A | `0x6078 * 0x6075 / 1e6`。6078 是额定电流的千分比，6075 是 mA |
@@ -253,7 +249,7 @@ Mission Planner 回放时画 `ERB1`（原始）和 `ERB3`（物理单位）。`S
 | 名字 | 对象 | 类型 |
 | --- | --- | --- |
 | `ER5P` | `0x6064` 实际位置 plus | NAMED_VALUE_INT |
-| `ER5G` | 输出角度 °。`P` 仍是 plus，所以角度不用 `P` | NAMED_VALUE_FLOAT |
+| `ER5G` | 相对中心的输出角度 °。0 是中心。`P` 仍是原始 plus | NAMED_VALUE_FLOAT |
 | `ER5M` | `0x2240` 电机编码器 plus | NAMED_VALUE_INT |
 | `ER5L` | `0x20A0` 负载编码器 plus | NAMED_VALUE_INT |
 | `ER5S` | `0x606C` 速度 plus/s | NAMED_VALUE_INT |
@@ -275,7 +271,7 @@ Mission Planner 的 MAVLink Inspector 里看 `NAMED_VALUE_INT` 和 `NAMED_VALUE_
 
 四轴、每轴四个 TxPDO、4 ms 一拍，大约是 4000 个 TxPDO/s，再加上 RxPDO 和 SYNC。1 Mbps 上还放得下。八个槽都接上会更紧。
 
-使能后 500 ms 内仍下发对齐过的实际位置，不发新目标（手册 §5.1.1）。下使能与使能间隔小于 300 ms 时 `erob_disable()` 直接返回失败（手册 §5.1.2）。位置单位是 plus。输出角度和输出转速除以 `RES`，不乘减速比。减速比只用于电机转速。
+使能后 500 ms 内仍下发对齐过的实际位置，不发新目标（手册 §5.1.1）。下使能与使能间隔小于 300 ms 时 `erob_disable()` 直接返回失败（手册 §5.1.2）。位置命令单位是 plus。输出角度是 `(0x6064 - 中心) * 360 / RES`，输出转速是 `0x606C * 60 / RES`，都不乘减速比。减速比只用于电机转速。
 
 每个 Node-ID 有自己的 `canopen_master_t`。多轴共用这一路时，只有第一轴 `sync_enabled`，其余关掉，否则总线上会出现多个 SYNC。
 
