@@ -8,12 +8,13 @@
 
 | 项 | 取值 |
 | --- | --- |
-| 主站 | 飞控上的本模块，预留接 HAL CAN iface 1 |
+| 主站 | `AP_eRobCANOpen`，只绑定 HAL CAN iface 1 |
 | 从站 | eRob 关节 |
-| 比特率 | 1 Mbps |
+| 比特率 | 1 Mbps（`CAN_P2_BITRATE`） |
 | 周期 | 4 ms（4000 µs） |
+| 协议号 | `CAN_Dx_PROTOCOL = 15` |
 | CAN1 | DroneCAN，本模块不占用 |
-| CAN2 | 本主站专用 |
+| CAN2 | CANopen 主站，其余 11-bit ID 为标准 CAN |
 
 手册 CSP 示例把通信周期设成 1 ms（`0x1006 = 1000`）。4 ms 仍是该对象的整数微秒值。不稳定时可以先把 `EROB_SYNC_PERIOD_US` 改成 10000，不必去动 CAN1。
 
@@ -124,10 +125,11 @@ RxPDO1：
 
 ## 7. 总线
 
-1. 只发 11-bit 帧。扩展帧直接忽略，避免和 DroneCAN 的 29-bit 标识混在一起。
-2. 软件只处理本 Node-ID 的 TPDO1/TPDO2、SDO 应答、EMCY、Boot-up。
-3. 不要在 CAN1 上调用 `can_bus_send`。HAL 胶水以后只能绑定 iface 1。
-4. 多轴时全总线只有一个 SYNC 生产者。
+1. 只发 11-bit 帧。扩展帧和 CAN FD 帧直接丢掉。
+2. CANopen 占用 NMT `0x000`、SYNC `0x080`，以及本 Node-ID 的 EMCY、四个 PDO、SDO 和心跳。`erob_id_is_reserved()` 是同一份判断。
+3. 其余 11-bit ID 进 classic 队列，不交给主站。`CAN_Dx_PROTOCOL2` 不用，原因见 README。
+4. `add_interface()` 拒绝 iface 1 以外的口，所以 CAN1 上不会调用 `can_bus_send`。
+5. 多轴时全总线只有一个 SYNC 生产者。一个驱动实例只服务一个 Node-ID。
 
 ## 8. 仍要客户确认
 

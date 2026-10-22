@@ -1,4 +1,5 @@
-# Host build only. These sources are not in the vehicle waf glob.
+# Host build only. waf does not glob src/ or host/.
+# Vehicle builds compile AP_eRobCANOpen.cpp, which includes src/*.c when enabled.
 CC ?= gcc
 CFLAGS ?= -Wall -Wextra -Werror -std=c11 -O0 -g -I.
 SRCS = src/canopen_master.c src/erob_servo.c host/can_bus_stub.c host/main.c

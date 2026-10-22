@@ -126,6 +126,18 @@ int main(void)
     expect_true(EROB_CAN_BITRATE == 1000000u, "default bitrate is 1 Mbps");
     expect_true(EROB_SYNC_PERIOD_US == 4000u, "default SYNC period is 4000 us");
     expect_true(erob_hal_can_iface() == 1u, "HAL iface for CAN2 is 1, not CAN1");
+    expect_true(erob_id_is_reserved(0x000, node), "NMT is reserved");
+    expect_true(erob_id_is_reserved(0x080, node), "SYNC is reserved");
+    expect_true(erob_id_is_reserved(0x081, node), "EMCY for node 1 is reserved");
+    expect_true(erob_id_is_reserved(0x181, node), "TPDO1 is reserved");
+    expect_true(erob_id_is_reserved(0x201, node), "RPDO1 is reserved");
+    expect_true(erob_id_is_reserved(0x281, node), "TPDO2 is reserved");
+    expect_true(erob_id_is_reserved(0x581, node), "SDO tx is reserved");
+    expect_true(erob_id_is_reserved(0x601, node), "SDO rx is reserved");
+    expect_true(erob_id_is_reserved(0x701, node), "heartbeat is reserved");
+    expect_true(!erob_id_is_reserved(0x123, node), "0x123 stays classic CAN");
+    expect_true(!erob_id_is_reserved(0x181, 2), "another node's TPDO stays classic");
+    expect_true(erob_id_is_reserved(0x080, 2), "SYNC stays reserved for any node");
 
     co_master_init(&master, bus, node);
     erob_init(&servo, &master);

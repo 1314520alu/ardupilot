@@ -18,9 +18,8 @@ typedef struct {
 
 /*
  * Platform hook. The host stub implements these symbols.
- * A later ZeroOneX6 glue layer should bind them to HAL CAN iface
- * erob_hal_can_iface() at EROB_CAN_BITRATE, standard frames only.
- * That glue is not linked into the vehicle yet.
+ * AP_eRobCANOpen.cpp implements them for the HAL iface it accepted (CAN2),
+ * standard frames only, when AP_EROB_CANOPEN_ENABLED is set.
  */
 typedef struct can_bus can_bus_t;
 

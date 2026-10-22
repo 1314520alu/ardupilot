@@ -8,8 +8,8 @@
  * (top-level *.c plus utility/) does not link it into vehicle firmware.
  */
 
-#include "canopen_master.h"
-#include "erob_config.h"
+#include "../canopen_master.h"
+#include "../erob_config.h"
 
 #include <string.h>
 
@@ -252,4 +252,37 @@ void co_master_poll(canopen_master_t *m)
 {
     co_master_poll_rx(m);
     co_master_poll_sync(m);
+}
+
+bool erob_id_is_reserved(uint16_t id, uint8_t node_id)
+{
+    static const uint16_t bases[] = {
+        CO_COB_EMCY_BASE,
+        CO_COB_TPDO1_BASE,
+        CO_COB_RPDO1_BASE,
+        CO_COB_TPDO2_BASE,
+        CO_COB_RPDO2_BASE,
+        CO_COB_TPDO3_BASE,
+        CO_COB_RPDO3_BASE,
+        CO_COB_TPDO4_BASE,
+        CO_COB_RPDO4_BASE,
+        CO_COB_SDO_TX_BASE,
+        CO_COB_SDO_RX_BASE,
+        CO_COB_HB_BASE
+    };
+    uint16_t std_id = (uint16_t)(id & 0x7ffu);
+    uint8_t i;
+
+    if (std_id == CO_COB_NMT || std_id == CO_COB_SYNC) {
+        return true;
+    }
+    if (node_id < 1 || node_id > 127) {
+        return false;
+    }
+    for (i = 0; i < (uint8_t)(sizeof(bases) / sizeof(bases[0])); i++) {
+        if (std_id == (uint16_t)(bases[i] + node_id)) {
+            return true;
+        }
+    }
+    return false;
 }

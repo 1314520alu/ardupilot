@@ -2,7 +2,7 @@
 
 零差云控 eRob（CANopen / CiA402）的最小主站。目标机是零一 X6 Ultra，仓库里的板型是 `libraries/AP_HAL_ChibiOS/hwdef/ZeroOneX6`。
 
-本目录是可选模块：源码放在 `src/` 和 `host/`，不在库顶层，因此 waf 不会把它链进 Copter / Plane / Rover。飞控默认行为不变，CAN1 上的 DroneCAN 也不改。
+飞控侧由 `CAN_Dx_PROTOCOL = 15`（`ERobCANOpen`）构造 `AP_eRobCANOpen`。`AP_EROB_CANOPEN_ENABLED` 默认为 0，源码在 `src/`，由 `AP_eRobCANOpen.cpp` 在该宏为 1 时包含。ZeroOneX6 的 hwdef 打开这个宏。没选协议 15 时不会构造驱动。CAN1 上的 DroneCAN 默认参数不动。
 
 ## 与上游 ArduPilot 的关系
 
@@ -38,17 +38,34 @@ git rebase master
 | 丝印 | MCU | 本项目 |
 | --- | --- | --- |
 | CAN1 | PD0 / PD1 | DroneCAN。默认用途不动 |
-| CAN2 | PB12 / PB13 | 本主站，只接 eRob |
+| CAN2 | PB12 / PB13 | 协议 15：eRob CANopen，其余 11-bit ID 仍是标准 CAN |
 
-`ZeroOneX6/defaults.parm` 里 `CAN_P1_DRIVER 1` 且 `CAN_P2_DRIVER 1`：两个物理口都交给虚拟驱动 1，而驱动 1 的默认协议是 DroneCAN。这次提交不改这份默认参数，所以现有固件仍是两路 DroneCAN。
+`ZeroOneX6/defaults.parm` 里 `CAN_P1_DRIVER 1` 且 `CAN_P2_DRIVER 1`：两个物理口都交给虚拟驱动 1，协议仍是 DroneCAN。数值没有改，只加了注释。现有固件仍是两路 DroneCAN，直到用户改参数并重启。
 
-以后若要把 CAN2 交给本驱动，只改集成配置，不改 CAN1：
+要用 CANopen，按 ArduPilot 的三层参数打开 CAN2，CAN1 保持不动：
 
-1. `CAN_P1_DRIVER` 保持 1（DroneCAN 留在 CAN1）。
-2. `CAN_P2_DRIVER` 设为 0，避免 DroneCAN 再占用 CAN2。
-3. 胶水层打开 HAL 接口 `erob_hal_can_iface()`（CAN2 对应 1，不是 0），比特率 `EROB_CAN_BITRATE`（1 Mbps），只发 11-bit 标准帧。
+```text
+CAN_P1_DRIVER    1
+CAN_D1_PROTOCOL  1
+CAN_P2_DRIVER    2
+CAN_D2_PROTOCOL  15
+CAN_P2_BITRATE   1000000
+CAN_D2_EROB_NODE 1
+```
 
-`can_bus_send` / `can_bus_recv` / `can_bus_millis` 是预留接缝。host 桩实现了它们。飞控侧的 HAL 胶水还没写，也还没接到主循环。
+`15` 是 `AP_CAN::Protocol::ERobCANOpen`。`CAN_D2_EROB_NODE` 刚好 16 个字符。驱动只接受 HAL 接口 1（CAN2）。节点号超出 1..127 时按 1 处理。
+
+## 标准 CAN 和 CANopen
+
+两条总线角色：
+
+- CAN1 继续 DroneCAN（29-bit）。本驱动不在 CAN1 上收发。
+- CAN2 的主协议是 CANopen。主站占用 NMT `0x000`、SYNC `0x080`，以及该节点的 EMCY、TPDO/RPDO 1..4、SDO `0x580+id` / `0x600+id`、心跳 `0x700+id`。
+- 同一条 CAN2 上，不在这张表里的 11-bit 帧走 `write_classic()` / `read_classic()`。扩展帧和 CAN FD 帧在这个驱动里丢掉，不进 CANopen，也不进 classic 队列。
+
+没有把 CANopen 放到 `CAN_Dx_PROTOCOL2`。那条 11-bit 辅路会把帧发到主驱动的每一个接口上。ZeroOneX6 默认把 CAN1 和 CAN2 都挂在驱动 1 上，辅路会把 CANopen 打到 CAN1。辅路也只有一个，而且会收到全部 11-bit 帧，没法按 COB-ID 拆开。
+
+classic 队列 16 帧。没人读时丢掉最旧的一帧。`write_classic()` 拒绝保留 ID。位置目标用 `set_target_pos()`，单位是 plus；使能后 500 ms 内主站仍保持实际位置。
 
 ## 协议范围
 
@@ -75,6 +92,7 @@ git rebase master
 ```text
 libraries/AP_eRobCANOpen/
   README.md  DESIGN.md  CUSTOMER_ASK.md  Makefile
+  AP_eRobCANOpen.h  AP_eRobCANOpen.cpp  AP_eRobCANOpen_config.h
   erob_config.h  can_frame.h  canopen_master.h  erob_servo.h
   src/     canopen_master.c  erob_servo.c
   host/    can_bus_stub.c  main.c
@@ -90,20 +108,14 @@ make -C libraries/AP_eRobCANOpen check
 
 通过时打印一行 `OK CAN2 iface 1 @ 1000000 bps, SYNC 4000 us, ...`，进程退出码为 0。桩会应答手册 §5.5.1 的 SDO，并检查 NMT、`0x1006 = 4000`、PDO 映射、CiA402 使能和 500 ms 位置保持。
 
-确认 waf 目前扫不到这些源文件（顶层没有 `.c` / `.cpp`，和现有的纯头文件库一样）：
-
-```bash
-find libraries/AP_eRobCANOpen -maxdepth 1 \( -name '*.c' -o -name '*.cpp' \)
-```
-
-没有输出就是预期结果。整树 `./waf copter` 很重，而且本模块还没进固件，那次编译证明不了本驱动。
+`src/*.c` 不在 waf 的顶层扫描里。`AP_eRobCANOpen.cpp` 在宏打开时把它们包含进去，避免和 host 的 Makefile 各编一份再链到同一个程序。宏为 0 时这个 cpp 是空的翻译单元。
 
 ## 联调（有舵机之后）
 
 1. 先补齐 `CUSTOMER_ASK.md`：型号与轴数、每轴 Node-ID、CSP 还是 CSV、EDS、4 ms 是否允许先放宽、位置单位和限位、样机。
-2. 只把 eRob 接到 CAN2，1 Mbps，两端终端电阻。CAN1 维持原来的 DroneCAN。
-3. 上电后等伺服就绪（手册：较新固件大约 5 s）再调用 `erob_configure_pdo_csp()`。
-4. `erob_enable()` 后至少 500 ms 再 `erob_set_target_pos()`。
-5. 用 CAN 分析仪看 CAN2：配置阶段没有 SYNC；运行后每 4 ms 有 `0x080`，以及本节点的 `0x200+id` / `0x180+id`。CAN1 上不应出现这些 11-bit 帧。
+2. 参数按上面的例子设置后重启。eRob 只接 CAN2，1 Mbps，两端终端电阻。CAN1 维持 DroneCAN。
+3. 驱动线程会重试 `erob_configure_pdo_csp()`，直到伺服就绪（手册：较新固件大约 5 s）。失败时约每 5 s 再试一次。
+4. 使能后至少 500 ms 再 `set_target_pos()`。
+5. 用 CAN 分析仪看 CAN2：配置阶段没有 SYNC；运行后每 4 ms 有 `0x080`，以及本节点的 `0x200+id` / `0x180+id`。CAN1 上不应出现这些 11-bit 帧。其它 11-bit ID 仍可在 CAN2 上收发。
 
 出厂 Node-ID、出厂 PDO 和减速比仍未在手册里写死。驱动会按 §5.5.1 强制重映射，但联调前仍要以客户 EDS 或 SDO 读回为准。

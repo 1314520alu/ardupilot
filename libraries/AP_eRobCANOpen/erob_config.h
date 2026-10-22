@@ -2,10 +2,12 @@
 
 /*
  * Physical ports on ZeroOne X6 / X6 Ultra:
- *   CAN1 = existing DroneCAN. This module must not claim it.
- *   CAN2 = CANopen master to ZeroErr eRob only.
- * ArduPilot's HAL interface index is zero-based, so CAN2 is iface 1.
- * Shared DroneCAN+CANopen on one wire was rejected.
+ *   CAN1 = DroneCAN. This module does not claim it.
+ *   CAN2 = AP_CAN::Protocol::ERobCANOpen (15) when the user selects it.
+ * Other 11-bit IDs on that port stay classic CAN; AP_eRobCANOpen demuxes them.
+ * PROTOCOL2 is not used: its 11-bit aux path transmits on every iface of the
+ * primary driver, and ZeroOneX6 defaults put CAN1 and CAN2 on one DroneCAN driver.
+ * HAL iface index is zero-based, so CAN2 is iface 1.
  */
 
 #ifndef EROB_CAN_BUS_INDEX

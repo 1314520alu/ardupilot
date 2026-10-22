@@ -7,8 +7,8 @@
  * CiA402 enable plus the fixed CSP PDO map from eRob manual §5.5.1.
  */
 
-#include "erob_servo.h"
-#include "erob_config.h"
+#include "../erob_servo.h"
+#include "../erob_config.h"
 
 #include <string.h>
 
