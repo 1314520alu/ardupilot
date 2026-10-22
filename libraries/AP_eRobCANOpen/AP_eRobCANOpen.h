@@ -51,6 +51,9 @@ public:
     int32_t get_position() const;
     uint16_t get_statusword() const;
 
+    /* Cached only. No SDO and no wait. */
+    bool pre_arm_check(char *reason, uint8_t reason_len);
+
 private:
     struct Axis {
         canopen_master_t master;

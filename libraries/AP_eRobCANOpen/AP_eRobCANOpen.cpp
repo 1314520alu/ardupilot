@@ -484,6 +484,73 @@ int32_t AP_eRobCANOpen::counts_per_rev() const
     return res;
 }
 
+bool AP_eRobCANOpen::pre_arm_check(char *reason, uint8_t reason_len)
+{
+    if (reason != nullptr && reason_len > 0) {
+        reason[0] = '\0';
+    }
+    // A configured slot that never became an axis is not enabled.
+    if (slots_configured()) {
+        for (uint8_t i = 0; i < EROB_SLOT_COUNT; i++) {
+            const int16_t sv = _slot_sv[i].get();
+            if (sv == 0) {
+                continue;
+            }
+            bool found = false;
+            for (uint8_t a = 0; a < _num_axes; a++) {
+                if (int16_t(_axis[a].channel) + 1 == sv) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                if (reason != nullptr && reason_len > 0) {
+                    snprintf(reason, reason_len, "eRob: SERVO%u id %u not enabled",
+                             unsigned(sv), unsigned(_slot_id[i].get()));
+                }
+                return false;
+            }
+        }
+    }
+    const uint32_t now_ms = AP_HAL::millis();
+    const int32_t ctr = _pos_ctr.get();
+    const int32_t pos_min = _pos_min.get();
+    const int32_t pos_max = _pos_max.get();
+    const int32_t res = counts_per_rev();
+    for (uint8_t i = 0; i < _num_axes; i++) {
+        const Axis &axis = _axis[i];
+        const erob_prearm_t st = erob_prearm_status(&axis.servo, now_ms, ctr, pos_min, pos_max, res);
+        if (st == EROB_PREARM_OK) {
+            continue;
+        }
+        if (reason != nullptr && reason_len > 0) {
+            const unsigned servo = unsigned(axis.channel + 1);
+            const unsigned id = unsigned(axis.node);
+            switch (st) {
+            case EROB_PREARM_NO_RESPONSE:
+                snprintf(reason, reason_len, "eRob: SERVO%u id %u no response", servo, id);
+                break;
+            case EROB_PREARM_FAULT: {
+                const erob_feedback_t *fb = erob_feedback(&axis.servo);
+                const unsigned code = fb != nullptr ? unsigned(fb->error_code) : 0u;
+                snprintf(reason, reason_len, "eRob: SERVO%u id %u fault 603F=0x%04X", servo, id, code);
+                break;
+            }
+            case EROB_PREARM_NOT_ENABLED:
+                snprintf(reason, reason_len, "eRob: SERVO%u id %u not enabled", servo, id);
+                break;
+            case EROB_PREARM_POS:
+                snprintf(reason, reason_len, "eRob: SERVO%u id %u pos out of range", servo, id);
+                break;
+            case EROB_PREARM_OK:
+                break;
+            }
+        }
+        return false;
+    }
+    return true;
+}
+
 bool AP_eRobCANOpen::axis_faulted(uint8_t index) const
 {
     return (erob_get_statusword(&_axis[index].servo) & EROB_SW_FAULT_BIT) != 0;

@@ -121,6 +121,55 @@ static int last_rpdo(uint8_t node, uint16_t *cw, int32_t *pos)
     return found;
 }
 
+static void check_prearm(void)
+{
+    erob_servo_t s;
+    const int32_t ctr = 262144;
+    const int32_t pmin = -43691;
+    const int32_t pmax = 43691;
+    const int32_t res = EROB_PLUS_PER_REV;
+    const int32_t margin = (int32_t)(((int64_t)res * 5) / 360);
+    const int32_t hi = ctr + pmax + margin;
+    const int32_t lo = ctr + pmin - margin;
+    memset(&s, 0, sizeof(s));
+    expect_true(margin == 7281, "5 deg at 524288 counts is 7281 plus");
+    s.last_tpdo_ms = 1000;
+    s.state = EROB_ST_ENABLED;
+    s.statusword = EROB_SW_OP_ENABLED;
+    s.pos_actual = ctr;
+    expect_true(erob_prearm_status(&s, 1200, ctr, pmin, pmax, res) == EROB_PREARM_OK,
+                "center position may arm");
+    s.pos_actual = hi;
+    expect_true(erob_prearm_status(&s, 1200, ctr, pmin, pmax, res) == EROB_PREARM_OK,
+                "5 deg outside MAX may arm");
+    s.pos_actual = hi + 1;
+    expect_true(erob_prearm_status(&s, 1200, ctr, pmin, pmax, res) == EROB_PREARM_POS,
+                "more than 5 deg outside MAX blocks arming");
+    s.pos_actual = lo;
+    expect_true(erob_prearm_status(&s, 1200, ctr, pmin, pmax, res) == EROB_PREARM_OK,
+                "5 deg outside MIN may arm");
+    s.pos_actual = lo - 1;
+    expect_true(erob_prearm_status(&s, 1200, ctr, pmin, pmax, res) == EROB_PREARM_POS,
+                "more than 5 deg outside MIN blocks arming");
+    s.pos_actual = ctr;
+    s.statusword = (uint16_t)(EROB_SW_OP_ENABLED | EROB_SW_FAULT_BIT);
+    expect_true(erob_prearm_status(&s, 1200, ctr, pmin, pmax, res) == EROB_PREARM_FAULT,
+                "fault bit blocks arming");
+    s.statusword = EROB_SW_READY_TO_SW;
+    s.state = EROB_ST_ENABLE_SEQ;
+    expect_true(erob_prearm_status(&s, 1200, ctr, pmin, pmax, res) == EROB_PREARM_NOT_ENABLED,
+                "enable sequence is not operation enabled");
+    s.state = EROB_ST_ENABLED;
+    s.statusword = EROB_SW_OP_ENABLED;
+    expect_true(erob_prearm_status(&s, 1000 + EROB_NODE_SILENT_MS, ctr, pmin, pmax, res) == EROB_PREARM_OK,
+                "TPDO age of 200 ms may still arm");
+    expect_true(erob_prearm_status(&s, 1000 + EROB_NODE_SILENT_MS + 1, ctr, pmin, pmax, res) == EROB_PREARM_NO_RESPONSE,
+                "TPDO age above 200 ms blocks arming");
+    s.last_tpdo_ms = 0;
+    expect_true(erob_prearm_status(&s, 1200, ctr, pmin, pmax, res) == EROB_PREARM_NO_RESPONSE,
+                "no TPDO1 is no response");
+}
+
 static void dump_tx(void)
 {
     uint16_t i;
@@ -230,6 +279,7 @@ int main(void)
         expect_true(blank.rated_current_mA == 5000 && (blank.valid & EROB_FB_IRATED) != 0,
                     "non-zero rated current is cached");
     }
+    check_prearm();
 
     co_master_init(&master, bus, node);
     erob_init(&servo, &master);
@@ -282,6 +332,8 @@ int main(void)
         erob_poll(&servo);
     }
     expect_true(erob_get_state(&servo) == EROB_ST_ENABLED, "CiA402 reached operation enabled");
+    expect_true(erob_prearm_status(&servo, can_bus_millis(bus), 0, 0, EROB_PLUS_PER_REV, EROB_PLUS_PER_REV) == EROB_PREARM_OK,
+                "live enabled servo may arm");
     expect_true((erob_get_statusword(&servo) & EROB_SW_MASK) == EROB_SW_OP_ENABLED,
                 "statusword mask is operation enabled");
     expect_true(erob_disable(&servo) == -1, "disable is refused inside the 300 ms gap");
@@ -341,6 +393,8 @@ int main(void)
     can_bus_stub_push_status((uint16_t)(EROB_SW_OP_ENABLED | EROB_SW_FAULT_BIT), 0);
     erob_poll(&servo);
     expect_true(erob_get_state(&servo) == EROB_ST_FAULT, "fault starts recovery");
+    expect_true(erob_prearm_status(&servo, can_bus_millis(bus), 0, 0, EROB_PLUS_PER_REV, EROB_PLUS_PER_REV) == EROB_PREARM_FAULT,
+                "live fault blocks arming");
     expect_true(erob_fault_count(&servo) == 1, "fault entry counts once");
     {
         int k;
@@ -401,6 +455,9 @@ int main(void)
     can_bus_stub_advance(EROB_NODE_SILENT_MS);
     erob_poll(&servo);
     expect_true(erob_is_silent(&servo), "no heartbeat or PDO is silent");
+    can_bus_stub_advance(1);
+    expect_true(erob_prearm_status(&servo, can_bus_millis(bus), 0, 0, EROB_PLUS_PER_REV, EROB_PLUS_PER_REV) == EROB_PREARM_NO_RESPONSE,
+                "live silence blocks arming");
     expect_true(erob_fault_count(&servo) == 2, "silence is not counted as a CiA402 fault");
     can_bus_stub_set_silent(0);
     can_bus_stub_push_heartbeat(0x05);

@@ -141,6 +141,7 @@ RxPDO1：
 4. PWM 用该通道自己的 `SERVOx_MIN` / `SERVOx_MAX`，线性映到共用的 `MIN` / `MAX`。这两个值是相对 `CTR` 的偏移。写入 `0x607A` 的是 `CTR + 映射值`。`CAN_Dx_EROB_CTR` 是所有轴共用的一个中心（默认 0，目标和以前一样）。PWM 中点映到 `CTR + (MIN+MAX)/2`。角度是 `(0x6064 - CTR) * 360 / RES`。`GEAR` 和 `RES` 仍共用。PWM 仍为 0，或该通道在舵机禁用掩码里时，保持上一次目标。
 5. 状态字 bit3 置位后，地面站发 CRITICAL（`eRob: SERVO<n> id <id> fault 603F=0x....`，5 s 限速，故障还在就一直重复）。控制字先 0 再 `0x0080` 形成故障复位上升沿，然后 `0x0006` / `0x0007` / `0x000F`。仍故障则每 500 ms 再试，不锁死到重启。回到 Operation Enabled 时先把 `0x607A` 写成当前 `0x6064`，再按约 100 °/s（`RES` 换算）在最多 0.6 s 内斜坡回到指令，并报 `eRob: SERVO<n> id <id> recovered`。次数在 `ERB3.Flt`，恢复不清零。心跳或 PDO 超过 200 ms 没有则告警 `silent`；重新出现后发 NMT Start，再使能并做同样的无扰恢复。`push_servos()` 仍更新指令，故障期间不把该指令直接写入 `0x607A`。
 6. 输出反转沿用 ArduPilot 舵机通道自己的反向，驱动不再翻一次。直升机斜盘和尾舵只是这些 SERVO 通道的上游，本库不改混控。
+7. 解锁检查走 `AP_Arming::can_checks()`。`pre_arm_check()` 只读缓存。已配置槽里只要有一个 TxPDO1 超过 200 ms、状态字 fault、未 Operation Enabled，或 `0x6064` 超出 `CTR+MIN`..`CTR+MAX` 超过约 5°，就拒绝解锁。文案是 `eRob: SERVOn id X not enabled` / `no response` / `fault 603F=0x....` / `pos out of range`。
 
 ## 8. 总线
 

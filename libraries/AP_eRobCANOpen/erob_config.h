@@ -88,6 +88,11 @@
 #define EROB_RECOVER_RAMP_MS 600u
 #endif
 
+/* Pre-arm allows this many degrees outside CTR+MIN .. CTR+MAX. */
+#ifndef EROB_PREARM_MARGIN_DEG
+#define EROB_PREARM_MARGIN_DEG 5
+#endif
+
 /* HAL iface for EROB_CAN_BUS_INDEX. CAN2 -> 1. Do not use 0 (that is CAN1). */
 static inline unsigned erob_hal_can_iface(void)
 {

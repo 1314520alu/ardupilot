@@ -157,6 +157,17 @@ eRob: SERVO1 id 11 recovered
 
 心跳和 TxPDO 都停了 200 ms 算节点无应答，告警 `eRob: SERVO1 id 11 silent`。帧重新出现后发 NMT Start，再走同一套使能和无扰斜坡。这不是直升机故障保护，混控代码没有改。
 
+解锁前检查只读缓存，不发 SDO。已配置的槽（`SVn` 非 0，或全 0 时的 `NODE` + `BM`）有一个不满足就拒绝解锁：
+
+```text
+eRob: SERVO3 id 13 not enabled
+eRob: SERVO3 id 13 no response
+eRob: SERVO3 id 13 fault 603F=0x8611
+eRob: SERVO3 id 13 pos out of range
+```
+
+`no response` 是 TxPDO1 超过 200 ms 没有。`not enabled` 是还没到 Operation Enabled，或这个槽没有变成轴。`fault` 用缓存的 `0x603F`。位置要在 `CTR+MIN` .. `CTR+MAX` 里，两侧各放宽约 5°（`RES * 5 / 360`）。
+
 ## eRob142H120I-FHS-18CT
 
 型号 `eRob142H120I-FHS-18CT[V4]`，用在大型无人传统直升机，4 轴（3 个斜盘 + 尾舵）。上一节的 `SV1`..`SV4` = 1..4 和功能号 33..36 直接套这台。

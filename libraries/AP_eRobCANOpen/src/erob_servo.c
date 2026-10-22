@@ -51,6 +51,7 @@ static void on_tpdo(void *user, uint8_t pdo_num, const uint8_t *data, uint8_t dl
         s->fb.pos_actual = s->pos_actual;
         s->fb.valid |= EROB_FB_TPDO1;
         s->feedback_valid = true;
+        s->last_tpdo_ms = can_bus_millis(s->co->bus);
         return;
     }
     if (pdo_num == 1 && dlc >= 8) {
@@ -712,6 +713,46 @@ bool erob_take_recovered(erob_servo_t *s)
     bool was = s->recovered;
     s->recovered = false;
     return was;
+}
+
+erob_prearm_t erob_prearm_status(const erob_servo_t *s, uint32_t now_ms,
+                                 int32_t ctr, int32_t pos_min, int32_t pos_max,
+                                 int32_t counts_per_rev)
+{
+    int32_t res;
+    int32_t margin;
+    int32_t a;
+    int32_t b;
+    int32_t lo;
+    int32_t hi;
+
+    if (s->last_tpdo_ms == 0 || (now_ms - s->last_tpdo_ms) > EROB_NODE_SILENT_MS) {
+        return EROB_PREARM_NO_RESPONSE;
+    }
+    if ((s->statusword & EROB_SW_FAULT_BIT) != 0) {
+        return EROB_PREARM_FAULT;
+    }
+    if (s->state != EROB_ST_ENABLED ||
+        (s->statusword & EROB_SW_MASK) != EROB_SW_OP_ENABLED) {
+        return EROB_PREARM_NOT_ENABLED;
+    }
+    res = counts_per_rev > 0 ? counts_per_rev : EROB_PLUS_PER_REV;
+    margin = (int32_t)(((int64_t)res * (int64_t)EROB_PREARM_MARGIN_DEG) / 360);
+    a = erob_target_plus(pos_min, ctr);
+    b = erob_target_plus(pos_max, ctr);
+    if (a < b) {
+        lo = a;
+        hi = b;
+    } else {
+        lo = b;
+        hi = a;
+    }
+    lo = erob_target_plus(-margin, lo);
+    hi = erob_target_plus(margin, hi);
+    if (s->pos_actual < lo || s->pos_actual > hi) {
+        return EROB_PREARM_POS;
+    }
+    return EROB_PREARM_OK;
 }
 
 uint16_t erob_get_statusword(const erob_servo_t *s)

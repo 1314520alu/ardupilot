@@ -97,6 +97,7 @@ typedef struct {
     int32_t hold_pos;
     int32_t target_vel; /* stored only; PDO map is CSP position, see README */
     bool feedback_valid;
+    uint32_t last_tpdo_ms; /* TPDO1 only. 0 if 0x6041/0x6064 have not arrived. */
     erob_feedback_t fb;
     uint8_t diag_slot;
     uint8_t diag_size;
@@ -172,6 +173,22 @@ uint16_t erob_refresh_error_code(erob_servo_t *s);
 
 /* One-shot set when a fault or silence recovery reaches Operation Enabled. */
 bool erob_take_recovered(erob_servo_t *s);
+
+/*
+ * Cached pre-arm decision for one axis. Does not touch the bus.
+ * Position must sit in CTR+MIN .. CTR+MAX, expanded by EROB_PREARM_MARGIN_DEG.
+ */
+typedef enum {
+    EROB_PREARM_OK = 0,
+    EROB_PREARM_NO_RESPONSE,
+    EROB_PREARM_FAULT,
+    EROB_PREARM_NOT_ENABLED,
+    EROB_PREARM_POS
+} erob_prearm_t;
+
+erob_prearm_t erob_prearm_status(const erob_servo_t *s, uint32_t now_ms,
+                                 int32_t ctr, int32_t pos_min, int32_t pos_max,
+                                 int32_t counts_per_rev);
 
 /* Ignore a zero rating. A failed or zero read leaves the valid bit clear. */
 void erob_cache_rating(erob_feedback_t *fb, uint16_t index, uint32_t value);
