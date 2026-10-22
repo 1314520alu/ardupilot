@@ -522,7 +522,7 @@ BUILD_OPTIONS = [
     Feature('Actuators', 'SBUS Output', 'AP_SBUSOUTPUT_ENABLED', 'Enable SBUS output on serial ports', 0, None),
     Feature('Actuators', 'FETTecOneWire', 'AP_FETTEC_ONEWIRE_ENABLED', 'Enable FETTec OneWire ESCs', 0, None),
     Feature('Actuators', 'KDECAN', 'AP_KDECAN_ENABLED', 'KDE Direct KDECAN ESC', 0, None),
-    Feature('Actuators', 'ERobCANopen', 'AP_EROB_CANOPEN_ENABLED', 'ZeroErr eRob CANopen master', 0, None),
+    Feature('Actuators', 'eRob CAN', 'AP_EROB_CANOPEN_ENABLED', 'ZeroErr eRob CAN master', 0, None),
     Feature('Actuators', 'HimarkServo', 'AP_DRONECAN_HIMARK_SERVO_SUPPORT', 'Enable Himark DroneCAN servos', 0, "DroneCAN"),
     Feature('Actuators', 'HobbywingESC', 'AP_DRONECAN_HOBBYWING_ESC_SUPPORT', 'Enable Hobbywing DroneCAN ESCs', 0, "DroneCAN,ESC_TELEM"),  # noqa: E501
     Feature('Actuators', 'LogCircuitStatus_DroneCAN', 'AP_DRONECAN_LOG_CIRCUIT_STATUS_ENABLED', 'Enable DroneCAN circuit status logging', 0, "DroneCAN,Logging"),  # noqa: E501
