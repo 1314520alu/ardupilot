@@ -217,11 +217,11 @@ void AP_CANManager::init()
             break;
 #endif
 #if AP_EROB_CANOPEN_ENABLED
-        case AP_CAN::Protocol::ERobCANOpen:
+        case AP_CAN::Protocol::eRobCAN:
             _drivers[drv_num] = _drv_param[drv_num]._erob = NEW_NOTHROW AP_eRobCANOpen();
 
             if (_drivers[drv_num] == nullptr) {
-                AP_BoardConfig::allocation_error("ERobCANopen %d", drv_num + 1);
+                AP_BoardConfig::allocation_error("eRob CAN %d", drv_num + 1);
                 continue;
             }
 
