@@ -81,6 +81,7 @@ private:
     AP_Int32 _servo_bm;
     AP_Int32 _pos_min;
     AP_Int32 _pos_max;
+    AP_Float _gear;
 
     uint8_t _active_node;
     uint8_t _num_axes;

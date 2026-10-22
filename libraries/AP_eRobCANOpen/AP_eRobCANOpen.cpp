@@ -19,6 +19,7 @@
 
 #include <AP_CANManager/AP_CANManager.h>
 #include <AP_Logger/AP_Logger_config.h>
+#include <AP_Math/AP_Math.h>
 #include <GCS_MAVLink/GCS.h>
 #include <SRV_Channel/SRV_Channel.h>
 
@@ -62,6 +63,14 @@ const AP_Param::GroupInfo AP_eRobCANOpen::var_info[] = {
     // @Description: CSP target in plus when the servo output is at SERVOx_MAX. All axes share this end. 524288 plus is one output revolution. Per-axis travel is not separate yet.
     // @User: Advanced
     AP_GROUPINFO("MAX", 5, AP_eRobCANOpen, _pos_max, 524288),
+
+    // @Param: GEAR
+    // @DisplayName: eRob CAN gear ratio
+    // @Description: Motor revolutions per output revolution. 0 leaves motor rpm invalid. Output rpm and output degrees do not use this. Typical ratios are 50, 100, 120 and 160. All axes on this driver share it.
+    // @Range: 0 1000
+    // @Increment: 1
+    // @User: Standard
+    AP_GROUPINFO("GEAR", 7, AP_eRobCANOpen, _gear, 0),
 
     AP_GROUPEND
 };
@@ -267,6 +276,45 @@ void AP_eRobCANOpen::publish_feedback(uint8_t index, uint32_t now_ms)
             uint32_t(fb->dc_mv),
             int(fb->follow_err));
 
+        {
+            const float nan = AP::logger().quiet_nanf();
+            const float gear = _gear.get();
+            const bool have_vel = (fb->valid & EROB_FB_TPDO3) != 0;
+            const float out_rpm = have_vel ? erob_output_rpm(fb->vel_plus_s) : nan;
+            const float motor_rpm = (have_vel && is_positive(gear)) ? out_rpm * gear : nan;
+            const float amps = (have_vel && (fb->valid & EROB_FB_IRATED) != 0) ?
+                               erob_current_a(fb->current_permille, fb->rated_current_mA) : nan;
+            const float nm = (have_vel && (fb->valid & EROB_FB_TRATED) != 0) ?
+                             erob_torque_nm(fb->torque_permille, fb->rated_torque_mNm) : nan;
+            const float volts = (fb->valid & EROB_FB_TPDO4) != 0 ? fb->dc_mv * 0.001f : nan;
+            // @LoggerMessage: ERB3
+            // @Description: eRob CAN physical units for one mapped servo. ERB1 keeps the raw objects. A DataFlash format string holds 16 fields and ERB1 is already full.
+            // @Field: TimeUS: Time since system startup
+            // @Field: Ax: axis index on this driver
+            // @Field: Sv: servo output number, SERVO1 is 1
+            // @Field: Deg: output position from 0x6064, degrees
+            // @Field: Rpm: output speed from 0x606C, rpm
+            // @Field: Mrpm: motor rpm, output rpm times GEAR, invalid when GEAR is 0
+            // @Field: Amp: current from 0x6078 and 0x6075, ampere
+            // @Field: Nm: torque from 0x6077 and 0x6076, newton metre
+            // @Field: V: DC bus from 0x6079, volt
+            AP::logger().WriteStreaming(
+                "ERB3",
+                "TimeUS,Ax,Sv,Deg,Rpm,Mrpm,Amp,Nm,V",
+                "s##dqqAtv",
+                "F00000000",
+                "QBBffffff",
+                AP_HAL::micros64(),
+                unsigned(index),
+                unsigned(servo_num),
+                erob_position_deg(fb->pos_actual),
+                out_rpm,
+                motor_rpm,
+                amps,
+                nm,
+                volts);
+        }
+
         if ((fb->valid & (EROB_FB_ERR | EROB_FB_WARN | EROB_FB_TEMP | EROB_FB_DIFF)) != 0) {
             // @LoggerMessage: ERB2
             // @Description: eRob CAN slow diagnostics for one mapped servo
@@ -303,6 +351,8 @@ void AP_eRobCANOpen::publish_feedback(uint8_t index, uint32_t now_ms)
     axis.last_named_ms = now_ms;
     erob_named(name, sizeof(name), servo_num, 'P');
     gcs().send_named_int(name, fb->pos_actual);
+    erob_named(name, sizeof(name), servo_num, 'G');
+    gcs().send_named_float(name, erob_position_deg(fb->pos_actual));
     if ((fb->valid & EROB_FB_TPDO2) != 0) {
         erob_named(name, sizeof(name), servo_num, 'M');
         gcs().send_named_int(name, fb->motor_enc);
@@ -310,12 +360,26 @@ void AP_eRobCANOpen::publish_feedback(uint8_t index, uint32_t now_ms)
         gcs().send_named_int(name, fb->load_enc);
     }
     if ((fb->valid & EROB_FB_TPDO3) != 0) {
+        const float out_rpm = erob_output_rpm(fb->vel_plus_s);
+        const float gear = _gear.get();
         erob_named(name, sizeof(name), servo_num, 'S');
         gcs().send_named_int(name, fb->vel_plus_s);
-        erob_named(name, sizeof(name), servo_num, 'Q');
-        gcs().send_named_int(name, fb->torque_permille);
         erob_named(name, sizeof(name), servo_num, 'I');
         gcs().send_named_int(name, fb->current_permille);
+        erob_named(name, sizeof(name), servo_num, 'R');
+        gcs().send_named_float(name, out_rpm);
+        if (is_positive(gear)) {
+            erob_named(name, sizeof(name), servo_num, 'N');
+            gcs().send_named_float(name, out_rpm * gear);
+        }
+        if ((fb->valid & EROB_FB_IRATED) != 0) {
+            erob_named(name, sizeof(name), servo_num, 'C');
+            gcs().send_named_float(name, erob_current_a(fb->current_permille, fb->rated_current_mA));
+        }
+        if ((fb->valid & EROB_FB_TRATED) != 0) {
+            erob_named(name, sizeof(name), servo_num, 'Q');
+            gcs().send_named_float(name, erob_torque_nm(fb->torque_permille, fb->rated_torque_mNm));
+        }
     }
     if ((fb->valid & EROB_FB_TPDO4) != 0) {
         erob_named(name, sizeof(name), servo_num, 'U');

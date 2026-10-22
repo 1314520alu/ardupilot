@@ -52,7 +52,9 @@ enum {
     EROB_FB_WARN  = 1u << 5, /* 0x3B68 */
     EROB_FB_TEMP  = 1u << 6, /* 0x22A2 */
     EROB_FB_MODE  = 1u << 7, /* 0x6061 */
-    EROB_FB_DIFF  = 1u << 8  /* 0x2241 */
+    EROB_FB_DIFF  = 1u << 8, /* 0x2241 */
+    EROB_FB_IRATED = 1u << 9, /* 0x6075 non-zero */
+    EROB_FB_TRATED = 1u << 10 /* 0x6076 non-zero */
 };
 
 /*
@@ -75,6 +77,8 @@ typedef struct {
     int16_t drive_temp_c;
     int8_t mode_disp;
     int32_t enc_diff;
+    uint32_t rated_current_mA; /* 0x6075, 0 if unread */
+    uint32_t rated_torque_mNm; /* 0x6076, 0 if unread */
     uint16_t valid;
     bool op_enabled;
 } erob_feedback_t;
@@ -137,6 +141,17 @@ erob_state_t erob_get_state(const erob_servo_t *s);
 uint16_t erob_get_statusword(const erob_servo_t *s);
 int32_t erob_get_position(const erob_servo_t *s);
 const erob_feedback_t *erob_feedback(const erob_servo_t *s);
+
+/* Ignore a zero rating. A failed or zero read leaves the valid bit clear. */
+void erob_cache_rating(erob_feedback_t *fb, uint16_t index, uint32_t value);
+
+/* Load-side 19-bit scale. 524288 plus is one output revolution. */
+float erob_position_deg(int32_t plus);
+float erob_output_rpm(int32_t plus_per_s);
+
+/* permille of rated. rated_mA is 0x6075, rated_mNm is 0x6076. */
+float erob_current_a(int16_t permille, uint32_t rated_mA);
+float erob_torque_nm(int16_t permille, uint32_t rated_mNm);
 
 #ifdef __cplusplus
 }

@@ -54,11 +54,14 @@ CAN_D2_EROB_NODE 1
 CAN_D2_EROB_BM   1008
 CAN_D2_EROB_MIN  0
 CAN_D2_EROB_MAX  524288
+CAN_D2_EROB_GEAR 0
 ```
+
+`GEAR` 默认就是 0。要电机转速时改成减速比，例如 100，不用为了它重启。
 
 `15` 是 `AP_CAN::Protocol::eRobCAN`，参数列表显示为 `eRob CAN`。一个 `CAN_Dx_PROTOCOL` 独占那个虚拟驱动：1 是 DroneCAN，15 是这组舵机。驱动只接受 HAL 接口 1（CAN2）。这不是通用 CANopen 工具，默认只做 CiA402 CSP。
 
-eRob 按舵机用。`CAN_D2_EROB_BM` 的位和 `CAN_Dx_UC_SRV_BM` 一样：bit 0 是 SERVO1。全名放不下 `SRV_BM`（`CAN_D2_EROB_SRV_BM` 有 18 个字符，上限 16），所以参数名是 `BM`。`1008` 是 bit 4..9，也就是 SERVO5..SERVO10。置位从低到高分配 Node-ID：SERVO5 是节点 1，SERVO10 是节点 6。最多 6 轴。`SRV_Channels::push()` 把这些通道的 PWM 线性映到 CSP 目标：`SERVOx_MIN` 对应 `CAN_D2_EROB_MIN`，`SERVOx_MAX` 对应 `CAN_D2_EROB_MAX`，单位是 plus。524288 plus 为一圈输出端（手册 §5.2.1）。各轴目前共用同一组 MIN/MAX。掩码为 0 时不跟舵机输出。第一轴负责发 SYNC，其余轴只收这个 SYNC。同一接口上的其它帧被丢掉。CAN1 保持 `CAN_D1_PROTOCOL 1`。使能后 500 ms 内主站仍保持实际位置，之后才跟踪舵机目标。每轴单独的行程、减速比换角度，还没做。
+eRob 按舵机用。`CAN_D2_EROB_BM` 的位和 `CAN_Dx_UC_SRV_BM` 一样：bit 0 是 SERVO1。全名放不下 `SRV_BM`（`CAN_D2_EROB_SRV_BM` 有 18 个字符，上限 16），所以参数名是 `BM`。`1008` 是 bit 4..9，也就是 SERVO5..SERVO10。置位从低到高分配 Node-ID：SERVO5 是节点 1，SERVO10 是节点 6。最多 6 轴。`SRV_Channels::push()` 把这些通道的 PWM 线性映到 CSP 目标：`SERVOx_MIN` 对应 `CAN_D2_EROB_MIN`，`SERVOx_MAX` 对应 `CAN_D2_EROB_MAX`，单位是 plus。524288 plus 为一圈输出端（手册 §5.2.1）。各轴目前共用同一组 MIN/MAX。掩码为 0 时不跟舵机输出。第一轴负责发 SYNC，其余轴只收这个 SYNC。同一接口上的其它帧被丢掉。CAN1 保持 `CAN_D1_PROTOCOL 1`。使能后 500 ms 内主站仍保持实际位置，之后才跟踪舵机目标。每轴单独的行程还没做。输出角度不乘减速比；电机转速才用 `GEAR`。
 
 ## 协议范围
 
@@ -98,30 +101,48 @@ Pre-op 里把 TxPDO 写成下面这张表。每条都不超过 8 字节，传输
 | `0x22A2` i16 | 驱动温度 °C。手册标了 PDO mapping NO |
 | `0x6061` i8 | 模式显示。8 是 CSP |
 | `0x2241` i32 | 双编码器差值 plus。可选，用来看回差，不是刚度计算 |
+| `0x6075` u32 | 额定电流 mA。配置时读，失败就在慢速 SDO 里重试。读到 0 仍算无效 |
+| `0x6076` u32 | 额定扭矩 mN·m。同样。各轴分开缓存 |
 
 使能状态不是单独的对象：`(0x6041 & 0x006F) == 0x0027`。
 
-电机端转速（rpm）和绕组温度没有单独的对象，这里不换算。`0x606C` 是 plus/s，不是 rpm。`0x6077` / `0x6078` 是额定值的千分比，不是 N·m 和 A。换成电流还要读 `0x6075`，换成扭矩还要读 `0x6076`，这次没做。
+物理量（负载端 19 bit，一圈 524288 plus）。`CAN_Dx_EROB_GEAR` 是这一个驱动上各轴共用的减速比，电机转 / 输出转。默认 0，表示减速比未知，电机转速不算。改这个参数不用重启。全名 `CAN_D2_EROB_GEAR` 正好 16 个字符。
 
-日志里两个消息（10 Hz，正在记录时）：
+| 量 | 公式 |
+| --- | --- |
+| 输出角度 ° | `0x6064 * 360 / 524288` |
+| 输出转速 rpm | `0x606C * 60 / 524288` |
+| 电机转速 rpm | 输出转速 × `GEAR`，仅当 `GEAR > 0` |
+| 电流 A | `0x6078 * 0x6075 / 1e6`。6078 是额定电流的千分比，6075 是 mA |
+| 扭矩 N·m | `0x6077 * 0x6076 / 1e6`。6076 是 mN·m |
+| 母线 V | `0x6079 / 1000` |
+
+绕组温度仍然没有单独对象。电机端编码器 `0x2240` 不拿来算转速。
+
+日志（10 Hz，正在记录时）。DataFlash 一条消息最多 16 列，`ERB1` 已经满了，所以换算结果在同一次记录里的 `ERB3`，原始值仍留在 `ERB1`。额定值还没读到、或 `GEAR` 为 0 时，对应的列是 NaN，不是 0。
 
 | 消息 | 内容 |
 | --- | --- |
-| `ERB1` | 轴号、Node-ID、SERVO 号、状态字、模式、使能、位置、电机编码器、负载编码器、速度、扭矩、电流、母线 mV、跟随误差 |
+| `ERB1` | 原始对象：状态字、模式、使能、位置 plus、两个编码器、速度 plus/s、扭矩千分比、电流千分比、母线 mV、跟随误差 |
 | `ERB2` | 错误码、警告码、驱动温度、双编码器差值 |
+| `ERB3` | 输出角度、输出 rpm、电机 rpm、电流 A、扭矩 N·m、母线 V |
 
-Mission Planner 回放日志时选 `ERB1` / `ERB2`。`Sv` 是 SERVO 通道号（SERVO5 记 5）。`Ax` 是这块掩码里从低位起的第几轴。母线电压在日志里是 mV，单位倍率把 `mV` 显示成 V。扭矩和电流的倍率把千分比显示成百分数。
+Mission Planner 回放时画 `ERB1`（原始）和 `ERB3`（物理单位）。`Sv` 是 SERVO 通道号。`ERB1` 的母线列是 mV，倍率显示成 V；`ERB3.V` 直接是伏特。
 
 同一组数也会以大约 1 Hz 发给地面站。名字是 `ER` + SERVO 号 + 一个字母，例如掩码包含 SERVO5 时：
 
 | 名字 | 对象 | 类型 |
 | --- | --- | --- |
 | `ER5P` | `0x6064` 实际位置 plus | NAMED_VALUE_INT |
+| `ER5G` | 输出角度 °。`P` 仍是 plus，所以角度不用 `P` | NAMED_VALUE_FLOAT |
 | `ER5M` | `0x2240` 电机编码器 plus | NAMED_VALUE_INT |
 | `ER5L` | `0x20A0` 负载编码器 plus | NAMED_VALUE_INT |
 | `ER5S` | `0x606C` 速度 plus/s | NAMED_VALUE_INT |
-| `ER5Q` | `0x6077` 扭矩千分比 | NAMED_VALUE_INT |
+| `ER5R` | 输出转速 rpm | NAMED_VALUE_FLOAT |
+| `ER5N` | 电机转速 rpm。`GEAR` 为 0 时不发 | NAMED_VALUE_FLOAT |
 | `ER5I` | `0x6078` 电流千分比 | NAMED_VALUE_INT |
+| `ER5C` | 电流 A。额定电流无效时不发 | NAMED_VALUE_FLOAT |
+| `ER5Q` | 扭矩 N·m。额定扭矩无效时不发。千分比只留在 `ERB1.Tq` | NAMED_VALUE_FLOAT |
 | `ER5U` | `0x6079` 母线电压，单位 V | NAMED_VALUE_FLOAT |
 | `ER5F` | `0x60F4` 跟随误差 plus | NAMED_VALUE_INT |
 | `ER5T` | `0x22A2` 驱动温度 °C | NAMED_VALUE_FLOAT |
@@ -135,7 +156,7 @@ Mission Planner 的 MAVLink Inspector 里看 `NAMED_VALUE_INT` 和 `NAMED_VALUE_
 
 四轴、每轴四个 TxPDO、4 ms 一拍，大约是 4000 个 TxPDO/s，再加上 RxPDO 和 SYNC。1 Mbps 上还放得下。六轴会更紧。
 
-使能后 500 ms 内仍下发对齐过的实际位置，不发新目标（手册 §5.1.1）。下使能与使能间隔小于 300 ms 时 `erob_disable()` 直接返回失败（手册 §5.1.2）。位置单位是 plus；负载端单圈 524288（手册 §5.2.1）。换成角度还要减速比，见 `CUSTOMER_ASK.md`。
+使能后 500 ms 内仍下发对齐过的实际位置，不发新目标（手册 §5.1.1）。下使能与使能间隔小于 300 ms 时 `erob_disable()` 直接返回失败（手册 §5.1.2）。位置单位是 plus；负载端单圈 524288（手册 §5.2.1），所以输出角度不乘减速比。减速比只用于电机转速。
 
 每个 Node-ID 有自己的 `canopen_master_t`。多轴共用这一路时，只有第一轴 `sync_enabled`，其余关掉，否则总线上会出现多个 SYNC。
 

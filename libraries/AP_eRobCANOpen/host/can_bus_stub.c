@@ -75,6 +75,16 @@ static void reply_sdo(struct can_bus *bus, const can_frame_t *req)
     } else if (cs == 0x40 && index == 0x2241) {
         rx.data[0] = 0x43;
         rx.data[4] = 42;
+    } else if (cs == 0x40 && index == 0x6075) {
+        /* 5000 mA */
+        rx.data[0] = 0x43;
+        rx.data[4] = 0x88;
+        rx.data[5] = 0x13;
+    } else if (cs == 0x40 && index == 0x6076) {
+        /* 2000 mN*m */
+        rx.data[0] = 0x43;
+        rx.data[4] = 0xd0;
+        rx.data[5] = 0x07;
     } else if (cs == 0x2f || cs == 0x2b || cs == 0x23) {
         rx.data[0] = 0x60;
     } else {

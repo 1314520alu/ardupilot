@@ -92,6 +92,8 @@ static int sdo_u32(canopen_master_t *m, uint16_t index, uint8_t sub, uint32_t va
     return co_sdo_write(m, index, sub, &val, 4);
 }
 
+static void read_ratings(erob_servo_t *s);
+
 static int fail(erob_servo_t *s, int code)
 {
     co_master_set_sync(s->co, false, 0);
@@ -199,6 +201,12 @@ int erob_configure_pdo_csp(erob_servo_t *s)
         sdo_u32(m, 0x1400, 0x01, rpdo_cob) != 0) {
         return fail(s, -1);
     }
+
+    /*
+     * Rated current and torque are not part of CSP. A miss or a zero
+     * stays invalid and is retried from the slow SDO poll.
+     */
+    read_ratings(s);
 
     if (co_nmt(m, CO_NMT_START, n) != 0) {
         return fail(s, -1);
@@ -355,8 +363,30 @@ static void apply_diag(erob_servo_t *s, uint16_t index, const uint8_t *data)
         s->fb.enc_diff = rd_i32(data);
         s->fb.valid |= EROB_FB_DIFF;
         break;
+    case 0x6075:
+    case 0x6076:
+        erob_cache_rating(&s->fb, index, rd_u32(data));
+        break;
     default:
         break;
+    }
+}
+
+static void read_ratings(erob_servo_t *s)
+{
+    uint32_t v;
+
+    if ((s->fb.valid & EROB_FB_IRATED) == 0) {
+        v = 0;
+        if (co_sdo_read(s->co, 0x6075, 0x00, &v, 4) == 0) {
+            erob_cache_rating(&s->fb, 0x6075, v);
+        }
+    }
+    if ((s->fb.valid & EROB_FB_TRATED) == 0) {
+        v = 0;
+        if (co_sdo_read(s->co, 0x6076, 0x00, &v, 4) == 0) {
+            erob_cache_rating(&s->fb, 0x6076, v);
+        }
     }
 }
 
@@ -365,8 +395,11 @@ void erob_poll_diag(erob_servo_t *s)
     canopen_master_t *m = s->co;
     uint32_t now;
     uint32_t phase;
-    static const uint16_t idx[] = { 0x603F, 0x3B68, 0x22A2, 0x6061, 0x2241 };
-    static const uint8_t sz[] = { 2, 4, 2, 1, 4 };
+    static const uint16_t idx[] = {
+        0x603F, 0x3B68, 0x22A2, 0x6061, 0x2241, 0x6075, 0x6076
+    };
+    static const uint8_t sz[] = { 2, 4, 2, 1, 4, 4, 4 };
+    const uint8_t nslot = 7;
 
     if (s->state != EROB_ST_ENABLED) {
         return;
@@ -381,12 +414,12 @@ void erob_poll_diag(erob_servo_t *s)
             }
             m->sdo_reply_ready = false;
             s->diag_wait = false;
-            s->diag_slot = (uint8_t)((s->diag_slot + 1) % 5);
+            s->diag_slot = (uint8_t)((s->diag_slot + 1) % nslot);
         } else if ((now - s->diag_tx_ms) < 80u) {
             return;
         } else {
             s->diag_wait = false;
-            s->diag_slot = (uint8_t)((s->diag_slot + 1) % 5);
+            s->diag_slot = (uint8_t)((s->diag_slot + 1) % nslot);
         }
     }
 
@@ -400,6 +433,22 @@ void erob_poll_diag(erob_servo_t *s)
         return;
     }
 
+    {
+        uint8_t guard = 0;
+        while (guard < nslot) {
+            const uint16_t cand = idx[s->diag_slot];
+            if ((cand == 0x6075 && (s->fb.valid & EROB_FB_IRATED) != 0) ||
+                (cand == 0x6076 && (s->fb.valid & EROB_FB_TRATED) != 0)) {
+                s->diag_slot = (uint8_t)((s->diag_slot + 1) % nslot);
+                guard++;
+                continue;
+            }
+            break;
+        }
+        if (guard >= nslot) {
+            return;
+        }
+    }
     s->diag_index = idx[s->diag_slot];
     s->diag_size = sz[s->diag_slot];
     (void)s->diag_size;
@@ -455,4 +504,38 @@ int32_t erob_get_position(const erob_servo_t *s)
 const erob_feedback_t *erob_feedback(const erob_servo_t *s)
 {
     return &s->fb;
+}
+
+void erob_cache_rating(erob_feedback_t *fb, uint16_t index, uint32_t value)
+{
+    if (fb == NULL || value == 0) {
+        return;
+    }
+    if (index == 0x6075) {
+        fb->rated_current_mA = value;
+        fb->valid |= EROB_FB_IRATED;
+    } else if (index == 0x6076) {
+        fb->rated_torque_mNm = value;
+        fb->valid |= EROB_FB_TRATED;
+    }
+}
+
+float erob_position_deg(int32_t plus)
+{
+    return (float)((double)plus * 360.0 / (double)EROB_PLUS_PER_REV);
+}
+
+float erob_output_rpm(int32_t plus_per_s)
+{
+    return (float)((double)plus_per_s * 60.0 / (double)EROB_PLUS_PER_REV);
+}
+
+float erob_current_a(int16_t permille, uint32_t rated_mA)
+{
+    return (float)((double)permille * (double)rated_mA / 1000000.0);
+}
+
+float erob_torque_nm(int16_t permille, uint32_t rated_mNm)
+{
+    return (float)((double)permille * (double)rated_mNm / 1000000.0);
 }

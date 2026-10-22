@@ -20,6 +20,15 @@ static void expect_true(int cond, const char *msg)
     }
 }
 
+static int near_f(float a, float b)
+{
+    float d = a - b;
+    if (d < 0.0f) {
+        d = -d;
+    }
+    return d < 0.0001f;
+}
+
 static int find_sdo_u32(uint8_t node, uint16_t index, uint8_t sub, uint32_t val)
 {
     uint16_t i;
@@ -152,11 +161,38 @@ int main(void)
                 "pwm below servo min clamps");
     expect_true(erob_pwm_to_plus(1500, 1500, 1500, 10, 20) == 10,
                 "equal pwm ends do not divide");
+    expect_true(near_f(erob_position_deg(0), 0.0f), "zero plus is zero degrees");
+    expect_true(near_f(erob_position_deg(EROB_PLUS_PER_REV), 360.0f),
+                "one output revolution is 360 degrees");
+    expect_true(near_f(erob_position_deg(EROB_PLUS_PER_REV / 2), 180.0f),
+                "half a revolution is 180 degrees");
+    expect_true(near_f(erob_output_rpm(EROB_PLUS_PER_REV), 60.0f),
+                "one rev per second is 60 rpm");
+    expect_true(near_f(erob_current_a(9, 5000), 0.045f), "current uses rated mA");
+    expect_true(near_f(erob_torque_nm(-7, 2000), -0.014f), "torque uses rated mNm");
+    {
+        erob_feedback_t blank;
+        memset(&blank, 0, sizeof(blank));
+        erob_cache_rating(&blank, 0x6075, 0);
+        expect_true((blank.valid & EROB_FB_IRATED) == 0, "zero rated current stays invalid");
+        erob_cache_rating(&blank, 0x6076, 0);
+        expect_true((blank.valid & EROB_FB_TRATED) == 0, "zero rated torque stays invalid");
+        erob_cache_rating(&blank, 0x6075, 5000);
+        expect_true(blank.rated_current_mA == 5000 && (blank.valid & EROB_FB_IRATED) != 0,
+                    "non-zero rated current is cached");
+    }
 
     co_master_init(&master, bus, node);
     erob_init(&servo, &master);
     expect_true(erob_configure_pdo_csp(&servo) == 0, "CSP PDO configure");
     expect_true(erob_get_state(&servo) == EROB_ST_CONFIG, "state after configure");
+    {
+        const erob_feedback_t *rated = erob_feedback(&servo);
+        expect_true(rated != NULL && (rated->valid & EROB_FB_IRATED) != 0 &&
+                    rated->rated_current_mA == 5000u, "configure reads 0x6075");
+        expect_true((rated->valid & EROB_FB_TRATED) != 0 &&
+                    rated->rated_torque_mNm == 2000u, "configure reads 0x6076");
+    }
     expect_true(!can_bus_stub_overflow(), "no queue overflow during configure");
 
     expect_true(find_nmt(CO_NMT_STOP, node) >= 0, "NMT stop");
@@ -230,6 +266,12 @@ int main(void)
         expect_true(fb->torque_permille == -7 && fb->current_permille == 9, "torque and current");
         expect_true((fb->valid & EROB_FB_TPDO4) != 0, "TPDO4 cached");
         expect_true(fb->dc_mv == 48000u && fb->follow_err == 15, "voltage and following error");
+        expect_true(near_f(erob_current_a(fb->current_permille, fb->rated_current_mA), 0.045f),
+                    "TPDO current converts to amps");
+        expect_true(near_f(erob_torque_nm(fb->torque_permille, fb->rated_torque_mNm), -0.014f),
+                    "TPDO torque converts to Nm");
+        expect_true(near_f(erob_output_rpm(fb->vel_plus_s), erob_output_rpm(333)),
+                    "TPDO velocity converts to output rpm");
         for (d = 0; d < 40; d++) {
             can_bus_stub_advance(50);
             erob_poll(&servo);
