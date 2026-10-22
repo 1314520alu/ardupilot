@@ -40,10 +40,22 @@ void co_master_handle_frame(canopen_master_t *m, const can_frame_t *rx)
         }
         return;
     }
-    if (id == m->tpdo_cob[0] && m->on_tpdo != NULL) {
-        m->on_tpdo(m->hook_user, 0, rx->data, rx->dlc);
-    } else if (id == m->tpdo_cob[1] && m->on_tpdo != NULL) {
-        m->on_tpdo(m->hook_user, 1, rx->data, rx->dlc);
+    if (id == (uint32_t)(CO_COB_SDO_TX_BASE + m->node_id) && rx->dlc >= 8) {
+        m->sdo_reply_index = (uint16_t)(rx->data[1] | (rx->data[2] << 8));
+        m->sdo_reply_sub = rx->data[3];
+        m->sdo_reply_cs = rx->data[0];
+        memcpy(m->sdo_reply_data, &rx->data[4], 4);
+        m->sdo_reply_ready = true;
+        return;
+    }
+    if (m->on_tpdo != NULL) {
+        uint8_t i;
+        for (i = 0; i < 4; i++) {
+            if (id == m->tpdo_cob[i]) {
+                m->on_tpdo(m->hook_user, i, rx->data, rx->dlc);
+                return;
+            }
+        }
     }
 }
 
@@ -187,6 +199,21 @@ int co_sdo_read(canopen_master_t *m, uint16_t index, uint8_t sub,
         return -1;
     }
     return sdo_xfer(m, 0x40, index, sub, NULL, 0, (uint8_t *)val, size);
+}
+
+int co_sdo_read_send(canopen_master_t *m, uint16_t index, uint8_t sub)
+{
+    can_frame_t tx;
+
+    memset(&tx, 0, sizeof(tx));
+    tx.id = (uint32_t)(CO_COB_SDO_RX_BASE + m->node_id);
+    tx.dlc = 8;
+    tx.data[0] = 0x40;
+    tx.data[1] = (uint8_t)(index & 0xff);
+    tx.data[2] = (uint8_t)(index >> 8);
+    tx.data[3] = sub;
+    m->sdo_reply_ready = false;
+    return can_bus_send(m->bus, &tx);
 }
 
 int co_rpdo_send(canopen_master_t *m, uint8_t pdo_num, const uint8_t *data, uint8_t dlc)

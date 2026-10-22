@@ -59,6 +59,13 @@ typedef struct {
     void *hook_user;
 
     uint32_t sdo_timeout_ms;
+
+    /* Last expedited SDO response seen on 0x580+node. Cyclic diag does not block. */
+    bool sdo_reply_ready;
+    uint16_t sdo_reply_index;
+    uint8_t sdo_reply_sub;
+    uint8_t sdo_reply_cs;
+    uint8_t sdo_reply_data[4];
 } canopen_master_t;
 
 void co_master_init(canopen_master_t *m, can_bus_t *bus, uint8_t node_id);
@@ -80,6 +87,9 @@ int co_sdo_write(canopen_master_t *m, uint16_t index, uint8_t sub,
                  const void *val, uint8_t size);
 int co_sdo_read(canopen_master_t *m, uint16_t index, uint8_t sub,
                 void *val, uint8_t size);
+
+/* Upload request only. The reply is stored by co_master_handle_frame. */
+int co_sdo_read_send(canopen_master_t *m, uint16_t index, uint8_t sub);
 
 int co_rpdo_send(canopen_master_t *m, uint8_t pdo_num,
                  const uint8_t *data, uint8_t dlc);

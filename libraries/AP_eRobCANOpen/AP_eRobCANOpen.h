@@ -58,11 +58,14 @@ private:
         bool tried;
         bool reported;
         uint32_t last_try_ms;
+        uint32_t last_log_ms;
+        uint32_t last_named_ms;
     };
 
     void loop();
     void setup_axes();
     void poll_axes();
+    void publish_feedback(uint8_t index, uint32_t now_ms);
     bool try_configure(uint8_t index, uint32_t now_ms);
     bool frame_for_master(const AP_HAL::CANFrame &rx, can_frame_t *fr);
     bool id_for_axis(uint16_t std_id, uint8_t &index) const;

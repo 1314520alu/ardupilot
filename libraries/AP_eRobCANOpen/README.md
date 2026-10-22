@@ -69,12 +69,71 @@ eRob 按舵机用。`CAN_D2_EROB_BM` 的位和 `CAN_Dx_UC_SRV_BM` 一样：bit 0
 | NMT Stop / Reset communication / Start | 节点守护、LSS、完整对象字典 |
 | 快速 SDO 读写 | 分段 SDO、EDS 解析 |
 | 主站发 SYNC `0x080` | 多个 SYNC 源 |
-| 按手册 §5.5.1 写死 RxPDO1 / TxPDO1 | 通用 PDO 映射引擎 |
+| 固定 RxPDO1 与 TxPDO1..4 | 通用 PDO 映射引擎 |
 | CiA402：清故障 → 6 → 7 → `0x000F` | PP/CSV/CST 的完整工具链 |
 
 默认：Node-ID `1`（占位）、CSP（`0x6060 = 8`）、SYNC 周期 4000 µs。手册 §5.5.1 把 `0x1006 = 1000` 写成 1000 µs，所以这里按微秒写入 4000。从站的 `0x1005` 写成 `0x00000080`，禁止从站自己发 SYNC。
 
-周期顺序与手册示例一致：先 RxPDO1（`0x200+Node-ID`，控制字 + 目标位置），再 SYNC，从站回 TxPDO1（`0x180+Node-ID`，状态字 + 实际位置）。
+周期顺序与手册示例一致：先 RxPDO1（`0x200+Node-ID`，控制字 + 目标位置），再 SYNC。从站按传输类型 1 回四个 TxPDO。TxPDO1 仍是状态字 + 实际位置。
+
+## 反馈
+
+DY1000 的四个舵机对象相同。每个 `CAN_Dx_EROB_BM` 置位对应一轴，缓存最新值。CSP 的 `push_servos()` 不读这些值。
+
+Pre-op 里把 TxPDO 写成下面这张表。每条都不超过 8 字节，传输类型都是 1（每个 SYNC）：
+
+| PDO | COB-ID | 字节 | 对象 |
+| --- | --- | --- | --- |
+| TxPDO1 | `0x180+id` | 6 | `0x6041` u16 状态字，`0x6064` i32 实际位置 plus |
+| TxPDO2 | `0x280+id` | 8 | `0x2240` i32 电机端编码器 plus，`0x20A0` i32 负载端编码器 plus |
+| TxPDO3 | `0x380+id` | 8 | `0x606C` i32 速度 plus/s，`0x6077` i16 扭矩千分比，`0x6078` i16 电流千分比 |
+| TxPDO4 | `0x480+id` | 8 | `0x6079` u32 母线 mV，`0x60F4` i32 跟随误差 plus |
+
+`0x6061` 是 8 bit。EtherCAT 映射它时还要再补一个 8 bit 才能对齐，CANopen 这条链路不把它放进 PDO。下面几项走慢速 SDO，大约每轴 250 ms 读一个，不跟每个 SYNC：
+
+| 对象 | 含义 |
+| --- | --- |
+| `0x603F` u16 | 错误码 |
+| `0x3B68` u32 | 警告码 |
+| `0x22A2` i16 | 驱动温度 °C。手册标了 PDO mapping NO |
+| `0x6061` i8 | 模式显示。8 是 CSP |
+| `0x2241` i32 | 双编码器差值 plus。可选，用来看回差，不是刚度计算 |
+
+使能状态不是单独的对象：`(0x6041 & 0x006F) == 0x0027`。
+
+电机端转速（rpm）和绕组温度没有单独的对象，这里不换算。`0x606C` 是 plus/s，不是 rpm。`0x6077` / `0x6078` 是额定值的千分比，不是 N·m 和 A。换成电流还要读 `0x6075`，换成扭矩还要读 `0x6076`，这次没做。
+
+日志里两个消息（10 Hz，正在记录时）：
+
+| 消息 | 内容 |
+| --- | --- |
+| `ERB1` | 轴号、Node-ID、SERVO 号、状态字、模式、使能、位置、电机编码器、负载编码器、速度、扭矩、电流、母线 mV、跟随误差 |
+| `ERB2` | 错误码、警告码、驱动温度、双编码器差值 |
+
+Mission Planner 回放日志时选 `ERB1` / `ERB2`。`Sv` 是 SERVO 通道号（SERVO5 记 5）。`Ax` 是这块掩码里从低位起的第几轴。母线电压在日志里是 mV，单位倍率把 `mV` 显示成 V。扭矩和电流的倍率把千分比显示成百分数。
+
+同一组数也会以大约 1 Hz 发给地面站。名字是 `ER` + SERVO 号 + 一个字母，例如掩码包含 SERVO5 时：
+
+| 名字 | 对象 | 类型 |
+| --- | --- | --- |
+| `ER5P` | `0x6064` 实际位置 plus | NAMED_VALUE_INT |
+| `ER5M` | `0x2240` 电机编码器 plus | NAMED_VALUE_INT |
+| `ER5L` | `0x20A0` 负载编码器 plus | NAMED_VALUE_INT |
+| `ER5S` | `0x606C` 速度 plus/s | NAMED_VALUE_INT |
+| `ER5Q` | `0x6077` 扭矩千分比 | NAMED_VALUE_INT |
+| `ER5I` | `0x6078` 电流千分比 | NAMED_VALUE_INT |
+| `ER5U` | `0x6079` 母线电压，单位 V | NAMED_VALUE_FLOAT |
+| `ER5F` | `0x60F4` 跟随误差 plus | NAMED_VALUE_INT |
+| `ER5T` | `0x22A2` 驱动温度 °C | NAMED_VALUE_FLOAT |
+| `ER5E` | `0x603F` 错误码 | NAMED_VALUE_INT |
+| `ER5W` | `0x3B68` 警告码 | NAMED_VALUE_INT |
+| `ER5O` | `0x6061` 模式 | NAMED_VALUE_INT |
+| `ER5D` | `0x2241` 双编码器差值 | NAMED_VALUE_INT |
+| `ER5A` | 使能，1 或 0 | NAMED_VALUE_INT |
+
+Mission Planner 的 MAVLink Inspector 里看 `NAMED_VALUE_INT` 和 `NAMED_VALUE_FLOAT`。这些帧同时记成 `NVI` / `NVF`。还没收到的对象不会发。四个舵机就是四组名字，对象表相同。
+
+四轴、每轴四个 TxPDO、4 ms 一拍，大约是 4000 个 TxPDO/s，再加上 RxPDO 和 SYNC。1 Mbps 上还放得下。六轴会更紧。
 
 使能后 500 ms 内仍下发对齐过的实际位置，不发新目标（手册 §5.1.1）。下使能与使能间隔小于 300 ms 时 `erob_disable()` 直接返回失败（手册 §5.1.2）。位置单位是 plus；负载端单圈 524288（手册 §5.2.1）。换成角度还要减速比，见 `CUSTOMER_ASK.md`。
 
@@ -109,6 +168,6 @@ make -C libraries/AP_eRobCANOpen check
 2. 参数按上面的例子设置后重启。eRob 只接 CAN2，1 Mbps，两端终端电阻。CAN1 维持 DroneCAN。
 3. 驱动线程会重试 `erob_configure_pdo_csp()`，直到伺服就绪（手册：较新固件大约 5 s）。失败时约每 5 s 再试一次。
 4. 使能后至少 500 ms 再 `set_target_pos()`。
-5. 用 CAN 分析仪看 CAN2：配置阶段没有 SYNC；运行后每 4 ms 有 `0x080`，以及本节点的 `0x200+id` / `0x180+id`。CAN1 上不应出现这些帧。CAN2 上不要再挂别的协议。
+5. 用 CAN 分析仪看 CAN2：配置阶段没有 SYNC；运行后每 4 ms 有 `0x080`，以及本节点的 `0x200+id` 和 `0x180+id`、`0x280+id`、`0x380+id`、`0x480+id`。慢速 SDO 在 `0x600+id` / `0x580+id`，不是每个 SYNC 都有。CAN1 上不应出现这些帧。CAN2 上不要再挂别的协议。
 
 出厂 Node-ID、出厂 PDO 和减速比仍未在手册里写死。驱动会按 §5.5.1 强制重映射，但联调前仍要以客户 EDS 或 SDO 读回为准。

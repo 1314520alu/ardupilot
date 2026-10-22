@@ -13,17 +13,64 @@
 #include <stdint.h>
 #include <string.h>
 
+static uint16_t rd_u16(const uint8_t *p)
+{
+    return (uint16_t)(p[0] | (p[1] << 8));
+}
+
+static int16_t rd_i16(const uint8_t *p)
+{
+    return (int16_t)rd_u16(p);
+}
+
+static uint32_t rd_u32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static int32_t rd_i32(const uint8_t *p)
+{
+    return (int32_t)rd_u32(p);
+}
+
+static void note_status(erob_servo_t *s, uint16_t sw)
+{
+    s->statusword = sw;
+    s->fb.statusword = sw;
+    s->fb.op_enabled = (sw & EROB_SW_MASK) == EROB_SW_OP_ENABLED;
+}
+
 static void on_tpdo(void *user, uint8_t pdo_num, const uint8_t *data, uint8_t dlc)
 {
     erob_servo_t *s = (erob_servo_t *)user;
-    (void)pdo_num;
-    if (dlc < 6) {
+
+    if (pdo_num == 0 && dlc >= 6) {
+        note_status(s, rd_u16(data));
+        s->pos_actual = rd_i32(&data[2]);
+        s->fb.pos_actual = s->pos_actual;
+        s->fb.valid |= EROB_FB_TPDO1;
+        s->feedback_valid = true;
         return;
     }
-    s->statusword = (uint16_t)(data[0] | (data[1] << 8));
-    s->pos_actual = (int32_t)((uint32_t)data[2] | ((uint32_t)data[3] << 8) |
-                              ((uint32_t)data[4] << 16) | ((uint32_t)data[5] << 24));
-    s->feedback_valid = true;
+    if (pdo_num == 1 && dlc >= 8) {
+        s->fb.motor_enc = rd_i32(&data[0]);
+        s->fb.load_enc = rd_i32(&data[4]);
+        s->fb.valid |= EROB_FB_TPDO2;
+        return;
+    }
+    if (pdo_num == 2 && dlc >= 8) {
+        s->fb.vel_plus_s = rd_i32(&data[0]);
+        s->fb.torque_permille = rd_i16(&data[4]);
+        s->fb.current_permille = rd_i16(&data[6]);
+        s->fb.valid |= EROB_FB_TPDO3;
+        return;
+    }
+    if (pdo_num == 3 && dlc >= 8) {
+        s->fb.dc_mv = rd_u32(&data[0]);
+        s->fb.follow_err = rd_i32(&data[4]);
+        s->fb.valid |= EROB_FB_TPDO4;
+    }
 }
 
 void erob_init(erob_servo_t *s, canopen_master_t *co)
@@ -50,6 +97,29 @@ static int fail(erob_servo_t *s, int code)
     co_master_set_sync(s->co, false, 0);
     s->state = EROB_ST_ERROR;
     return code;
+}
+
+/* Disable, transmission type 1, map, enable. entries are index<<16 | sub<<8 | bits. */
+static int map_tpdo(canopen_master_t *m, uint16_t comm, uint16_t map,
+                    uint32_t cob, const uint32_t *entries, uint8_t nent)
+{
+    uint8_t i;
+
+    if (sdo_u32(m, comm, 0x01, cob | 0x80000000u) != 0 ||
+        sdo_u8(m, comm, 0x02, 0x01) != 0 ||
+        sdo_u8(m, map, 0x00, 0x00) != 0) {
+        return -1;
+    }
+    for (i = 0; i < nent; i++) {
+        if (sdo_u32(m, map, (uint8_t)(i + 1), entries[i]) != 0) {
+            return -1;
+        }
+    }
+    if (sdo_u8(m, map, 0x00, nent) != 0 ||
+        sdo_u32(m, comm, 0x01, cob) != 0) {
+        return -1;
+    }
+    return 0;
 }
 
 int erob_configure_pdo_csp(erob_servo_t *s)
@@ -99,15 +169,24 @@ int erob_configure_pdo_csp(erob_servo_t *s)
     tpdo_cob = (uint32_t)(CO_COB_TPDO1_BASE + n);
     rpdo_cob = (uint32_t)(CO_COB_RPDO1_BASE + n);
 
-    /* TxPDO1: disable, type 1, map 6041:10 + 6064:20, two entries, enable. */
-    if (sdo_u32(m, 0x1800, 0x01, tpdo_cob | 0x80000000u) != 0 ||
-        sdo_u8(m, 0x1800, 0x02, 0x01) != 0 ||
-        sdo_u8(m, 0x1A00, 0x00, 0x00) != 0 ||
-        sdo_u32(m, 0x1A00, 0x01, 0x60410010u) != 0 ||
-        sdo_u32(m, 0x1A00, 0x02, 0x60640020u) != 0 ||
-        sdo_u8(m, 0x1A00, 0x00, 0x02) != 0 ||
-        sdo_u32(m, 0x1800, 0x01, tpdo_cob) != 0) {
-        return fail(s, -1);
+    /*
+     * TxPDO1 is 6 bytes: statusword + actual position.
+     * TxPDO2 is 8 bytes: motor encoder + load encoder.
+     * TxPDO3 is 8 bytes: velocity + torque + current.
+     * TxPDO4 is 8 bytes: DC bus + following error.
+     * 0x6061 is 8 bits and would need a pad on EtherCAT; it is SDO instead.
+     */
+    {
+        static const uint32_t tpdo1[] = { 0x60410010u, 0x60640020u };
+        static const uint32_t tpdo2[] = { 0x22400020u, 0x20A00020u };
+        static const uint32_t tpdo3[] = { 0x606C0020u, 0x60770010u, 0x60780010u };
+        static const uint32_t tpdo4[] = { 0x60790020u, 0x60F40020u };
+        if (map_tpdo(m, 0x1800, 0x1A00, tpdo_cob, tpdo1, 2) != 0 ||
+            map_tpdo(m, 0x1801, 0x1A01, (uint32_t)(CO_COB_TPDO2_BASE + n), tpdo2, 2) != 0 ||
+            map_tpdo(m, 0x1802, 0x1A02, (uint32_t)(CO_COB_TPDO3_BASE + n), tpdo3, 3) != 0 ||
+            map_tpdo(m, 0x1803, 0x1A03, (uint32_t)(CO_COB_TPDO4_BASE + n), tpdo4, 2) != 0) {
+            return fail(s, -1);
+        }
     }
 
     /* RxPDO1: disable, type 1, map 6040:10 + 607A:20, two entries, enable. */
@@ -252,10 +331,90 @@ void erob_poll_motion(erob_servo_t *s)
     }
 }
 
+static void apply_diag(erob_servo_t *s, uint16_t index, const uint8_t *data)
+{
+    switch (index) {
+    case 0x603F:
+        s->fb.error_code = rd_u16(data);
+        s->fb.valid |= EROB_FB_ERR;
+        break;
+    case 0x3B68:
+        s->fb.warning_code = rd_u32(data);
+        s->fb.valid |= EROB_FB_WARN;
+        break;
+    case 0x22A2:
+        /* UINT in the dictionary, but the range is -40..150 C. */
+        s->fb.drive_temp_c = rd_i16(data);
+        s->fb.valid |= EROB_FB_TEMP;
+        break;
+    case 0x6061:
+        s->fb.mode_disp = (int8_t)data[0];
+        s->fb.valid |= EROB_FB_MODE;
+        break;
+    case 0x2241:
+        s->fb.enc_diff = rd_i32(data);
+        s->fb.valid |= EROB_FB_DIFF;
+        break;
+    default:
+        break;
+    }
+}
+
+void erob_poll_diag(erob_servo_t *s)
+{
+    canopen_master_t *m = s->co;
+    uint32_t now;
+    uint32_t phase;
+    static const uint16_t idx[] = { 0x603F, 0x3B68, 0x22A2, 0x6061, 0x2241 };
+    static const uint8_t sz[] = { 2, 4, 2, 1, 4 };
+
+    if (s->state != EROB_ST_ENABLED) {
+        return;
+    }
+    now = can_bus_millis(m->bus);
+    if (s->diag_wait) {
+        if (m->sdo_reply_ready &&
+            m->sdo_reply_index == s->diag_index &&
+            m->sdo_reply_sub == 0) {
+            if ((m->sdo_reply_cs & 0xe0) == 0x40) {
+                apply_diag(s, s->diag_index, m->sdo_reply_data);
+            }
+            m->sdo_reply_ready = false;
+            s->diag_wait = false;
+            s->diag_slot = (uint8_t)((s->diag_slot + 1) % 5);
+        } else if ((now - s->diag_tx_ms) < 80u) {
+            return;
+        } else {
+            s->diag_wait = false;
+            s->diag_slot = (uint8_t)((s->diag_slot + 1) % 5);
+        }
+    }
+
+    /* Spread the four axes so they do not upload on the same tick. */
+    phase = (uint32_t)(m->node_id % EROB_MAX_AXES) * 40u;
+    if (s->diag_tx_ms == 0) {
+        if ((now - s->enable_done_ms) < phase) {
+            return;
+        }
+    } else if ((now - s->diag_tx_ms) < EROB_DIAG_PERIOD_MS) {
+        return;
+    }
+
+    s->diag_index = idx[s->diag_slot];
+    s->diag_size = sz[s->diag_slot];
+    (void)s->diag_size;
+    if (co_sdo_read_send(m, s->diag_index, 0) != 0) {
+        return;
+    }
+    s->diag_wait = true;
+    s->diag_tx_ms = now;
+}
+
 void erob_poll(erob_servo_t *s)
 {
     co_master_poll_rx(s->co);
     erob_poll_motion(s);
+    erob_poll_diag(s);
     co_master_poll_sync(s->co);
 }
 
@@ -291,4 +450,9 @@ uint16_t erob_get_statusword(const erob_servo_t *s)
 int32_t erob_get_position(const erob_servo_t *s)
 {
     return s->pos_actual;
+}
+
+const erob_feedback_t *erob_feedback(const erob_servo_t *s)
+{
+    return &s->fb;
 }

@@ -132,6 +132,8 @@ int main(void)
     expect_true(erob_id_is_reserved(0x181, node), "TPDO1 is reserved");
     expect_true(erob_id_is_reserved(0x201, node), "RPDO1 is reserved");
     expect_true(erob_id_is_reserved(0x281, node), "TPDO2 is reserved");
+    expect_true(erob_id_is_reserved(0x381, node), "TPDO3 is reserved");
+    expect_true(erob_id_is_reserved(0x481, node), "TPDO4 is reserved");
     expect_true(erob_id_is_reserved(0x581, node), "SDO tx is reserved");
     expect_true(erob_id_is_reserved(0x601, node), "SDO rx is reserved");
     expect_true(erob_id_is_reserved(0x701, node), "heartbeat is reserved");
@@ -168,8 +170,20 @@ int main(void)
     expect_true(find_sdo_u32(node, 0x1800, 0x01, 0x80000000u | (0x180u + node)) >= 0,
                 "TxPDO1 disabled with node COB-ID");
     expect_true(find_sdo_u32(node, 0x1800, 0x01, 0x180u + node) >= 0, "TxPDO1 enabled");
-    expect_true(find_sdo_u32(node, 0x1A00, 0x01, 0x60410010u) >= 0, "TxPDO maps statusword");
-    expect_true(find_sdo_u32(node, 0x1A00, 0x02, 0x60640020u) >= 0, "TxPDO maps actual position");
+    expect_true(find_sdo_u32(node, 0x1A00, 0x01, 0x60410010u) >= 0, "TxPDO1 maps statusword");
+    expect_true(find_sdo_u32(node, 0x1A00, 0x02, 0x60640020u) >= 0, "TxPDO1 maps actual position");
+    expect_true(find_sdo_u32(node, 0x1801, 0x01, 0x80000000u | (0x280u + node)) >= 0,
+                "TxPDO2 disabled");
+    expect_true(find_sdo_u32(node, 0x1801, 0x01, 0x280u + node) >= 0, "TxPDO2 enabled");
+    expect_true(find_sdo_u32(node, 0x1A01, 0x01, 0x22400020u) >= 0, "TxPDO2 maps motor encoder");
+    expect_true(find_sdo_u32(node, 0x1A01, 0x02, 0x20A00020u) >= 0, "TxPDO2 maps load encoder");
+    expect_true(find_sdo_u32(node, 0x1A02, 0x01, 0x606C0020u) >= 0, "TxPDO3 maps velocity");
+    expect_true(find_sdo_u32(node, 0x1A02, 0x02, 0x60770010u) >= 0, "TxPDO3 maps torque");
+    expect_true(find_sdo_u32(node, 0x1A02, 0x03, 0x60780010u) >= 0, "TxPDO3 maps current");
+    expect_true(find_sdo_u32(node, 0x1802, 0x01, 0x380u + node) >= 0, "TxPDO3 enabled");
+    expect_true(find_sdo_u32(node, 0x1A03, 0x01, 0x60790020u) >= 0, "TxPDO4 maps DC voltage");
+    expect_true(find_sdo_u32(node, 0x1A03, 0x02, 0x60F40020u) >= 0, "TxPDO4 maps following error");
+    expect_true(find_sdo_u32(node, 0x1803, 0x01, 0x480u + node) >= 0, "TxPDO4 enabled");
     expect_true(find_sdo_u32(node, 0x1400, 0x01, 0x80000000u | (0x200u + node)) >= 0,
                 "RxPDO1 disabled with node COB-ID");
     expect_true(find_sdo_u32(node, 0x1400, 0x01, 0x200u + node) >= 0, "RxPDO1 enabled");
@@ -203,6 +217,32 @@ int main(void)
     i_sync = find_sync_after((int)tx_at_enable - 1);
     expect_true(i_sync >= 0, "SYNC 0x080 is produced on the cyclic poll");
     expect_true(!can_bus_stub_overflow(), "no queue overflow");
+
+    {
+        const erob_feedback_t *fb = erob_feedback(&servo);
+        int d;
+        expect_true(fb != NULL && (fb->valid & EROB_FB_TPDO1) != 0, "TPDO1 cached");
+        expect_true(fb->op_enabled, "enable bit is statusword 0x0027");
+        expect_true((fb->valid & EROB_FB_TPDO2) != 0, "TPDO2 cached");
+        expect_true(fb->motor_enc == 111 && fb->load_enc == 222, "encoder pair");
+        expect_true((fb->valid & EROB_FB_TPDO3) != 0, "TPDO3 cached");
+        expect_true(fb->vel_plus_s == 333, "velocity plus/s");
+        expect_true(fb->torque_permille == -7 && fb->current_permille == 9, "torque and current");
+        expect_true((fb->valid & EROB_FB_TPDO4) != 0, "TPDO4 cached");
+        expect_true(fb->dc_mv == 48000u && fb->follow_err == 15, "voltage and following error");
+        for (d = 0; d < 40; d++) {
+            can_bus_stub_advance(50);
+            erob_poll(&servo);
+        }
+        fb = erob_feedback(&servo);
+        expect_true((fb->valid & EROB_FB_ERR) != 0 && fb->error_code == 0x1234, "SDO error code");
+        expect_true((fb->valid & EROB_FB_WARN) != 0 && fb->warning_code == 0x0000FF01u, "SDO warning");
+        expect_true((fb->valid & EROB_FB_TEMP) != 0 && fb->drive_temp_c == -5, "SDO drive temp");
+        expect_true((fb->valid & EROB_FB_MODE) != 0 && fb->mode_disp == EROB_MODE_CSP, "SDO mode display");
+        expect_true((fb->valid & EROB_FB_DIFF) != 0 && fb->enc_diff == 42, "SDO dual-encoder difference");
+        expect_true(erob_get_position(&servo) == 0, "CSP position still tracks TPDO1");
+    }
+    expect_true(!can_bus_stub_overflow(), "no queue overflow after diagnostics");
 
     if (g_fails != 0) {
         fprintf(stderr, "%d check(s) failed\n", g_fails);

@@ -50,6 +50,11 @@
 #define EROB_MAX_AXES 6
 #endif
 
+/* One diagnostic SDO per axis. Not sent on every SYNC. */
+#ifndef EROB_DIAG_PERIOD_MS
+#define EROB_DIAG_PERIOD_MS 250u
+#endif
+
 /* HAL iface for EROB_CAN_BUS_INDEX. CAN2 -> 1. Do not use 0 (that is CAN1). */
 static inline unsigned erob_hal_can_iface(void)
 {

@@ -18,8 +18,13 @@
 #include "AP_eRobCANOpen.h"
 
 #include <AP_CANManager/AP_CANManager.h>
+#include <AP_Logger/AP_Logger_config.h>
 #include <GCS_MAVLink/GCS.h>
 #include <SRV_Channel/SRV_Channel.h>
+
+#if HAL_LOGGING_ENABLED
+#include <AP_Logger/AP_Logger.h>
+#endif
 
 #include <stdio.h>
 #include <string.h>
@@ -140,6 +145,8 @@ void AP_eRobCANOpen::setup_axes()
         _axis[num].tried = false;
         _axis[num].reported = false;
         _axis[num].last_try_ms = 0;
+        _axis[num].last_log_ms = 0;
+        _axis[num].last_named_ms = 0;
         co_master_init(&_axis[num].master, &_bus, _axis[num].node);
         erob_init(&_axis[num].servo, &_axis[num].master);
         num++;
@@ -189,15 +196,159 @@ void AP_eRobCANOpen::poll_axes()
     }
     for (uint8_t i = 0; i < _num_axes; i++) {
         erob_poll_motion(&_axis[i].servo);
+        erob_poll_diag(&_axis[i].servo);
         if (!_axis[i].reported && erob_get_state(&_axis[i].servo) == EROB_ST_ENABLED) {
             _axis[i].reported = true;
             GCS_SEND_TEXT(MAV_SEVERITY_INFO, "eRob CAN: servo node %u enabled",
                           unsigned(_axis[i].node));
         }
+        publish_feedback(i, AP_HAL::millis());
     }
     if (_num_axes > 0) {
         co_master_poll_sync(&_axis[0].master);
     }
+}
+
+static void erob_named(char *out, size_t len, uint8_t servo_num, char tag)
+{
+    snprintf(out, len, "ER%u%c", unsigned(servo_num), tag);
+}
+
+void AP_eRobCANOpen::publish_feedback(uint8_t index, uint32_t now_ms)
+{
+    Axis &axis = _axis[index];
+    const erob_feedback_t *fb = erob_feedback(&axis.servo);
+    const uint8_t servo_num = uint8_t(axis.channel + 1);
+    char name[8];
+
+    if (fb == nullptr || (fb->valid & EROB_FB_TPDO1) == 0) {
+        return;
+    }
+
+#if HAL_LOGGING_ENABLED
+    if (AP::logger().logging_enabled() && (now_ms - axis.last_log_ms) >= 100) {
+        axis.last_log_ms = now_ms;
+        // @LoggerMessage: ERB1
+        // @Description: eRob CAN cyclic feedback for one mapped servo
+        // @Field: TimeUS: Time since system startup
+        // @Field: Ax: axis index on this driver, low bit of the servo mask first
+        // @Field: Nd: CANopen Node-ID
+        // @Field: Sv: servo output number, SERVO1 is 1
+        // @Field: SW: statusword 0x6041
+        // @Field: Md: mode display 0x6061, 8 is CSP
+        // @Field: En: 1 when (statusword & 0x006F) == 0x0027
+        // @Field: Pos: actual position 0x6064, plus
+        // @Field: Mot: motor encoder 0x2240, plus
+        // @Field: Ld: load encoder 0x20A0, plus
+        // @Field: Vel: velocity 0x606C, plus/s
+        // @Field: Tq: torque 0x6077, permille of rated
+        // @Field: Iq: current 0x6078, permille of rated
+        // @Field: mV: DC bus 0x6079, millivolts
+        // @Field: FE: following error 0x60F4, plus
+        AP::logger().WriteStreaming(
+            "ERB1",
+            "TimeUS,Ax,Nd,Sv,SW,Md,En,Pos,Mot,Ld,Vel,Tq,Iq,mV,FE",
+            "s###-------%%v-",
+            "F0000000000AAC0",
+            "QBBBHbBiiiihhIi",
+            AP_HAL::micros64(),
+            unsigned(index),
+            unsigned(axis.node),
+            unsigned(servo_num),
+            unsigned(fb->statusword),
+            int(fb->mode_disp),
+            unsigned(fb->op_enabled ? 1 : 0),
+            int(fb->pos_actual),
+            int(fb->motor_enc),
+            int(fb->load_enc),
+            int(fb->vel_plus_s),
+            int(fb->torque_permille),
+            int(fb->current_permille),
+            uint32_t(fb->dc_mv),
+            int(fb->follow_err));
+
+        if ((fb->valid & (EROB_FB_ERR | EROB_FB_WARN | EROB_FB_TEMP | EROB_FB_DIFF)) != 0) {
+            // @LoggerMessage: ERB2
+            // @Description: eRob CAN slow diagnostics for one mapped servo
+            // @Field: TimeUS: Time since system startup
+            // @Field: Ax: axis index on this driver
+            // @Field: Nd: CANopen Node-ID
+            // @Field: Err: error code 0x603F
+            // @Field: Warn: warning code 0x3B68
+            // @Field: Tmp: drive temperature 0x22A2, degC
+            // @Field: Diff: dual-encoder difference 0x2241, plus
+            AP::logger().WriteStreaming(
+                "ERB2",
+                "TimeUS,Ax,Nd,Err,Warn,Tmp,Diff",
+                "s##--O-",
+                "F000000",
+                "QBBHIhi",
+                AP_HAL::micros64(),
+                unsigned(index),
+                unsigned(axis.node),
+                unsigned(fb->error_code),
+                uint32_t(fb->warning_code),
+                int(fb->drive_temp_c),
+                int(fb->enc_diff));
+        }
+    }
+#else
+    (void)now_ms;
+#endif
+
+#if HAL_GCS_ENABLED
+    if ((now_ms - axis.last_named_ms) < 1000) {
+        return;
+    }
+    axis.last_named_ms = now_ms;
+    erob_named(name, sizeof(name), servo_num, 'P');
+    gcs().send_named_int(name, fb->pos_actual);
+    if ((fb->valid & EROB_FB_TPDO2) != 0) {
+        erob_named(name, sizeof(name), servo_num, 'M');
+        gcs().send_named_int(name, fb->motor_enc);
+        erob_named(name, sizeof(name), servo_num, 'L');
+        gcs().send_named_int(name, fb->load_enc);
+    }
+    if ((fb->valid & EROB_FB_TPDO3) != 0) {
+        erob_named(name, sizeof(name), servo_num, 'S');
+        gcs().send_named_int(name, fb->vel_plus_s);
+        erob_named(name, sizeof(name), servo_num, 'Q');
+        gcs().send_named_int(name, fb->torque_permille);
+        erob_named(name, sizeof(name), servo_num, 'I');
+        gcs().send_named_int(name, fb->current_permille);
+    }
+    if ((fb->valid & EROB_FB_TPDO4) != 0) {
+        erob_named(name, sizeof(name), servo_num, 'U');
+        gcs().send_named_float(name, fb->dc_mv * 0.001f);
+        erob_named(name, sizeof(name), servo_num, 'F');
+        gcs().send_named_int(name, fb->follow_err);
+    }
+    if ((fb->valid & EROB_FB_TEMP) != 0) {
+        erob_named(name, sizeof(name), servo_num, 'T');
+        gcs().send_named_float(name, fb->drive_temp_c);
+    }
+    if ((fb->valid & EROB_FB_ERR) != 0) {
+        erob_named(name, sizeof(name), servo_num, 'E');
+        gcs().send_named_int(name, fb->error_code);
+    }
+    if ((fb->valid & EROB_FB_WARN) != 0) {
+        erob_named(name, sizeof(name), servo_num, 'W');
+        gcs().send_named_int(name, int32_t(fb->warning_code));
+    }
+    if ((fb->valid & EROB_FB_MODE) != 0) {
+        erob_named(name, sizeof(name), servo_num, 'O');
+        gcs().send_named_int(name, fb->mode_disp);
+    }
+    if ((fb->valid & EROB_FB_DIFF) != 0) {
+        erob_named(name, sizeof(name), servo_num, 'D');
+        gcs().send_named_int(name, fb->enc_diff);
+    }
+    erob_named(name, sizeof(name), servo_num, 'A');
+    gcs().send_named_int(name, fb->op_enabled ? 1 : 0);
+#else
+    (void)servo_num;
+    (void)name;
+#endif
 }
 
 void AP_eRobCANOpen::init(uint8_t driver_index)
@@ -210,8 +361,9 @@ void AP_eRobCANOpen::init(uint8_t driver_index)
 
     // Name the thread before create. PiccoloCAN sets the name afterwards.
     snprintf(_thread_name, sizeof(_thread_name), "erobcan%u", unsigned(driver_index));
+    // Logging the feedback snapshot needs more than the PiccoloCAN 4k stack.
     if (!hal.scheduler->thread_create(FUNCTOR_BIND_MEMBER(&AP_eRobCANOpen::loop, void),
-                                      _thread_name, 4096, AP_HAL::Scheduler::PRIORITY_CAN, 0)) {
+                                      _thread_name, 8192, AP_HAL::Scheduler::PRIORITY_CAN, 0)) {
         return;
     }
     _started = true;

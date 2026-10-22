@@ -8,8 +8,8 @@
 
 #include <string.h>
 
-#define TX_LOG_MAX 256
-#define RX_Q_MAX 8
+#define TX_LOG_MAX 512
+#define RX_Q_MAX 16
 
 struct can_bus {
     uint32_t fake_ms;
@@ -59,6 +59,22 @@ static void reply_sdo(struct can_bus *bus, const can_frame_t *req)
     } else if (cs == 0x40 && index == 0x6061) {
         rx.data[0] = 0x4f;
         rx.data[4] = EROB_MODE_CSP;
+    } else if (cs == 0x40 && index == 0x603F) {
+        rx.data[0] = 0x4b;
+        rx.data[4] = 0x34;
+        rx.data[5] = 0x12;
+    } else if (cs == 0x40 && index == 0x3B68) {
+        rx.data[0] = 0x43;
+        rx.data[4] = 0x01;
+        rx.data[5] = 0xff;
+    } else if (cs == 0x40 && index == 0x22A2) {
+        /* -5 C, stored as int16. The dictionary type is UINT. */
+        rx.data[0] = 0x4b;
+        rx.data[4] = 0xfb;
+        rx.data[5] = 0xff;
+    } else if (cs == 0x40 && index == 0x2241) {
+        rx.data[0] = 0x43;
+        rx.data[4] = 42;
     } else if (cs == 0x2f || cs == 0x2b || cs == 0x23) {
         rx.data[0] = 0x60;
     } else {
@@ -67,11 +83,31 @@ static void reply_sdo(struct can_bus *bus, const can_frame_t *req)
     rx_push(bus, &rx);
 }
 
-static void reply_rpdo(struct can_bus *bus, const can_frame_t *req)
+static void put_i32(uint8_t *p, int32_t v)
+{
+    uint32_t u = (uint32_t)v;
+    p[0] = (uint8_t)u;
+    p[1] = (uint8_t)(u >> 8);
+    p[2] = (uint8_t)(u >> 16);
+    p[3] = (uint8_t)(u >> 24);
+}
+
+static void push_tpdo(struct can_bus *bus, uint16_t cob, uint8_t dlc, const uint8_t *data)
 {
     can_frame_t rx;
+    memset(&rx, 0, sizeof(rx));
+    rx.id = cob;
+    rx.dlc = dlc;
+    memcpy(rx.data, data, dlc);
+    rx_push(bus, &rx);
+}
+
+static void reply_rpdo(struct can_bus *bus, const can_frame_t *req)
+{
+    uint8_t b[8];
     uint16_t cw = (uint16_t)(req->data[0] | (req->data[1] << 8));
     uint16_t sw = EROB_SW_SWITCH_ON_DIS;
+    uint8_t n = bus->node_id;
     if (cw == EROB_CW_SHUTDOWN) {
         sw = EROB_SW_READY_TO_SW;
     } else if (cw == EROB_CW_SWITCH_ON) {
@@ -80,16 +116,29 @@ static void reply_rpdo(struct can_bus *bus, const can_frame_t *req)
         sw = EROB_SW_OP_ENABLED;
     }
     bus->sim_sw = sw;
-    memset(&rx, 0, sizeof(rx));
-    rx.id = 0x180u + bus->node_id;
-    rx.dlc = 6;
-    rx.data[0] = (uint8_t)(sw & 0xff);
-    rx.data[1] = (uint8_t)(sw >> 8);
-    rx.data[2] = (uint8_t)((uint32_t)bus->sim_pos);
-    rx.data[3] = (uint8_t)((uint32_t)bus->sim_pos >> 8);
-    rx.data[4] = (uint8_t)((uint32_t)bus->sim_pos >> 16);
-    rx.data[5] = (uint8_t)((uint32_t)bus->sim_pos >> 24);
-    rx_push(bus, &rx);
+
+    memset(b, 0, sizeof(b));
+    b[0] = (uint8_t)(sw & 0xff);
+    b[1] = (uint8_t)(sw >> 8);
+    put_i32(&b[2], bus->sim_pos);
+    push_tpdo(bus, (uint16_t)(0x180u + n), 6, b);
+
+    memset(b, 0, sizeof(b));
+    put_i32(&b[0], 111);
+    put_i32(&b[4], 222);
+    push_tpdo(bus, (uint16_t)(0x280u + n), 8, b);
+
+    memset(b, 0, sizeof(b));
+    put_i32(&b[0], 333);
+    b[4] = (uint8_t)(int16_t)-7;
+    b[5] = (uint8_t)((uint16_t)(int16_t)-7 >> 8);
+    b[6] = 9;
+    push_tpdo(bus, (uint16_t)(0x380u + n), 8, b);
+
+    memset(b, 0, sizeof(b));
+    put_i32(&b[0], 48000);
+    put_i32(&b[4], 15);
+    push_tpdo(bus, (uint16_t)(0x480u + n), 8, b);
 }
 
 can_bus_t *can_bus_stub_get(void)
