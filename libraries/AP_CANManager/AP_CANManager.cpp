@@ -28,6 +28,9 @@
 #include <AP_KDECAN/AP_KDECAN.h>
 #include <AP_SerialManager/AP_SerialManager.h>
 #include <AP_PiccoloCAN/AP_PiccoloCAN.h>
+#if AP_EROB_CANOPEN_ENABLED
+#include <AP_eRobCANOpen/AP_eRobCANOpen.h>
+#endif
 #include <AP_EFI/AP_EFI_NWPMU.h>
 #include <GCS_MAVLink/GCS.h>
 #if CONFIG_HAL_BOARD == HAL_BOARD_LINUX
@@ -211,6 +214,18 @@ void AP_CANManager::init()
             }
 
             AP_Param::load_object_from_eeprom((AP_PiccoloCAN*)_drivers[drv_num], AP_PiccoloCAN::var_info);
+            break;
+#endif
+#if AP_EROB_CANOPEN_ENABLED
+        case AP_CAN::Protocol::ERobCANOpen:
+            _drivers[drv_num] = _drv_param[drv_num]._erob = NEW_NOTHROW AP_eRobCANOpen();
+
+            if (_drivers[drv_num] == nullptr) {
+                AP_BoardConfig::allocation_error("ERobCANopen %d", drv_num + 1);
+                continue;
+            }
+
+            AP_Param::load_object_from_eeprom((AP_eRobCANOpen*)_drivers[drv_num], AP_eRobCANOpen::var_info);
             break;
 #endif
         default:
