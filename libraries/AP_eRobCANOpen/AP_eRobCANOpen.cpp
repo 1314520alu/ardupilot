@@ -298,6 +298,7 @@ void AP_eRobCANOpen::add_axis(uint8_t &num, uint8_t node, uint8_t channel)
     axis.last_log_ms = 0;
     axis.last_named_ms = 0;
     axis.last_fault_ms = 0;
+    axis.last_silent_ms = 0;
     co_master_init(&axis.master, &_bus, node);
     erob_init(&axis.servo, &axis.master);
     num++;
@@ -452,7 +453,8 @@ bool AP_eRobCANOpen::try_configure(uint8_t index, uint32_t now_ms)
 {
     Axis &axis = _axis[index];
     const erob_state_t st = erob_get_state(&axis.servo);
-    if (st == EROB_ST_ENABLED || st == EROB_ST_ENABLE_SEQ || st == EROB_ST_FAULT) {
+    if (st == EROB_ST_ENABLED || st == EROB_ST_ENABLE_SEQ || st == EROB_ST_FAULT ||
+        st == EROB_ST_SILENT) {
         return false;
     }
     if (axis.tried && (now_ms - axis.last_try_ms) < 5000) {
@@ -484,9 +486,7 @@ int32_t AP_eRobCANOpen::counts_per_rev() const
 
 bool AP_eRobCANOpen::axis_faulted(uint8_t index) const
 {
-    const erob_servo_t &servo = _axis[index].servo;
-    return (erob_get_statusword(&servo) & EROB_SW_FAULT_BIT) != 0 ||
-           erob_get_state(&servo) == EROB_ST_FAULT;
+    return (erob_get_statusword(&_axis[index].servo) & EROB_SW_FAULT_BIT) != 0;
 }
 
 void AP_eRobCANOpen::warn_statusword_fault(uint8_t index, uint32_t now_ms)
@@ -501,7 +501,23 @@ void AP_eRobCANOpen::warn_statusword_fault(uint8_t index, uint32_t now_ms)
     }
     axis.fault_active = true;
     axis.last_fault_ms = now_ms;
-    GCS_SEND_TEXT(MAV_SEVERITY_CRITICAL, "eRob: SERVO%u id %u statusword fault",
+    const uint16_t code = erob_refresh_error_code(&axis.servo);
+    GCS_SEND_TEXT(MAV_SEVERITY_CRITICAL, "eRob: SERVO%u id %u fault 603F=0x%04X",
+                  unsigned(axis.channel + 1), unsigned(axis.node), unsigned(code));
+}
+
+void AP_eRobCANOpen::warn_node_silent(uint8_t index, uint32_t now_ms)
+{
+    Axis &axis = _axis[index];
+    if (!erob_is_silent(&axis.servo)) {
+        axis.last_silent_ms = 0;
+        return;
+    }
+    if (axis.last_silent_ms != 0 && (now_ms - axis.last_silent_ms) < EROB_FAULT_WARN_MS) {
+        return;
+    }
+    axis.last_silent_ms = now_ms;
+    GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "eRob: SERVO%u id %u silent",
                   unsigned(axis.channel + 1), unsigned(axis.node));
 }
 
@@ -516,10 +532,16 @@ void AP_eRobCANOpen::poll_axes()
     }
     for (uint8_t i = 0; i < _num_axes; i++) {
         const uint32_t now_ms = AP_HAL::millis();
-        // Queue the critical text before poll_motion's one-shot fault reset.
+        erob_set_counts_per_rev(&_axis[i].servo, counts_per_rev());
+        // Text first, then the fault-reset edge inside poll_motion.
         warn_statusword_fault(i, now_ms);
+        warn_node_silent(i, now_ms);
         erob_poll_motion(&_axis[i].servo);
         erob_poll_diag(&_axis[i].servo);
+        if (erob_take_recovered(&_axis[i].servo)) {
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "eRob: SERVO%u id %u recovered",
+                          unsigned(_axis[i].channel + 1), unsigned(_axis[i].node));
+        }
         if (!_axis[i].reported && erob_get_state(&_axis[i].servo) == EROB_ST_ENABLED) {
             _axis[i].reported = true;
             GCS_SEND_TEXT(MAV_SEVERITY_INFO, "eRob CAN: servo node %u enabled",
@@ -616,12 +638,13 @@ void AP_eRobCANOpen::publish_feedback(uint8_t index, uint32_t now_ms)
             // @Field: Amp: current from 0x6078 and 0x6075, ampere
             // @Field: Nm: torque from 0x6077 and 0x6076, newton metre
             // @Field: V: DC bus from 0x6079, volt
+            // @Field: Flt: CiA402 fault entries on this servo. Recovery does not clear it.
             AP::logger().WriteStreaming(
                 "ERB3",
-                "TimeUS,Ax,Sv,Deg,Rpm,Mrpm,Amp,Nm,V",
-                "s##dqqAtv",
-                "F00000000",
-                "QBBffffff",
+                "TimeUS,Ax,Sv,Deg,Rpm,Mrpm,Amp,Nm,V,Flt",
+                "s##dqqAtv-",
+                "F000000000",
+                "QBBffffffH",
                 AP_HAL::micros64(),
                 unsigned(index),
                 unsigned(servo_num),
@@ -630,7 +653,8 @@ void AP_eRobCANOpen::publish_feedback(uint8_t index, uint32_t now_ms)
                 motor_rpm,
                 amps,
                 nm,
-                volts);
+                volts,
+                unsigned(erob_fault_count(&axis.servo)));
         }
 
         if ((fb->valid & (EROB_FB_ERR | EROB_FB_WARN | EROB_FB_TEMP | EROB_FB_DIFF)) != 0) {
@@ -841,11 +865,8 @@ void AP_eRobCANOpen::push_servos()
         if (pwm == 0) {
             continue;
         }
-        // A faulted slot must not keep taking CSP targets. The critical
-        // text is raised on the CAN thread before any further write.
-        if (axis_faulted(i)) {
-            continue;
-        }
+        // Keep the commanded target during a fault. poll_motion writes
+        // 0x607A from the recovery sequence, then ramps back to this value.
         const int32_t mapped = erob_pwm_to_plus(pwm, ch->get_output_min(), ch->get_output_max(),
                                                 _pos_min.get(), _pos_max.get());
         erob_set_target_pos(&_axis[i].servo, erob_target_plus(mapped, _pos_ctr.get()));

@@ -39,7 +39,8 @@ typedef enum {
     EROB_ST_ENABLE_SEQ,
     EROB_ST_ENABLED,
     EROB_ST_FAULT,
-    EROB_ST_ERROR
+    EROB_ST_ERROR,
+    EROB_ST_SILENT
 } erob_state_t;
 
 /* Which feedback fields have been seen at least once. */
@@ -102,6 +103,16 @@ typedef struct {
     uint16_t diag_index;
     uint32_t diag_tx_ms;
     bool diag_wait;
+    int32_t counts_per_rev;
+    int32_t ramp_pos;
+    uint32_t ramp_t0_ms;
+    uint32_t ramp_last_ms;
+    uint32_t rec_attempt_ms;
+    uint16_t fault_count;
+    uint8_t rec_step;
+    bool ramp_active;
+    bool need_nmt_start;
+    bool recovered;
 } erob_servo_t;
 
 void erob_init(erob_servo_t *s, canopen_master_t *co);
@@ -121,7 +132,13 @@ int erob_disable(erob_servo_t *s);
 void erob_set_target_pos(erob_servo_t *s, int32_t plus);
 void erob_set_target_vel(erob_servo_t *s, int32_t plus_per_s);
 
-/* CSP state machine and RPDO. Does not read the bus or emit SYNC. */
+/* Output counts per revolution for the recovery ramp. Non-positive uses 524288. */
+void erob_set_counts_per_rev(erob_servo_t *s, int32_t counts);
+
+/*
+ * CSP state machine and RPDO. Does not read the bus or emit SYNC.
+ * A CiA402 fault keeps retrying fault reset. It does not latch off.
+ */
 void erob_poll_motion(erob_servo_t *s);
 
 /* One non-blocking diagnostic SDO. Call after RX has been dispatched. */
@@ -147,6 +164,14 @@ erob_state_t erob_get_state(const erob_servo_t *s);
 uint16_t erob_get_statusword(const erob_servo_t *s);
 int32_t erob_get_position(const erob_servo_t *s);
 const erob_feedback_t *erob_feedback(const erob_servo_t *s);
+uint16_t erob_fault_count(const erob_servo_t *s);
+bool erob_is_silent(const erob_servo_t *s);
+
+/* Read 0x603F into the feedback cache. Returns the cached code if the read fails. */
+uint16_t erob_refresh_error_code(erob_servo_t *s);
+
+/* One-shot set when a fault or silence recovery reaches Operation Enabled. */
+bool erob_take_recovered(erob_servo_t *s);
 
 /* Ignore a zero rating. A failed or zero read leaves the valid bit clear. */
 void erob_cache_rating(erob_feedback_t *fb, uint16_t index, uint32_t value);

@@ -49,6 +49,8 @@ typedef struct {
     uint32_t last_sync_ms;
     bool sync_enabled;
     bool boot_seen;
+    /* Milliseconds of the last heartbeat or TPDO from this node. 0 if none. */
+    uint32_t last_pdo_hb_ms;
 
     uint16_t rpdo_cob[4];
     uint16_t tpdo_cob[4];

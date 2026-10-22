@@ -66,6 +66,28 @@
 #define EROB_DIAG_PERIOD_MS 250u
 #endif
 
+/* CiA402 fault reset is repeated until the fault bit clears. No give-up. */
+#ifndef EROB_FAULT_RETRY_MS
+#define EROB_FAULT_RETRY_MS 500u
+#endif
+
+/* No heartbeat and no TPDO for this long means the node is silent. */
+#ifndef EROB_NODE_SILENT_MS
+#define EROB_NODE_SILENT_MS 200u
+#endif
+
+/*
+ * After fault or silence, slew back to the servo command at this rate.
+ * A larger error is sped up so the ramp still finishes inside EROB_RECOVER_RAMP_MS.
+ */
+#ifndef EROB_RECOVER_DEG_PER_S
+#define EROB_RECOVER_DEG_PER_S 100
+#endif
+
+#ifndef EROB_RECOVER_RAMP_MS
+#define EROB_RECOVER_RAMP_MS 600u
+#endif
+
 /* HAL iface for EROB_CAN_BUS_INDEX. CAN2 -> 1. Do not use 0 (that is CAN1). */
 static inline unsigned erob_hal_can_iface(void)
 {

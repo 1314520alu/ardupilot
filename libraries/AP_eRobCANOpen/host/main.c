@@ -86,6 +86,24 @@ static int find_sync_after(int after)
     return -1;
 }
 
+static int count_cw(uint8_t node, uint16_t want)
+{
+    int n = 0;
+    uint16_t i;
+    for (i = 0; i < can_bus_stub_tx_count(); i++) {
+        const can_frame_t *fr = can_bus_stub_tx(i);
+        uint16_t cw;
+        if (fr->is_ext || fr->id != (uint32_t)(0x200u + node) || fr->dlc < 2) {
+            continue;
+        }
+        cw = (uint16_t)(fr->data[0] | (fr->data[1] << 8));
+        if (cw == want) {
+            n++;
+        }
+    }
+    return n;
+}
+
 static int last_rpdo(uint8_t node, uint16_t *cw, int32_t *pos)
 {
     uint16_t i;
@@ -317,6 +335,88 @@ int main(void)
         expect_true(erob_get_position(&servo) == 0, "CSP position still tracks TPDO1");
     }
     expect_true(!can_bus_stub_overflow(), "no queue overflow after diagnostics");
+
+    can_bus_stub_tx_reset();
+    can_bus_stub_set_fault(1);
+    can_bus_stub_push_status((uint16_t)(EROB_SW_OP_ENABLED | EROB_SW_FAULT_BIT), 0);
+    erob_poll(&servo);
+    expect_true(erob_get_state(&servo) == EROB_ST_FAULT, "fault starts recovery");
+    expect_true(erob_fault_count(&servo) == 1, "fault entry counts once");
+    {
+        int k;
+        for (k = 0; k < 12; k++) {
+            can_bus_stub_advance(50);
+            erob_poll(&servo);
+        }
+    }
+    expect_true(count_cw(node, 0x0000) >= 2, "fault-reset edge is re-armed");
+    expect_true(count_cw(node, EROB_CW_FAULT_RESET) >= 2, "fault reset retries without giving up");
+    expect_true(count_cw(node, EROB_CW_SHUTDOWN) >= 1, "recovery sends shutdown");
+    expect_true(count_cw(node, EROB_CW_SWITCH_ON) >= 1, "recovery sends switch on");
+    expect_true(count_cw(node, EROB_CW_ENABLE_OP) >= 1, "recovery sends enable operation");
+    expect_true(erob_get_state(&servo) == EROB_ST_FAULT, "fault does not latch off");
+    expect_true(erob_fault_count(&servo) == 1, "retries do not recount the same fault");
+
+    can_bus_stub_set_fault(0);
+    {
+        int k;
+        for (k = 0; k < 20 && erob_get_state(&servo) != EROB_ST_ENABLED; k++) {
+            can_bus_stub_advance(50);
+            erob_poll(&servo);
+        }
+    }
+    expect_true(erob_get_state(&servo) == EROB_ST_ENABLED, "fault recovery reaches operation enabled");
+    expect_true(erob_take_recovered(&servo), "recovery is reported once");
+    expect_true(!erob_take_recovered(&servo), "recovery report does not repeat");
+    expect_true(last_rpdo(node, &cw, &pos), "bumpless RPDO present");
+    expect_true(cw == EROB_CW_ENABLE_OP && pos == 0, "first recovered 0x607A is current 0x6064");
+
+    erob_set_counts_per_rev(&servo, EROB_PLUS_PER_REV);
+    erob_set_target_pos(&servo, 30000);
+    can_bus_stub_advance(50);
+    erob_poll(&servo);
+    expect_true(last_rpdo(node, &cw, &pos), "ramp RPDO present");
+    expect_true(pos == 7281, "50 ms ramp step is 100 deg/s at 524288 counts");
+    can_bus_stub_advance(EROB_RECOVER_RAMP_MS);
+    erob_poll(&servo);
+    expect_true(last_rpdo(node, &cw, &pos) && pos == 30000, "ramp reaches the command within 0.6 s");
+
+    can_bus_stub_set_fault(1);
+    can_bus_stub_push_status((uint16_t)(EROB_SW_OP_ENABLED | EROB_SW_FAULT_BIT), 0);
+    erob_poll(&servo);
+    expect_true(erob_fault_count(&servo) == 2, "a later fault increments the count");
+    can_bus_stub_set_fault(0);
+    {
+        int k;
+        for (k = 0; k < 20 && erob_get_state(&servo) != EROB_ST_ENABLED; k++) {
+            can_bus_stub_advance(50);
+            erob_poll(&servo);
+        }
+    }
+    expect_true(erob_get_state(&servo) == EROB_ST_ENABLED, "a second fault also recovers");
+    (void)erob_take_recovered(&servo);
+
+    can_bus_stub_tx_reset();
+    can_bus_stub_set_silent(1);
+    can_bus_stub_advance(EROB_NODE_SILENT_MS);
+    erob_poll(&servo);
+    expect_true(erob_is_silent(&servo), "no heartbeat or PDO is silent");
+    expect_true(erob_fault_count(&servo) == 2, "silence is not counted as a CiA402 fault");
+    can_bus_stub_set_silent(0);
+    can_bus_stub_push_heartbeat(0x05);
+    erob_poll(&servo);
+    expect_true(find_nmt(CO_NMT_START, node) >= 0, "reappearance sends NMT start");
+    {
+        int k;
+        for (k = 0; k < 20 && erob_get_state(&servo) != EROB_ST_ENABLED; k++) {
+            can_bus_stub_advance(50);
+            erob_poll(&servo);
+        }
+    }
+    expect_true(erob_get_state(&servo) == EROB_ST_ENABLED, "silence recovery reaches operation enabled");
+    expect_true(last_rpdo(node, &cw, &pos) && cw == EROB_CW_ENABLE_OP && pos == 0,
+                "silence recovery writes 0x6064 before the ramp");
+    expect_true(!can_bus_stub_overflow(), "no queue overflow after recovery");
 
     if (g_fails != 0) {
         fprintf(stderr, "%d check(s) failed\n", g_fails);

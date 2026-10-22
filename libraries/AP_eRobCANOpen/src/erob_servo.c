@@ -296,6 +296,152 @@ static const uint16_t enable_cw[] = {
     EROB_CW_ENABLE_OP
 };
 
+/* Drop bit7, then the fault-reset edge, then the CiA402 enable sequence. */
+static const uint16_t recover_cw[] = {
+    0x0000,
+    EROB_CW_FAULT_RESET,
+    EROB_CW_SHUTDOWN,
+    EROB_CW_SWITCH_ON,
+    EROB_CW_ENABLE_OP
+};
+
+#define EROB_RECOVER_STEPS 5u
+
+static int node_silent(const erob_servo_t *s, uint32_t now)
+{
+    uint32_t last = s->co->last_pdo_hb_ms;
+    if (last == 0) {
+        return 0;
+    }
+    return (now - last) >= EROB_NODE_SILENT_MS;
+}
+
+static int op_enabled(uint16_t sw)
+{
+    return (sw & EROB_SW_FAULT_BIT) == 0 &&
+           (sw & EROB_SW_MASK) == EROB_SW_OP_ENABLED;
+}
+
+static void arm_recover(erob_servo_t *s, uint32_t now, int count_fault)
+{
+    if (count_fault && s->state != EROB_ST_FAULT) {
+        if (s->fault_count < 65535u) {
+            s->fault_count++;
+        }
+    }
+    s->state = EROB_ST_FAULT;
+    s->ramp_active = false;
+    s->hold_pos = s->pos_actual;
+    s->rec_attempt_ms = now;
+    s->rec_step = 0;
+    /* The first control word of this attempt goes out on this poll. */
+    s->enable_ts_ms = now - 50u;
+}
+
+static void enter_bumpless(erob_servo_t *s, uint32_t now)
+{
+    s->state = EROB_ST_ENABLED;
+    s->hold_pos = s->pos_actual;
+    s->ramp_pos = s->pos_actual;
+    s->ramp_active = true;
+    s->ramp_t0_ms = now;
+    s->ramp_last_ms = now;
+    s->recovered = true;
+    s->need_nmt_start = false;
+    s->rec_step = 0;
+    /*
+     * The 500 ms holdoff is for the first enable. Recovery already writes
+     * 0x6064, then the ramp follows the servo command.
+     */
+    if (now >= EROB_POST_ENABLE_HOLDOFF_MS) {
+        s->enable_done_ms = now - EROB_POST_ENABLE_HOLDOFF_MS;
+    } else {
+        s->enable_done_ms = 0;
+    }
+    (void)send_cw_pos(s, EROB_CW_ENABLE_OP, s->pos_actual);
+}
+
+static void service_recover(erob_servo_t *s, uint32_t now)
+{
+    if (s->rec_step >= EROB_RECOVER_STEPS) {
+        if (op_enabled(s->statusword)) {
+            enter_bumpless(s, now);
+            return;
+        }
+        if ((now - s->rec_attempt_ms) < EROB_FAULT_RETRY_MS) {
+            return;
+        }
+        s->rec_attempt_ms = now;
+        s->rec_step = 0;
+        s->hold_pos = s->pos_actual;
+        s->enable_ts_ms = now - 50u;
+    }
+    if ((now - s->enable_ts_ms) < 50u) {
+        return;
+    }
+    s->enable_ts_ms = now;
+    if (s->rec_step == 0 && s->need_nmt_start) {
+        (void)co_nmt(s->co, CO_NMT_START, s->co->node_id);
+    }
+    s->hold_pos = s->pos_actual;
+    (void)send_cw_pos(s, recover_cw[s->rec_step], s->hold_pos);
+    s->rec_step++;
+}
+
+static int32_t sat_i32(int64_t v);
+
+static int32_t ramp_toward(erob_servo_t *s, uint32_t now)
+{
+    int32_t res = s->counts_per_rev > 0 ? s->counts_per_rev : EROB_PLUS_PER_REV;
+    uint32_t elapsed = now - s->ramp_t0_ms;
+    uint32_t dt = now - s->ramp_last_ms;
+    int64_t err;
+    int64_t mag;
+    int64_t step;
+
+    if (dt == 0) {
+        dt = 1;
+    }
+    if (elapsed >= EROB_RECOVER_RAMP_MS) {
+        s->ramp_active = false;
+        s->ramp_pos = s->target_pos;
+        s->ramp_last_ms = now;
+        return s->target_pos;
+    }
+    err = (int64_t)s->target_pos - (int64_t)s->ramp_pos;
+    mag = err < 0 ? -err : err;
+    step = (int64_t)res * (int64_t)EROB_RECOVER_DEG_PER_S * (int64_t)dt / 360 / 1000;
+    {
+        uint32_t remain = EROB_RECOVER_RAMP_MS - elapsed;
+        int64_t hurry;
+        if (remain < dt) {
+            remain = dt;
+        }
+        hurry = mag * (int64_t)dt / (int64_t)remain;
+        if (hurry > step) {
+            step = hurry;
+        }
+    }
+    if (step < 1) {
+        step = 1;
+    }
+    if (mag <= step) {
+        s->ramp_active = false;
+        s->ramp_pos = s->target_pos;
+    } else if (err > 0) {
+        s->ramp_pos = sat_i32((int64_t)s->ramp_pos + step);
+    } else {
+        s->ramp_pos = sat_i32((int64_t)s->ramp_pos - step);
+    }
+    s->ramp_last_ms = now;
+    return s->ramp_pos;
+}
+
+void erob_set_counts_per_rev(erob_servo_t *s, int32_t counts)
+{
+    s->counts_per_rev = counts;
+}
+
 void erob_poll_motion(erob_servo_t *s)
 {
     uint32_t now;
@@ -304,41 +450,65 @@ void erob_poll_motion(erob_servo_t *s)
     now = can_bus_millis(s->co->bus);
     sw = s->statusword;
 
-    if (s->state == EROB_ST_ENABLE_SEQ) {
-        /* Stop the enable sequence once the drive reports a fault.
-         * One fault-reset follows the GCS critical text. No further writes.
-         */
-        if ((sw & EROB_SW_FAULT_BIT) != 0) {
-            s->state = EROB_ST_FAULT;
-            (void)send_cw_pos(s, EROB_CW_FAULT_RESET, s->hold_pos);
+    if (s->state == EROB_ST_SILENT) {
+        if (node_silent(s, now)) {
             return;
         }
-        if ((now - s->enable_ts_ms) >= 50) {
-            s->enable_ts_ms = now;
-            if (s->enable_step < 4) {
-                (void)send_cw_pos(s, enable_cw[s->enable_step], s->hold_pos);
-                s->enable_step++;
-            } else if ((sw & EROB_SW_MASK) == EROB_SW_OP_ENABLED) {
-                s->state = EROB_ST_ENABLED;
-                s->enable_done_ms = now;
-                s->hold_pos = s->pos_actual;
-                (void)send_cw_pos(s, EROB_CW_ENABLE_OP, s->hold_pos);
-            } else {
-                (void)send_cw_pos(s, EROB_CW_ENABLE_OP, s->hold_pos);
-            }
+        s->need_nmt_start = true;
+        arm_recover(s, now, 0);
+    } else if (s->state == EROB_ST_ENABLED ||
+               s->state == EROB_ST_ENABLE_SEQ ||
+               s->state == EROB_ST_FAULT) {
+        if (node_silent(s, now)) {
+            s->state = EROB_ST_SILENT;
+            s->ramp_active = false;
+            return;
         }
+    }
+
+    if (s->state == EROB_ST_ENABLE_SEQ) {
+        if ((sw & EROB_SW_FAULT_BIT) != 0) {
+            arm_recover(s, now, 1);
+        } else {
+            if ((now - s->enable_ts_ms) >= 50) {
+                s->enable_ts_ms = now;
+                if (s->enable_step < 4) {
+                    (void)send_cw_pos(s, enable_cw[s->enable_step], s->hold_pos);
+                    s->enable_step++;
+                } else if ((sw & EROB_SW_MASK) == EROB_SW_OP_ENABLED) {
+                    s->state = EROB_ST_ENABLED;
+                    s->enable_done_ms = now;
+                    s->hold_pos = s->pos_actual;
+                    if (s->co->last_pdo_hb_ms == 0) {
+                        s->co->last_pdo_hb_ms = now;
+                    }
+                    (void)send_cw_pos(s, EROB_CW_ENABLE_OP, s->hold_pos);
+                } else {
+                    (void)send_cw_pos(s, EROB_CW_ENABLE_OP, s->hold_pos);
+                }
+            }
+            return;
+        }
+    }
+
+    if (s->state == EROB_ST_FAULT) {
+        service_recover(s, now);
         return;
     }
 
     if (s->state == EROB_ST_ENABLED) {
-        int32_t cmd = s->target_pos;
+        int32_t cmd;
         if ((sw & EROB_SW_FAULT_BIT) != 0) {
-            s->state = EROB_ST_FAULT;
-            (void)send_cw_pos(s, EROB_CW_FAULT_RESET, s->hold_pos);
+            arm_recover(s, now, 1);
+            service_recover(s, now);
             return;
         }
-        if ((now - s->enable_done_ms) < EROB_POST_ENABLE_HOLDOFF_MS) {
+        if (s->ramp_active) {
+            cmd = ramp_toward(s, now);
+        } else if ((now - s->enable_done_ms) < EROB_POST_ENABLE_HOLDOFF_MS) {
             cmd = s->hold_pos;
+        } else {
+            cmd = s->target_pos;
         }
         (void)send_cw_pos(s, EROB_CW_ENABLE_OP, cmd);
     }
@@ -406,7 +576,7 @@ void erob_poll_diag(erob_servo_t *s)
     static const uint8_t sz[] = { 2, 4, 2, 1, 4, 4, 4 };
     const uint8_t nslot = 7;
 
-    if (s->state != EROB_ST_ENABLED) {
+    if (s->state != EROB_ST_ENABLED && s->state != EROB_ST_FAULT) {
         return;
     }
     now = can_bus_millis(m->bus);
@@ -515,6 +685,33 @@ int32_t erob_plus_rel_center(int32_t absolute, int32_t center)
 erob_state_t erob_get_state(const erob_servo_t *s)
 {
     return s->state;
+}
+
+uint16_t erob_fault_count(const erob_servo_t *s)
+{
+    return s->fault_count;
+}
+
+bool erob_is_silent(const erob_servo_t *s)
+{
+    return s->state == EROB_ST_SILENT;
+}
+
+uint16_t erob_refresh_error_code(erob_servo_t *s)
+{
+    uint16_t code = 0;
+    if (co_sdo_read(s->co, 0x603F, 0x00, &code, 2) == 0) {
+        s->fb.error_code = code;
+        s->fb.valid |= EROB_FB_ERR;
+    }
+    return s->fb.error_code;
+}
+
+bool erob_take_recovered(erob_servo_t *s)
+{
+    bool was = s->recovered;
+    s->recovered = false;
+    return was;
 }
 
 uint16_t erob_get_statusword(const erob_servo_t *s)

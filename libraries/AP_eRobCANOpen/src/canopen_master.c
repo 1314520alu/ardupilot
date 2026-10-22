@@ -26,10 +26,13 @@ void co_master_handle_frame(canopen_master_t *m, const can_frame_t *rx)
     }
     id = rx->id & 0x7ffu;
 
-    if (id == (uint32_t)(CO_COB_HB_BASE + m->node_id) && rx->dlc >= 1 && rx->data[0] == 0x00) {
-        m->boot_seen = true;
-        if (m->on_boot != NULL) {
-            m->on_boot(m->hook_user, m->node_id);
+    if (id == (uint32_t)(CO_COB_HB_BASE + m->node_id) && rx->dlc >= 1) {
+        m->last_pdo_hb_ms = can_bus_millis(m->bus);
+        if (rx->data[0] == 0x00) {
+            m->boot_seen = true;
+            if (m->on_boot != NULL) {
+                m->on_boot(m->hook_user, m->node_id);
+            }
         }
         return;
     }
@@ -52,6 +55,7 @@ void co_master_handle_frame(canopen_master_t *m, const can_frame_t *rx)
         uint8_t i;
         for (i = 0; i < 4; i++) {
             if (id == m->tpdo_cob[i]) {
+                m->last_pdo_hb_ms = can_bus_millis(m->bus);
                 m->on_tpdo(m->hook_user, i, rx->data, rx->dlc);
                 return;
             }

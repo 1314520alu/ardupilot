@@ -16,6 +16,8 @@ struct can_bus {
     uint8_t node_id;
     int32_t sim_pos;
     uint16_t sim_sw;
+    int force_fault;
+    int silent;
     can_frame_t tx_log[TX_LOG_MAX];
     uint16_t tx_count;
     int overflow;
@@ -112,21 +114,15 @@ static void push_tpdo(struct can_bus *bus, uint16_t cob, uint8_t dlc, const uint
     rx_push(bus, &rx);
 }
 
-static void reply_rpdo(struct can_bus *bus, const can_frame_t *req)
+static void emit_tpdos(struct can_bus *bus)
 {
     uint8_t b[8];
-    uint16_t cw = (uint16_t)(req->data[0] | (req->data[1] << 8));
-    uint16_t sw = EROB_SW_SWITCH_ON_DIS;
     uint8_t n = bus->node_id;
-    if (cw == EROB_CW_SHUTDOWN) {
-        sw = EROB_SW_READY_TO_SW;
-    } else if (cw == EROB_CW_SWITCH_ON) {
-        sw = EROB_SW_SWITCHED_ON;
-    } else if (cw == EROB_CW_ENABLE_OP) {
-        sw = EROB_SW_OP_ENABLED;
-    }
-    bus->sim_sw = sw;
+    uint16_t sw = bus->sim_sw;
 
+    if (bus->silent || n == 0) {
+        return;
+    }
     memset(b, 0, sizeof(b));
     b[0] = (uint8_t)(sw & 0xff);
     b[1] = (uint8_t)(sw >> 8);
@@ -149,6 +145,27 @@ static void reply_rpdo(struct can_bus *bus, const can_frame_t *req)
     put_i32(&b[0], 48000);
     put_i32(&b[4], 15);
     push_tpdo(bus, (uint16_t)(0x480u + n), 8, b);
+}
+
+static void reply_rpdo(struct can_bus *bus, const can_frame_t *req)
+{
+    uint16_t cw = (uint16_t)(req->data[0] | (req->data[1] << 8));
+    uint16_t sw = EROB_SW_SWITCH_ON_DIS;
+    if (bus->silent) {
+        return;
+    }
+    if (cw == EROB_CW_SHUTDOWN) {
+        sw = EROB_SW_READY_TO_SW;
+    } else if (cw == EROB_CW_SWITCH_ON) {
+        sw = EROB_SW_SWITCHED_ON;
+    } else if (cw == EROB_CW_ENABLE_OP) {
+        sw = EROB_SW_OP_ENABLED;
+    }
+    if (bus->force_fault) {
+        sw = (uint16_t)(sw | EROB_SW_FAULT_BIT);
+    }
+    bus->sim_sw = sw;
+    emit_tpdos(bus);
 }
 
 can_bus_t *can_bus_stub_get(void)
@@ -178,6 +195,52 @@ const can_frame_t *can_bus_stub_tx(uint16_t index)
 int can_bus_stub_overflow(void)
 {
     return g_bus.overflow;
+}
+
+void can_bus_stub_tx_reset(void)
+{
+    g_bus.tx_count = 0;
+    g_bus.overflow = 0;
+}
+
+static void drop_rx(struct can_bus *bus)
+{
+    bus->rx_count = 0;
+    bus->rx_head = 0;
+}
+
+void can_bus_stub_set_fault(int fault)
+{
+    g_bus.force_fault = fault ? 1 : 0;
+    drop_rx(&g_bus);
+}
+
+void can_bus_stub_set_silent(int silent)
+{
+    g_bus.silent = silent ? 1 : 0;
+    drop_rx(&g_bus);
+}
+
+void can_bus_stub_push_status(uint16_t sw, int32_t pos)
+{
+    uint8_t b[8];
+    memset(b, 0, sizeof(b));
+    b[0] = (uint8_t)(sw & 0xff);
+    b[1] = (uint8_t)(sw >> 8);
+    put_i32(&b[2], pos);
+    g_bus.sim_sw = sw;
+    g_bus.sim_pos = pos;
+    push_tpdo(&g_bus, (uint16_t)(0x180u + g_bus.node_id), 6, b);
+}
+
+void can_bus_stub_push_heartbeat(uint8_t nmt_state)
+{
+    can_frame_t rx;
+    memset(&rx, 0, sizeof(rx));
+    rx.id = 0x700u + g_bus.node_id;
+    rx.dlc = 1;
+    rx.data[0] = nmt_state;
+    rx_push(&g_bus, &rx);
 }
 
 int can_bus_send(can_bus_t *bus, const can_frame_t *fr)
@@ -210,6 +273,9 @@ int can_bus_send(can_bus_t *bus, const can_frame_t *fr)
     }
     if (bus->node_id != 0 && id == (0x200u + bus->node_id) && fr->dlc >= 6) {
         reply_rpdo(bus, fr);
+    }
+    if (id == CO_COB_SYNC) {
+        emit_tpdos(bus);
     }
     return 0;
 }

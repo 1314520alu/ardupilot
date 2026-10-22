@@ -64,6 +64,7 @@ private:
         uint32_t last_log_ms;
         uint32_t last_named_ms;
         uint32_t last_fault_ms;
+        uint32_t last_silent_ms;
     };
 
     void loop();
@@ -73,6 +74,7 @@ private:
     void probe_nodes();
     void poll_axes();
     void warn_statusword_fault(uint8_t index, uint32_t now_ms);
+    void warn_node_silent(uint8_t index, uint32_t now_ms);
     bool axis_faulted(uint8_t index) const;
     int32_t counts_per_rev() const;
     void publish_feedback(uint8_t index, uint32_t now_ms);
