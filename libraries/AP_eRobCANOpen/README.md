@@ -51,9 +51,21 @@ CAN_P2_DRIVER    2
 CAN_D2_PROTOCOL  15
 CAN_P2_BITRATE   1000000
 CAN_D2_EROB_NODE 1
+CAN_D2_EROB_OPTS 3
 ```
 
-`15` 是 `AP_CAN::Protocol::ERobCANOpen`。`CAN_D2_EROB_NODE` 刚好 16 个字符。驱动只接受 HAL 接口 1（CAN2）。节点号超出 1..127 时按 1 处理。
+`15` 是 `AP_CAN::Protocol::ERobCANOpen`。`CAN_D2_EROB_NODE` 和 `CAN_D2_EROB_OPTS` 都是 16 个字符。驱动只接受 HAL 接口 1（CAN2）。节点号超出 1..127 时按 1 处理。
+
+`CAN_Dx_EROB_OPTS` 的两位互相独立，默认 3（两位都开）：
+
+| 值 | bit0 CANopen 主站 | bit1 标准 CAN |
+| --- | --- | --- |
+| 0 | 关 | 关 |
+| 1 | 开 | 关 |
+| 2 | 关 | 开 |
+| 3 | 开 | 开 |
+
+关掉其中一位不会动另一位，也不会动 CAN1 的 DroneCAN。协议仍是 15 时，驱动占着 CAN2。bit0 关掉后主站停发 SYNC，原来的 COB-ID 也变成标准 CAN。bit1 关掉后 `write_classic()` / `read_classic()` 直接失败，非保留 ID 被丢掉。
 
 ## 标准 CAN 和 CANopen
 
@@ -61,7 +73,7 @@ CAN_D2_EROB_NODE 1
 
 - CAN1 继续 DroneCAN（29-bit）。本驱动不在 CAN1 上收发。
 - CAN2 的主协议是 CANopen。主站占用 NMT `0x000`、SYNC `0x080`，以及该节点的 EMCY、TPDO/RPDO 1..4、SDO `0x580+id` / `0x600+id`、心跳 `0x700+id`。
-- 同一条 CAN2 上，不在这张表里的 11-bit 帧走 `write_classic()` / `read_classic()`。扩展帧和 CAN FD 帧在这个驱动里丢掉，不进 CANopen，也不进 classic 队列。
+- 同一条 CAN2 上，bit1 打开时，不在这张表里的 11-bit 帧走 `write_classic()` / `read_classic()`。bit0 关掉时这张表也不再保留。扩展帧和 CAN FD 帧在这个驱动里丢掉。
 
 没有把 CANopen 放到 `CAN_Dx_PROTOCOL2`。那条 11-bit 辅路会把帧发到主驱动的每一个接口上。ZeroOneX6 默认把 CAN1 和 CAN2 都挂在驱动 1 上，辅路会把 CANopen 打到 CAN1。辅路也只有一个，而且会收到全部 11-bit 帧，没法按 COB-ID 拆开。
 

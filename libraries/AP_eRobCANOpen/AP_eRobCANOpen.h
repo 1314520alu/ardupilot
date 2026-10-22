@@ -39,7 +39,8 @@ public:
     void init(uint8_t driver_index) override;
     bool add_interface(AP_HAL::CANIface* can_iface) override;
 
-    // Classic 11-bit frame on this driver's iface. Reserved CANopen IDs return false.
+    // Classic 11-bit frame on this driver's iface.
+    // Returns false when classic CAN is disabled, or when CANopen currently reserves that ID.
     bool write_classic(uint16_t std_id, const uint8_t *data, uint8_t len);
     bool read_classic(uint16_t &std_id, uint8_t *data, uint8_t &len);
 
@@ -55,6 +56,13 @@ private:
     int hal_recv(can_frame_t *fr, uint32_t timeout_ms);
     uint8_t node_id() const;
 
+    // CAN_Dx_EROB_OPTS. The bits are independent. Default is both.
+    enum class Option : uint8_t {
+        CANopen = 1U << 0,
+        Classic = 1U << 1,
+    };
+    bool option_set(Option opt) const;
+
     friend int can_bus_send(can_bus_t *bus, const can_frame_t *fr);
     friend int can_bus_recv(can_bus_t *bus, can_frame_t *fr, uint32_t timeout_ms);
     friend uint32_t can_bus_millis(can_bus_t *bus);
@@ -68,6 +76,7 @@ private:
     };
 
     AP_Int8 _node_id;
+    AP_Int8 _options;
     uint8_t _active_node;
     uint8_t _driver_index;
     bool _started;

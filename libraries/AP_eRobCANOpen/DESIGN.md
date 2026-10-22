@@ -127,7 +127,7 @@ RxPDO1：
 
 1. 只发 11-bit 帧。扩展帧和 CAN FD 帧直接丢掉。
 2. CANopen 占用 NMT `0x000`、SYNC `0x080`，以及本 Node-ID 的 EMCY、四个 PDO、SDO 和心跳。`erob_id_is_reserved()` 是同一份判断。
-3. 其余 11-bit ID 进 classic 队列，不交给主站。`CAN_Dx_PROTOCOL2` 不用，原因见 README。
+3. `CAN_Dx_EROB_OPTS` bit1 打开时，其余 11-bit ID 进 classic 队列。bit0 关掉时主站停，COB-ID 不再保留。`CAN_Dx_PROTOCOL2` 不用，原因见 README。
 4. `add_interface()` 拒绝 iface 1 以外的口，所以 CAN1 上不会调用 `can_bus_send`。
 5. 多轴时全总线只有一个 SYNC 生产者。一个驱动实例只服务一个 Node-ID。
 

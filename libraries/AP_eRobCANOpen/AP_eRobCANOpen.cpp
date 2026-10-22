@@ -35,6 +35,13 @@ const AP_Param::GroupInfo AP_eRobCANOpen::var_info[] = {
     // @RebootRequired: True
     AP_GROUPINFO("NODE", 1, AP_eRobCANOpen, _node_id, 1),
 
+    // @Param: OPTS
+    // @DisplayName: eRob CANopen and classic CAN
+    // @Description: Independent enables for this driver after CAN_Dx_PROTOCOL is ERobCANopen (15). Bit 0 runs the eRob CANopen master. Bit 1 accepts other 11-bit frames as classic CAN. Clear either bit without affecting the other. DroneCAN stays on its own driver. While bit 0 is set, NMT, SYNC and this node's PDO, SDO, EMCY and heartbeat IDs are reserved. While bit 0 is clear, those IDs are classic CAN too.
+    // @Bitmask: 0:CANopen,1:ClassicCAN
+    // @User: Advanced
+    AP_GROUPINFO("OPTS", 2, AP_eRobCANOpen, _options, 3),
+
     AP_GROUPEND
 };
 
@@ -52,6 +59,11 @@ uint8_t AP_eRobCANOpen::node_id() const
         return 1;
     }
     return uint8_t(n);
+}
+
+bool AP_eRobCANOpen::option_set(Option opt) const
+{
+    return (uint8_t(_options.get()) & uint8_t(opt)) != 0;
 }
 
 AP_eRobCANOpen *AP_eRobCANOpen::get_erob(uint8_t driver_index)
@@ -118,8 +130,30 @@ void AP_eRobCANOpen::loop()
     erob_init(&_servo, &_master);
 
     bool tried = false;
+    bool was_on = false;
     uint32_t last_try_ms = 0;
     while (true) {
+        if (!option_set(Option::CANopen)) {
+            if (was_on) {
+                co_master_set_sync(&_master, false, 0);
+                erob_init(&_servo, &_master);
+                _reported = false;
+                was_on = false;
+            }
+            // Drain the iface. With CANopen off, nothing is reserved, so classic
+            // frames are queued when that bit is set and dropped when it is clear.
+            can_frame_t discard;
+            (void)hal_recv(&discard, 10);
+            continue;
+        }
+
+        if (!was_on) {
+            co_master_init(&_master, &_bus, _active_node);
+            erob_init(&_servo, &_master);
+            tried = false;
+            was_on = true;
+        }
+
         const erob_state_t st = erob_get_state(&_servo);
         const uint32_t now = AP_HAL::millis();
         if (st != EROB_ST_ENABLED && st != EROB_ST_ENABLE_SEQ && st != EROB_ST_FAULT) {
@@ -152,17 +186,19 @@ bool AP_eRobCANOpen::frame_for_master(const AP_HAL::CANFrame &rx, can_frame_t *f
     }
     len = rx.dlc > 8 ? 8 : rx.dlc;
     const uint16_t std_id = uint16_t(rx.id & AP_HAL::CANFrame::MaskStdID);
-    if (!erob_id_is_reserved(std_id, _active_node)) {
+    if (option_set(Option::CANopen) && erob_id_is_reserved(std_id, _active_node)) {
+        memset(fr, 0, sizeof(*fr));
+        fr->id = std_id;
+        fr->dlc = len;
+        if (len > 0) {
+            memcpy(fr->data, rx.data, len);
+        }
+        return true;
+    }
+    if (option_set(Option::Classic)) {
         push_classic(std_id, rx.data, len);
-        return false;
     }
-    memset(fr, 0, sizeof(*fr));
-    fr->id = std_id;
-    fr->dlc = len;
-    if (len > 0) {
-        memcpy(fr->data, rx.data, len);
-    }
-    return true;
+    return false;
 }
 
 void AP_eRobCANOpen::push_classic(uint16_t std_id, const uint8_t *data, uint8_t len)
@@ -186,11 +222,11 @@ void AP_eRobCANOpen::push_classic(uint16_t std_id, const uint8_t *data, uint8_t 
 
 bool AP_eRobCANOpen::write_classic(uint16_t std_id, const uint8_t *data, uint8_t len)
 {
-    if (_iface == nullptr || len > 8 || (len > 0 && data == nullptr)) {
+    if (!option_set(Option::Classic) || _iface == nullptr || len > 8 || (len > 0 && data == nullptr)) {
         return false;
     }
     std_id = uint16_t(std_id & AP_HAL::CANFrame::MaskStdID);
-    if (erob_id_is_reserved(std_id, _active_node)) {
+    if (option_set(Option::CANopen) && erob_id_is_reserved(std_id, _active_node)) {
         return false;
     }
     AP_HAL::CANFrame tx(std_id, data, len, false);
@@ -202,7 +238,7 @@ bool AP_eRobCANOpen::write_classic(uint16_t std_id, const uint8_t *data, uint8_t
 
 bool AP_eRobCANOpen::read_classic(uint16_t &std_id, uint8_t *data, uint8_t &len)
 {
-    if (data == nullptr) {
+    if (!option_set(Option::Classic) || data == nullptr) {
         return false;
     }
     WITH_SEMAPHORE(_q_sem);
