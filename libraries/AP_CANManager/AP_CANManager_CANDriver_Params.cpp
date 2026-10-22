@@ -58,9 +58,8 @@ const AP_Param::GroupInfo AP_CANManager::CANDriver_Params::var_info[] = {
     AP_SUBGROUPPTR(_erob, "EROB_", 7, AP_CANManager::CANDriver_Params, AP_eRobCANOpen),
 #endif
 
-    // ERobCANopen is not listed on PROTOCOL2. That aux path forwards every
-    // 11-bit frame on all ifaces of the primary driver, so it cannot keep
-    // CANopen off CAN1. Classic 11-bit frames are demuxed inside AP_eRobCANOpen.
+    // ERobCANopen is a primary protocol (value 15). One CAN_Dx_PROTOCOL value
+    // owns the driver. It is not a PROTOCOL2 option.
     // @Param: PROTOCOL2
     // @DisplayName: Secondary protocol with 11 bit CAN addressing
     // @Description: Secondary protocol with 11 bit CAN addressing
