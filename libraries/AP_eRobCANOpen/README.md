@@ -51,15 +51,14 @@ CAN_P2_DRIVER    2
 CAN_D2_PROTOCOL  15
 CAN_P2_BITRATE   1000000
 CAN_D2_EROB_NODE 1
-CAN_D2_EROB_SRV  5
-CAN_D2_EROB_NUM  6
+CAN_D2_EROB_BM   1008
 CAN_D2_EROB_MIN  0
 CAN_D2_EROB_MAX  524288
 ```
 
 `15` 是 `AP_CAN::Protocol::eRobCAN`，参数列表显示为 `eRob CAN`。一个 `CAN_Dx_PROTOCOL` 独占那个虚拟驱动：1 是 DroneCAN，15 是这组舵机。驱动只接受 HAL 接口 1（CAN2）。这不是通用 CANopen 工具，默认只做 CiA402 CSP。
 
-eRob 按舵机用。`CAN_D2_EROB_SRV` 是第一路 `SERVO` 通道（5 表示 `SERVO5`），`CAN_D2_EROB_NUM` 是连续轴数，Node-ID 从 `CAN_D2_EROB_NODE` 起连续加一。`SRV_Channels::push()` 把该通道的 PWM 线性映到 CSP 目标：`SERVOx_MIN` 对应 `CAN_D2_EROB_MIN`，`SERVOx_MAX` 对应 `CAN_D2_EROB_MAX`，单位是 plus。524288 plus 为一圈输出端（手册 §5.2.1）。各轴目前共用同一组 MIN/MAX。`SRV` 为 0 时不跟舵机输出，使能后停在当时的实际位置。上面的例子是 Node 1..6 对应 SERVO5..SERVO10。第一轴负责发 SYNC，其余轴只收这个 SYNC。同一接口上的其它帧被丢掉。CAN1 保持 `CAN_D1_PROTOCOL 1`。使能后 500 ms 内主站仍保持实际位置，之后才跟踪舵机目标。每轴单独的行程、减速比换角度，还没做。
+eRob 按舵机用。`CAN_D2_EROB_BM` 的位和 `CAN_Dx_UC_SRV_BM` 一样：bit 0 是 SERVO1。全名放不下 `SRV_BM`（`CAN_D2_EROB_SRV_BM` 有 18 个字符，上限 16），所以参数名是 `BM`。`1008` 是 bit 4..9，也就是 SERVO5..SERVO10。置位从低到高分配 Node-ID：SERVO5 是节点 1，SERVO10 是节点 6。最多 6 轴。`SRV_Channels::push()` 把这些通道的 PWM 线性映到 CSP 目标：`SERVOx_MIN` 对应 `CAN_D2_EROB_MIN`，`SERVOx_MAX` 对应 `CAN_D2_EROB_MAX`，单位是 plus。524288 plus 为一圈输出端（手册 §5.2.1）。各轴目前共用同一组 MIN/MAX。掩码为 0 时不跟舵机输出。第一轴负责发 SYNC，其余轴只收这个 SYNC。同一接口上的其它帧被丢掉。CAN1 保持 `CAN_D1_PROTOCOL 1`。使能后 500 ms 内主站仍保持实际位置，之后才跟踪舵机目标。每轴单独的行程、减速比换角度，还没做。
 
 ## 协议范围
 

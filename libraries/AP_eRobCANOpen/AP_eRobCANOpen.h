@@ -24,8 +24,8 @@ struct can_bus {
 /*
  * eRob CAN servo backend for one HAL iface.
  * Selecting CAN_Dx_PROTOCOL = eRobCAN gives this driver exclusive use of
- * that iface. It binds CAN2 only. Servo channels map to consecutive node
- * IDs as CiA402 CSP targets. Frames that are not those nodes' eRob CAN
+ * that iface. It binds CAN2 only. SERVOx bits in the servo mask map to
+ * Node-IDs as CiA402 CSP targets. Frames that are not those nodes' eRob CAN
  * traffic are discarded. This is not a general CANopen tool.
  */
 class AP_eRobCANOpen : public AP_CANDriver
@@ -54,6 +54,7 @@ private:
         canopen_master_t master;
         erob_servo_t servo;
         uint8_t node;
+        uint8_t channel;
         bool tried;
         bool reported;
         uint32_t last_try_ms;
@@ -74,14 +75,12 @@ private:
     friend uint32_t can_bus_millis(can_bus_t *bus);
 
     AP_Int8 _node_id;
-    AP_Int8 _srv_first;
-    AP_Int8 _axis_count;
+    AP_Int32 _servo_bm;
     AP_Int32 _pos_min;
     AP_Int32 _pos_max;
 
     uint8_t _active_node;
     uint8_t _num_axes;
-    uint8_t _srv_base;
     uint8_t _driver_index;
     bool _started;
     AP_HAL::CANIface* _iface;

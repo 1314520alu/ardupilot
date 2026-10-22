@@ -128,8 +128,8 @@ RxPDO1：
 
 `SRV_Channels::push()` 在协议为 eRob CAN 时调用 `push_servos()`。
 
-1. `CAN_Dx_EROB_SRV` 为 0 时不改目标。非 0 时是第一路 SERVO 通道号，和 `SERVO1` 的编号一致。
-2. `CAN_Dx_EROB_NUM` 路连续通道对应从 `CAN_Dx_EROB_NODE` 起的连续 Node-ID，最多 6 路。
+1. `CAN_Dx_EROB_BM` 为 0 时不改目标。位定义与 `CAN_Dx_UC_SRV_BM` 相同，bit 0 是 SERVO1。参数全名最长 16 个字符，所以这里不叫 `SRV_BM`。
+2. 置位从低到高对应从 `CAN_Dx_EROB_NODE` 起的 Node-ID，最多 6 路。通道不必连续。
 3. PWM 用该通道自己的 `SERVOx_MIN` / `SERVOx_MAX`。线性结果夹在 `CAN_Dx_EROB_MIN` 和 `CAN_Dx_EROB_MAX` 之间，单位 plus。PWM 仍为 0，或该通道在舵机禁用掩码里时，保持上一次目标。
 4. 各轴共用一组 MIN/MAX。每轴单独行程是后续项。
 5. 输出反转沿用 ArduPilot 舵机通道自己的反向，驱动不再翻一次。

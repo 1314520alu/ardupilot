@@ -12,7 +12,7 @@
 6. 位置单位和限幅：plus 还是角度，软限位做在飞控还是舵机。
 7. 联调条件：有没有实机和电源，现场还是寄样。
 8. CAN2 在 `CAN_D2_PROTOCOL = 15`（eRob CAN）时整口只给这组舵机。不要把 DroneCAN 或其它 CAN 设备留在这一路。默认参数仍不打开它。
-9. 每轴的 SERVO 通道号、Node-ID，以及 `SERVOx_MIN` 到 `SERVOx_MAX` 对应的 plus 行程。驱动里各轴暂时共用 `CAN_D2_EROB_MIN` / `MAX`。
+9. 哪些 SERVO 通道要放进 `CAN_D2_EROB_BM`，起始 Node-ID，以及 `SERVOx_MIN` 到 `SERVOx_MAX` 对应的 plus 行程。驱动里各轴暂时共用 `CAN_D2_EROB_MIN` / `MAX`。
 
 可以直接转发：
 

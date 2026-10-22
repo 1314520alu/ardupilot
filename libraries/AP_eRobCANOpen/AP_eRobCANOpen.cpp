@@ -30,27 +30,21 @@ const AP_Param::GroupInfo AP_eRobCANOpen::var_info[] = {
 
     // @Param: NODE
     // @DisplayName: eRob CAN first node
-    // @Description: Node-ID of the first eRob servo on this driver. Further axes use the next Node-IDs. The driver owns the whole iface. Only NMT, SYNC and these nodes' PDO, SDO, EMCY and heartbeat are used. Other frames on that port are discarded.
+    // @Description: Node-ID of the first eRob servo selected by the servo bitmask, counting set bits from low to high. The driver owns the whole iface. Only NMT, SYNC and these nodes' PDO, SDO, EMCY and heartbeat are used. Other frames on that port are discarded.
     // @Range: 1 127
     // @User: Standard
     // @RebootRequired: True
     AP_GROUPINFO("NODE", 1, AP_eRobCANOpen, _node_id, 1),
 
-    // @Param: SRV
-    // @DisplayName: eRob CAN first servo
-    // @Description: First SERVO output channel for this driver, numbered like SERVO1. Axis 0 uses this channel, axis 1 uses the next channel, and so on. 0 leaves the servos at the position captured when they were enabled.
-    // @Range: 0 32
+    // @Param: BM
+    // @DisplayName: eRob CAN servo bitmask
+    // @Description: Servo outputs transmitted as eRob CAN CSP targets. Same bits as CAN_Dx_UC_SRV_BM: bit 0 is Servo 1. Set bits are taken from low to high. The lowest bit uses NODE, and each next set bit uses the next Node-ID. At most 6 axes. 0 sends no servo targets.
+    // @Bitmask: 0: Servo 1, 1: Servo 2, 2: Servo 3, 3: Servo 4, 4: Servo 5, 5: Servo 6, 6: Servo 7, 7: Servo 8, 8: Servo 9, 9: Servo 10, 10: Servo 11, 11: Servo 12, 12: Servo 13, 13: Servo 14, 14: Servo 15, 15: Servo 16, 16: Servo 17, 17: Servo 18, 18: Servo 19, 19: Servo 20, 20: Servo 21, 21: Servo 22, 22: Servo 23, 23: Servo 24, 24: Servo 25, 25: Servo 26, 26: Servo 27, 27: Servo 28, 28: Servo 29, 29: Servo 30, 30: Servo 31, 31: Servo 32
     // @User: Standard
     // @RebootRequired: True
-    AP_GROUPINFO("SRV", 2, AP_eRobCANOpen, _srv_first, 0),
+    AP_GROUPINFO("BM", 6, AP_eRobCANOpen, _servo_bm, 0),
 
-    // @Param: NUM
-    // @DisplayName: eRob CAN servo count
-    // @Description: Number of consecutive eRob servos. Node-IDs and SERVO channels both increase by one per axis. One driver sends a single SYNC for the group. CiA402 CSP is the only mode.
-    // @Range: 1 6
-    // @User: Standard
-    // @RebootRequired: True
-    AP_GROUPINFO("NUM", 3, AP_eRobCANOpen, _axis_count, 1),
+    // index 2 was SRV and index 3 was NUM on this branch
 
     // @Param: MIN
     // @DisplayName: eRob CAN position min
@@ -73,7 +67,6 @@ AP_eRobCANOpen::AP_eRobCANOpen()
     _bus.drv = this;
     _active_node = 1;
     _num_axes = 0;
-    _srv_base = 0;
     _started = false;
 }
 
@@ -125,37 +118,39 @@ bool AP_eRobCANOpen::add_interface(AP_HAL::CANIface* can_iface)
 void AP_eRobCANOpen::setup_axes()
 {
     int16_t node = _node_id.get();
-    int16_t num = _axis_count.get();
-    int16_t srv = _srv_first.get();
-
     if (node < 1 || node > 127) {
         node = 1;
     }
-    if (num < 1) {
-        num = 1;
-    }
-    if (num > EROB_MAX_AXES) {
-        num = EROB_MAX_AXES;
-    }
-    if (node + num - 1 > 127) {
-        num = 128 - node;
-    }
-    if (srv < 0 || srv > NUM_SERVO_CHANNELS) {
-        srv = 0;
-    }
-
     _active_node = uint8_t(node);
-    for (uint8_t i = 0; i < uint8_t(num); i++) {
-        _axis[i].node = uint8_t(node + i);
-        _axis[i].tried = false;
-        _axis[i].reported = false;
-        _axis[i].last_try_ms = 0;
-        co_master_init(&_axis[i].master, &_bus, _axis[i].node);
-        erob_init(&_axis[i].servo, &_axis[i].master);
+
+    const uint32_t mask = uint32_t(_servo_bm.get());
+    uint8_t num = 0;
+    bool truncated = false;
+    const uint8_t nchan = NUM_SERVO_CHANNELS < 32 ? NUM_SERVO_CHANNELS : 32;
+    for (uint8_t chan = 0; chan < nchan; chan++) {
+        if ((mask & (1U << chan)) == 0) {
+            continue;
+        }
+        if (num >= EROB_MAX_AXES || node + num > 127) {
+            truncated = true;
+            break;
+        }
+        _axis[num].node = uint8_t(node + num);
+        _axis[num].channel = chan;
+        _axis[num].tried = false;
+        _axis[num].reported = false;
+        _axis[num].last_try_ms = 0;
+        co_master_init(&_axis[num].master, &_bus, _axis[num].node);
+        erob_init(&_axis[num].servo, &_axis[num].master);
+        num++;
+    }
+    if (num == 0) {
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "eRob CAN: servo mask is 0");
+    } else if (truncated) {
+        GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "eRob CAN: servo mask limited to %u axes", unsigned(num));
     }
     // Publish after the axes exist. push_servos() runs on another thread.
-    _srv_base = uint8_t(srv);
-    _num_axes = uint8_t(num);
+    _num_axes = num;
 }
 
 bool AP_eRobCANOpen::try_configure(uint8_t index, uint32_t now_ms)
@@ -291,14 +286,14 @@ bool AP_eRobCANOpen::id_for_axis(uint16_t std_id, uint8_t &index) const
 
 void AP_eRobCANOpen::push_servos()
 {
-    if (_num_axes == 0 || _srv_base == 0) {
+    if (_num_axes == 0) {
         return;
     }
     const uint32_t disabled = SRV_Channels::get_disabled_channel_mask();
     for (uint8_t i = 0; i < _num_axes; i++) {
-        const uint8_t chan = uint8_t(_srv_base - 1 + i);
+        const uint8_t chan = _axis[i].channel;
         if (chan >= NUM_SERVO_CHANNELS) {
-            break;
+            continue;
         }
         if ((disabled & (1U << chan)) != 0) {
             continue;
