@@ -1,8 +1,8 @@
 # AP_eRobCANOpen
 
-零差云控 eRob（CANopen / CiA402）的最小主站。目标机是零一 X6 Ultra，仓库里的板型是 `libraries/AP_HAL_ChibiOS/hwdef/ZeroOneX6`。
+零差云控 eRob（CANopen / CiA402）的最小主站。第一台要刷的飞控是 CUAV X7 Pro。仓库板型是 `libraries/AP_HAL_ChibiOS/hwdef/CUAV-X7`，`APJ_BOARD_ID` 是 `AP_HW_CUAV_X7_PRO`（1010），waf 板名是 `CUAV-X7`。零一 X6 Ultra（`ZeroOneX6`）也编译进同一驱动，只作备选，不是这次联调的板。
 
-飞控侧由 `CAN_Dx_PROTOCOL = 15`（`eRobCAN`，参数里显示 `eRob CAN`）构造 `AP_eRobCANOpen`。`AP_EROB_CANOPEN_ENABLED` 默认为 0，源码在 `src/`，由 `AP_eRobCANOpen.cpp` 在该宏为 1 时包含。ZeroOneX6 的 hwdef 打开这个宏。没选协议 15 时不会构造驱动。CAN1 上的 DroneCAN 默认参数不动。
+飞控侧由 `CAN_Dx_PROTOCOL = 15`（`eRobCAN`，参数里显示 `eRob CAN`）构造 `AP_eRobCANOpen`。`AP_EROB_CANOPEN_ENABLED` 默认为 0，源码在 `src/`，由 `AP_eRobCANOpen.cpp` 在该宏为 1 时包含。`CUAV-X7` 和 `ZeroOneX6` 的 hwdef 打开这个宏。没选协议 15 时不会构造驱动。CAN1 上的 DroneCAN 默认参数不动。驱动只接受 HAL 接口 1，也就是 hwdef 里的第二路 CAN（丝印 CAN2）。
 
 ## 与上游 ArduPilot 的关系
 
@@ -31,16 +31,46 @@ git rebase master
 
 不要把本驱动直接堆在过期的 fork 提交上。上游往前走之后，先合并 `upstream/master`，再变基本分支。
 
+## X7 Pro 固件
+
+传统直升机（DY1000）用 `heli`。先拉编译要用的子模块，再配置 `CUAV-X7`：
+
+```bash
+git submodule update --init --recursive \
+    modules/waf modules/ChibiOS modules/mavlink modules/DroneCAN
+./waf configure --board CUAV-X7
+./waf heli
+```
+
+刷写文件：
+
+```text
+build/CUAV-X7/bin/arducopter-heli.apj
+```
+
+地面站选板 `CUAV-X7`（bootloader ID 1010，CUAV X7 Pro）。不要选 `CUAV-X7-bdshot` 或 `CUAV-X7-ODID`，除非飞控本身就是那块变体。`CUAV-X7/defaults.parm` 只写了 `CAN_P1_DRIVER 1`，数值没改。CAN2 默认不挂驱动，刷完仍是 CAN1 DroneCAN，直到按下表改参数并重启。
+
+hwdef 把 `PH15` 拉高，USB 走 FS。CAN2（PB12 / PB13）和 USB HS 不能同时用。联调不要改成 USB HS。
+
+备选零一 X6 Ultra，同一条驱动，不是这次的刷写目标：
+
+```bash
+./waf configure --board ZeroOneX6
+./waf heli
+```
+
+产物 `build/ZeroOneX6/bin/arducopter-heli.apj`。那块板的 `defaults.parm` 里两路都在驱动 1 上，协议仍是 DroneCAN，直到把 CAN2 拆到驱动 2、协议 15。
+
 ## CAN1 / CAN2
 
-`ZeroOneX6/hwdef.dat` 已经有两路 CAN：
+`CUAV-X7/hwdef.dat` 的两路 CAN：
 
 | 丝印 | MCU | 本项目 |
 | --- | --- | --- |
-| CAN1 | PD0 / PD1 | DroneCAN。默认用途不动 |
-| CAN2 | PB12 / PB13 | 协议 15（eRob CAN）时整口归该驱动 |
+| CAN1 | PI9 / PH13 | DroneCAN。默认 `CAN_P1_DRIVER 1` |
+| CAN2 | PB12 / PB13 | 协议 15（eRob CAN）时整口归该驱动。默认不启用 |
 
-`ZeroOneX6/defaults.parm` 里 `CAN_P1_DRIVER 1` 且 `CAN_P2_DRIVER 1`：两个物理口都交给虚拟驱动 1，协议仍是 DroneCAN。数值没有改，只加了注释。现有固件仍是两路 DroneCAN，直到用户改参数并重启。
+`ZeroOneX6` 备选口线是 CAN1 = PD0 / PD1，CAN2 = PB12 / PB13。驱动同样只绑 HAL 接口 1。
 
 要选 eRob CAN，按 ArduPilot 的三层参数打开 CAN2，CAN1 保持不动：
 
@@ -315,10 +345,35 @@ make -C libraries/AP_eRobCANOpen check
 
 `src/*.c` 不在 waf 的顶层扫描里。`AP_eRobCANOpen.cpp` 在宏打开时把它们包含进去，避免和 host 的 Makefile 各编一份再链到同一个程序。宏为 0 时这个 cpp 是空的翻译单元。
 
+## 单轴 Node-ID 1 台架（X7 Pro）
+
+台架已在 1 Mbps 上把 Node-ID 1 跑通 CSP。软限位未设，中位就是轴当前停着的位置。先不要让飞控把轴拉到一个猜出来的计数上。5 A 台架电源不是飞行电源，固件不按大电流规划。
+
+第一次只确认链路，舵机功能保持 Disabled，这样 `push_servos()` 看到 PWM 0 就不会改 `0x607A`。使能后主站仍按手册把目标留在当前 `0x6064` 上。
+
+```text
+CAN_P1_DRIVER    1
+CAN_D1_PROTOCOL  1
+CAN_P2_DRIVER    2
+CAN_D2_PROTOCOL  15
+CAN_P2_BITRATE   1000000
+CAN_D2_EROB_SV1  1
+CAN_D2_EROB_ID1  1
+CAN_D2_EROB_RES  524288
+CAN_D2_EROB_CTR  <机械中位时读到的 0x6064>
+CAN_D2_EROB_MIN  -43691
+CAN_D2_EROB_MAX  43691
+SERVO1_FUNCTION  0
+```
+
+`RES` 524288 时 ±30°（一共 60°）是 ±43691 plus。`MIN` / `MAX` 是相对 `CTR` 的偏移。PWM 中点映到 `CTR`。`CTR` 填分析仪或 `ER1P` 在希望的中位读到的 `0x6064`，不要默认填 262144，除非读数就是 262144。`CTR` 不用重启。`SV1` / `ID1` / 协议 / 驱动号要重启。
+
+地面站应出现 `eRob: SERVO1 id 1 OK`，随后 `eRob CAN: servo node 1 enabled`。`ER1P` 是原始 plus。中位对上之后再把 `SERVO1_FUNCTION` 改成要测的通道。四轴 DY1000 仍是斜盘 SERVO1..3 功能 33..35、尾舵 SERVO4 功能 36，Node-ID 按舵机上已经写死的号填 `ID1`..`ID4`，不要假设连续的 1..4。
+
 ## 联调（有舵机之后）
 
 1. 先补齐 `CUSTOMER_ASK.md`：型号与轴数、每轴 Node-ID、CSP 还是 CSV、EDS、4 ms 是否允许先放宽、位置单位和限位、样机。
-2. 参数按上面的例子设置后重启。eRob 只接 CAN2，1 Mbps，两端终端电阻。CAN1 维持 DroneCAN。
+2. 参数按上面的例子设置后重启。eRob 只接 X7 Pro 的 CAN2，1 Mbps，两端终端电阻。CAN1 维持 DroneCAN。USB 保持 FS。
 3. 驱动线程会重试 `erob_configure_pdo_csp()`，直到伺服就绪（手册：较新固件大约 5 s）。失败时约每 5 s 再试一次。
 4. 使能后至少 500 ms 再 `set_target_pos()`。
 5. 用 CAN 分析仪看 CAN2：配置阶段没有 SYNC；运行后每 4 ms 有 `0x080`，以及本节点的 `0x200+id` 和 `0x180+id`、`0x280+id`、`0x380+id`、`0x480+id`。慢速 SDO 在 `0x600+id` / `0x580+id`，不是每个 SYNC 都有。CAN1 上不应出现这些帧。CAN2 上不要再挂别的协议。
