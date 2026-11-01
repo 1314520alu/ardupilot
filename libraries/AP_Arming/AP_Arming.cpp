@@ -68,6 +68,7 @@
 
   #include <AP_PiccoloCAN/AP_PiccoloCAN.h>
   #include <AP_DroneCAN/AP_DroneCAN.h>
+  #include <AP_eRobCANOpen/AP_eRobCANOpen.h>
 #endif
 
 #include <AP_Logger/AP_Logger.h>
@@ -1375,6 +1376,19 @@ bool AP_Arming::can_checks(bool report)
                             return false;
                         }
                     }
+                    break;
+                }
+                case AP_CAN::Protocol::eRobCAN: {
+#if AP_EROB_CANOPEN_ENABLED
+                    AP_eRobCANOpen *erob = AP_eRobCANOpen::get_erob(i);
+                    if (erob != nullptr && !erob->pre_arm_check(fail_msg, ARRAY_SIZE(fail_msg))) {
+                        check_failed(Check::SYSTEM, report, "%s", fail_msg);
+                        return false;
+                    }
+#else
+                    check_failed(Check::SYSTEM, report, "eRob CAN not enabled");
+                    return false;
+#endif
                     break;
                 }
                 case AP_CAN::Protocol::EFI_NWPMU:

@@ -199,9 +199,14 @@ PB1 FMU_SERVORAIL_VCC_SENS ADC1 SCALE(3)
 PI9  CAN1_RX CAN1
 PH13 CAN1_TX CAN1
 
-# 2nd CAN bus. Cannot be used at same time as USB_HS
+# 2nd CAN bus. Cannot be used at same time as USB_HS.
+# eRob CAN (CAN_Dx_PROTOCOL=15) binds this port only. CAN2 stays off
+# until CAN_P2_DRIVER is set. See defaults.parm. CAN1 stays DroneCAN.
 PB12 CAN2_RX CAN2
 PB13 CAN2_TX CAN2
+
+# eRob CAN master. Protocol 15 is not selected by the defaults.
+define AP_EROB_CANOPEN_ENABLED 1
 
 # control for silent (no output) for CAN
 PH2 GPIO_CAN1_SILENT OUTPUT PUSHPULL SPEED_LOW LOW GPIO(70)
