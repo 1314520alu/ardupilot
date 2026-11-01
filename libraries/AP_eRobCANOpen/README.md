@@ -102,7 +102,7 @@ CAN_D2_EROB_RES  524288
 
 eRob 按舵机用。`CAN_D2_EROB_BM` 的位和 `CAN_Dx_UC_SRV_BM` 一样：bit 0 是 SERVO1。全名放不下 `SRV_BM`（`CAN_D2_EROB_SRV_BM` 有 18 个字符，上限 16），所以参数名是 `BM`。最多 8 轴。`SRV_Channels::push()` 把 PWM 线性映到 `MIN`..`MAX`（相对 `CTR` 的偏移），再加上共用的 `CTR` 写入 `0x607A`。`CTR` 默认 0，目标仍是映射值本身。一圈输出端是 `RES` 个计数。掩码为 0 且槽也全空时不跟舵机输出。第一轴负责发 SYNC，其余轴只收这个 SYNC。同一接口上的其它帧被丢掉。CAN1 保持 `CAN_D1_PROTOCOL 1`。使能后 500 ms 内主站仍保持实际位置，之后才跟踪舵机目标。每轴单独的行程还没做。输出角度不乘减速比；电机转速才用 `GEAR`。
 
-遥测名字仍是 `ER` + SERVO 号 + 字母。日志 `ERB1` / `ERB3` 的 `Sv` 是这个 SERVO 号。槽 `SV1=5`、`ID1=11` 时，节点 11 的数据出现在 `ER5*`，`Sv` 为 5。
+地面站实时名字是 `ERn_` 加短标签，`n` 是槽号，和 `CAN_D2_EROB_SVn` / `IDn` 的 n 相同，不是 SERVO 输出号。日志 `ERB1` / `ERB3` 的 `Sv` 仍是 SERVO 号。槽 `SV1=5`、`ID1=11` 时，节点 11 的数据出现在 `ER1_*`，`Sv` 为 5。`SV1`..`SV8` 全是 0、改走 `NODE` + `BM` 时，`n` 按置位从低到高从 1 数。
 
 启动时在 CAN 线程上做一次在线检查，不写对象字典。先广播 NMT reset communication，在最多 2 s 内等这些节点的 boot-up（`0x700+id`，数据 `0x00`），提前收齐就结束。还没出现的节点再读一次 `0x1000`（SDO 超时 100 ms）。地面站原文是：
 
@@ -137,7 +137,7 @@ CAN_D2_EROB_GEAR 0
 CAN_D2_EROB_RES  524288
 ```
 
-`SV5`..`SV8` 和 `ID5`..`ID8` 保持 0。此时 `CAN_D2_EROB_NODE` 和 `CAN_D2_EROB_BM` 不参与映射。SERVO5 驱动节点 11，遥测是 `ER5*`。
+`SV5`..`SV8` 和 `ID5`..`ID8` 保持 0。此时 `CAN_D2_EROB_NODE` 和 `CAN_D2_EROB_BM` 不参与映射。SERVO5 驱动节点 11，地面站名字是 `ER1_*`（槽 1）。
 
 ## 传统直升机斜盘
 
@@ -221,9 +221,9 @@ CAN_D2_EROB_MIN  -43691
 CAN_D2_EROB_MAX  43691
 ```
 
-写入 `0x607A` 的绝对计数是 `CTR + 映射值`。PWM 最小端是 218453，最大端是 305835，中点是 262144。`ER5G` 和 `ERB3.Deg` 是 `(0x6064 - CTR) * 360 / RES`，`CTR` 处为 0°。各轴共用这一个 `CTR`。
+写入 `0x607A` 的绝对计数是 `CTR + 映射值`。PWM 最小端是 218453，最大端是 305835，中点是 262144。`ER1_DEG` 和 `ERB3.Deg` 是 `(0x6064 - CTR) * 360 / RES`，`CTR` 处为 0°。各轴共用这一个 `CTR`。斜盘四轴时槽 1..4 就是 `ER1_DEG`..`ER4_DEG`。
 
-装好后在机械中位读 `0x6064`。单圈中点应落在 262144 附近，多圈部分应为 0。若读数是 `262144 + N * 524288`，说明多圈计数不是 0，`CTR` 要填实际读数，不能只填 `RES/2`。`ER5P` 仍是原始 plus，不减中心。
+装好后在机械中位读 `0x6064`。单圈中点应落在 262144 附近，多圈部分应为 0。若读数是 `262144 + N * 524288`，说明多圈计数不是 0，`CTR` 要填实际读数，不能只填 `RES/2`。`ER1_POS` 仍是原始 plus，不减中心。
 
 ## 协议范围
 
@@ -291,30 +291,35 @@ Pre-op 里把 TxPDO 写成下面这张表。每条都不超过 8 字节，传输
 
 Mission Planner 回放时画 `ERB1`（原始）和 `ERB3`（物理单位）。`Sv` 是 SERVO 通道号。`ERB1` 的母线列是 mV，倍率显示成 V；`ERB3.V` 直接是伏特。
 
-同一组数也会以大约 1 Hz 发给地面站。名字是 `ER` + SERVO 号 + 一个字母，例如掩码包含 SERVO5 时：
+同一组数发给地面站，全部是 `NAMED_VALUE_FLOAT`。名字是 `ERn_<标签>`，最多 10 个字符。下表用槽 1；槽 2..4 把 `ER1` 换成 `ER2`..`ER4`。`n` 跟 `CAN_D2_EROB_SVn` / `IDn`，不跟 SERVO 号。CSP 的 `push_servos()` 不读这些值，也不改 PDO 映射。
 
-| 名字 | 对象 | 类型 |
+状态字、使能、`0x6064`，以及已经在总线上的两个编码器位置，大约 2 Hz。其余大约 1 Hz。槽 n 的第一次发送晚 `(n-1)*50 ms`，四个舵机不会挤在同一毫秒。不每个 SYNC 都发。还没收到的对象不发。使能不是对象：`(0x6041 & 0x006F) == 0x0027`。
+
+| 名字 | 对象 | 单位 |
 | --- | --- | --- |
-| `ER5P` | `0x6064` 实际位置 plus | NAMED_VALUE_INT |
-| `ER5G` | 相对 `CTR` 的输出角度 °。0 是 `CTR`。`P` 仍是原始 plus | NAMED_VALUE_FLOAT |
-| `ER5M` | `0x2240` 电机编码器 plus | NAMED_VALUE_INT |
-| `ER5L` | `0x20A0` 负载编码器 plus | NAMED_VALUE_INT |
-| `ER5S` | `0x606C` 速度 plus/s | NAMED_VALUE_INT |
-| `ER5R` | 输出转速 rpm | NAMED_VALUE_FLOAT |
-| `ER5N` | 电机转速 rpm。`GEAR` 为 0 时不发 | NAMED_VALUE_FLOAT |
-| `ER5I` | `0x6078` 电流千分比 | NAMED_VALUE_INT |
-| `ER5C` | 电流 A。额定电流无效时不发 | NAMED_VALUE_FLOAT |
-| `ER5Q` | 扭矩 N·m。额定扭矩无效时不发。千分比只留在 `ERB1.Tq` | NAMED_VALUE_FLOAT |
-| `ER5U` | `0x6079` 母线电压，单位 V | NAMED_VALUE_FLOAT |
-| `ER5F` | `0x60F4` 跟随误差 plus | NAMED_VALUE_INT |
-| `ER5T` | `0x22A2` 驱动温度 °C | NAMED_VALUE_FLOAT |
-| `ER5E` | `0x603F` 错误码 | NAMED_VALUE_INT |
-| `ER5W` | `0x3B68` 警告码 | NAMED_VALUE_INT |
-| `ER5O` | `0x6061` 模式 | NAMED_VALUE_INT |
-| `ER5D` | `0x2241` 双编码器差值 | NAMED_VALUE_INT |
-| `ER5A` | 使能，1 或 0 | NAMED_VALUE_INT |
+| `ER1_STAT` | `0x6041` 状态字 | 无，整数值（不是十六进制） |
+| `ER1_EN` | 由状态字推导 | 1 或 0 |
+| `ER1_POS` | `0x6064` 实际位置 | plus。全闭环时这是输出端位置 |
+| `ER1_MENC` | `0x2240` 电机端编码器 | plus。要等 TxPDO2 |
+| `ER1_LENC` | `0x20A0` 负载端编码器 | plus。要等 TxPDO2。没有这帧时看 `ER1_POS` |
+| `ER1_DEG` | 由 `0x6064` 和 `CTR` / `RES` 算出 | °。0 在 `CTR`。不是客户对象，方便对中位 |
+| `ER1_OVPS` | `0x606C` | plus/s，原始输出速度 |
+| `ER1_ORPM` | `0x606C * 60 / RES` | rpm。`RES` ≤ 0 时按 524288 |
+| `ER1_MRPM` | 输出 rpm × `GEAR` | rpm。`GEAR` 为 0 不发。手册没有电机侧速度对象，不用 `0x606C` 冒充 |
+| `ER1_AMP` | `0x6078` 和 `0x6075` | A。`6078 * 6075 / 1e6`。额定电流有效才发 |
+| `ER1_IPCT` | `0x6078` | ‰ 额定（0.1%）。额定电流还无效时发这个，不发 `AMP` |
+| `ER1_NM` | `0x6077` 和 `0x6076` | N·m。`6077 * 6076 / 1e6`。额定扭矩有效才发 |
+| `ER1_TPCT` | `0x6077` | ‰ 额定。额定扭矩还无效时发这个，不发 `NM` |
+| `ER1_VBUS` | `0x6079 / 1000` | V |
+| `ER1_FERR` | `0x60F4` 跟随误差 | plus |
+| `ER1_TEMP` | `0x22A2` | °C。驱动温度。手册 PDO mapping 为 NO，慢 SDO。客户写的绕组温度没有单独对象 |
+| `ER1_FLT` | `0x603F` | 故障码 |
+| `ER1_WARN` | `0x3B68` | 警告码。float 只保证 2^24 以内的整数精确 |
+| `ER1_MODE` | `0x6061` | 模式显示。8 是 CSP。阻抗没有单独的对象值 |
 
-Mission Planner 的 MAVLink Inspector 里看 `NAMED_VALUE_INT` 和 `NAMED_VALUE_FLOAT`。这些帧同时记成 `NVI` / `NVF`。还没收到的对象不会发。四个舵机就是四组名字，对象表相同。
+不发的项：加速度误差（手册没有对象）、双编码器差 `0x2241`（仍进 `ERB2.Diff`）。`float` 在 ±16777216 以内的整数是精确的。19 bit 单圈 plus 在这之内。多圈超过这个范围时，`POS` / `MENC` / `LENC` / `FERR` 会丢掉低位，`ERB1` 里仍是完整 int32。
+
+Mission Planner 的 MAVLink Inspector 里看 `NAMED_VALUE_FLOAT`。这些帧同时记成 `NVF`。四个舵机就是四组名字，对象表相同。以前的单字母名字（`ER5P` 这种）不再发。
 
 四轴、每轴四个 TxPDO、4 ms 一拍，大约是 4000 个 TxPDO/s，再加上 RxPDO 和 SYNC。1 Mbps 上还放得下。八个槽都接上会更紧。
 
@@ -366,9 +371,9 @@ CAN_D2_EROB_MAX  43691
 SERVO1_FUNCTION  0
 ```
 
-`RES` 524288 时 ±30°（一共 60°）是 ±43691 plus。`MIN` / `MAX` 是相对 `CTR` 的偏移。PWM 中点映到 `CTR`。`CTR` 填分析仪或 `ER1P` 在希望的中位读到的 `0x6064`，不要默认填 262144，除非读数就是 262144。`CTR` 不用重启。`SV1` / `ID1` / 协议 / 驱动号要重启。
+`RES` 524288 时 ±30°（一共 60°）是 ±43691 plus。`MIN` / `MAX` 是相对 `CTR` 的偏移。PWM 中点映到 `CTR`。`CTR` 填分析仪或 `ER1_POS` 在希望的中位读到的 `0x6064`，不要默认填 262144，除非读数就是 262144。`CTR` 不用重启。`SV1` / `ID1` / 协议 / 驱动号要重启。
 
-地面站应出现 `eRob: SERVO1 id 1 OK`，随后 `eRob CAN: servo node 1 enabled`。`ER1P` 是原始 plus。中位对上之后再把 `SERVO1_FUNCTION` 改成要测的通道。四轴 DY1000 仍是斜盘 SERVO1..3 功能 33..35、尾舵 SERVO4 功能 36，Node-ID 按舵机上已经写死的号填 `ID1`..`ID4`，不要假设连续的 1..4。
+地面站应出现 `eRob: SERVO1 id 1 OK`，随后 `eRob CAN: servo node 1 enabled`。`ER1_POS` 是原始 plus，`ER1_EN` 为 1 表示已使能。中位对上之后再把 `SERVO1_FUNCTION` 改成要测的通道。四轴 DY1000 仍是斜盘 SERVO1..3 功能 33..35、尾舵 SERVO4 功能 36，Node-ID 按舵机上已经写死的号填 `ID1`..`ID4`，不要假设连续的 1..4。四轴的地面站前缀是 `ER1_`..`ER4_`。
 
 ## 联调（有舵机之后）
 
