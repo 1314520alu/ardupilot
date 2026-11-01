@@ -105,6 +105,12 @@ typedef struct {
     uint32_t diag_tx_ms;
     bool diag_wait;
     int32_t counts_per_rev;
+    int32_t rate_deg_s; /* CSP command slew, deg/s output shaft. 0 = step. */
+    int32_t acc_deg_s2; /* CSP accel, deg/s^2. 0 = jump to RATE (legacy). */
+    int32_t dec_deg_s2; /* CSP decel, deg/s^2. 0 = use ACC. */
+    int32_t cmd_vel_plus_s; /* commanded velocity while slewing, plus/s */
+    uint32_t fault_backoff_ms;
+    uint32_t healthy_since_ms;
     int32_t ramp_pos;
     uint32_t ramp_t0_ms;
     uint32_t ramp_last_ms;
@@ -135,6 +141,12 @@ void erob_set_target_vel(erob_servo_t *s, int32_t plus_per_s);
 
 /* Output counts per revolution for the recovery ramp. Non-positive uses 524288. */
 void erob_set_counts_per_rev(erob_servo_t *s, int32_t counts);
+
+/* Max CSP target slew on the output shaft, deg/s. 0 disables the software ramp. */
+void erob_set_rate_deg_s(erob_servo_t *s, int32_t deg_per_s);
+/* Accel/decel for the CSP command ramp, deg/s^2. 0 ACC keeps the old constant-RATE step. */
+void erob_set_acc_deg_s2(erob_servo_t *s, int32_t deg_per_s2);
+void erob_set_dec_deg_s2(erob_servo_t *s, int32_t deg_per_s2);
 
 /*
  * CSP state machine and RPDO. Does not read the bus or emit SYNC.

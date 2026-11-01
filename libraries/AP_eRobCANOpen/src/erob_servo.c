@@ -297,17 +297,6 @@ static const uint16_t enable_cw[] = {
     EROB_CW_ENABLE_OP
 };
 
-/* Drop bit7, then the fault-reset edge, then the CiA402 enable sequence. */
-static const uint16_t recover_cw[] = {
-    0x0000,
-    EROB_CW_FAULT_RESET,
-    EROB_CW_SHUTDOWN,
-    EROB_CW_SWITCH_ON,
-    EROB_CW_ENABLE_OP
-};
-
-#define EROB_RECOVER_STEPS 5u
-
 static int node_silent(const erob_servo_t *s, uint32_t now)
 {
     uint32_t last = s->co->last_pdo_hb_ms;
@@ -323,18 +312,64 @@ static int op_enabled(uint16_t sw)
            (sw & EROB_SW_MASK) == EROB_SW_OP_ENABLED;
 }
 
+enum {
+    REC_RESET_LOW = 0,
+    REC_RESET_HIGH,
+    REC_WAIT,
+    REC_SHUTDOWN,
+    REC_SWITCH_ON,
+    REC_ENABLE,
+    REC_ENABLE_WAIT
+};
+
+/* grow=0 keeps the current gap (at least EROB_FAULT_RETRY_MS). grow=1 doubles it. */
+static void begin_backoff(erob_servo_t *s, uint32_t now, int grow)
+{
+    uint32_t b = s->fault_backoff_ms;
+
+    if (b < EROB_FAULT_RETRY_MS) {
+        b = EROB_FAULT_RETRY_MS;
+    } else if (grow && b < EROB_FAULT_BACKOFF_MAX_MS) {
+        b *= 2u;
+        if (b > EROB_FAULT_BACKOFF_MAX_MS) {
+            b = EROB_FAULT_BACKOFF_MAX_MS;
+        }
+    }
+    s->fault_backoff_ms = b;
+    s->rec_attempt_ms = now;
+    s->healthy_since_ms = 0;
+}
+
+static void note_healthy(erob_servo_t *s, uint32_t now)
+{
+    if (s->healthy_since_ms == 0) {
+        s->healthy_since_ms = now;
+    } else if ((now - s->healthy_since_ms) >= EROB_FAULT_HEALTHY_MS) {
+        s->fault_backoff_ms = EROB_FAULT_RETRY_MS;
+    }
+}
+
 static void arm_recover(erob_servo_t *s, uint32_t now, int count_fault)
 {
-    if (count_fault && s->state != EROB_ST_FAULT) {
+    if (s->state == EROB_ST_FAULT) {
+        return;
+    }
+    if (count_fault) {
         if (s->fault_count < 65535u) {
             s->fault_count++;
         }
     }
     s->state = EROB_ST_FAULT;
     s->ramp_active = false;
+    s->cmd_vel_plus_s = 0;
     s->hold_pos = s->pos_actual;
-    s->rec_attempt_ms = now;
-    s->rec_step = 0;
+    begin_backoff(s, now, 0);
+    if ((s->statusword & EROB_SW_FAULT_BIT) != 0) {
+        s->rec_step = REC_RESET_LOW;
+    } else {
+        /* 0x0240 or another dropout with bit3 clear. Do not re-enable yet. */
+        s->rec_step = REC_WAIT;
+    }
     /* The first control word of this attempt goes out on this poll. */
     s->enable_ts_ms = now - 50u;
 }
@@ -344,6 +379,8 @@ static void enter_bumpless(erob_servo_t *s, uint32_t now)
     s->state = EROB_ST_ENABLED;
     s->hold_pos = s->pos_actual;
     s->ramp_pos = s->pos_actual;
+    s->cmd_vel_plus_s = 0;
+    s->healthy_since_ms = now;
     s->ramp_active = true;
     s->ramp_t0_ms = now;
     s->ramp_last_ms = now;
@@ -362,31 +399,88 @@ static void enter_bumpless(erob_servo_t *s, uint32_t now)
     (void)send_cw_pos(s, EROB_CW_ENABLE_OP, s->pos_actual);
 }
 
+/*
+ * Fault bit set: fault-reset edge only (0x0000 then 0x0080), holding 0x6064.
+ * Fault bit clear: wait out the backoff, then one shutdown / switch-on / enable.
+ * A failed enable grows the backoff. 0x000F is not repeated into a live fault.
+ */
 static void service_recover(erob_servo_t *s, uint32_t now)
 {
-    if (s->rec_step >= EROB_RECOVER_STEPS) {
-        if (op_enabled(s->statusword)) {
-            enter_bumpless(s, now);
+    uint16_t sw = s->statusword;
+    int fault = (sw & EROB_SW_FAULT_BIT) != 0;
+
+    s->hold_pos = s->pos_actual;
+
+    if (fault) {
+        if (s->rec_step == REC_SHUTDOWN || s->rec_step == REC_SWITCH_ON ||
+            s->rec_step == REC_ENABLE || s->rec_step == REC_ENABLE_WAIT) {
+            begin_backoff(s, now, 1);
+        }
+        if (s->rec_step != REC_RESET_LOW && s->rec_step != REC_RESET_HIGH) {
+            s->rec_step = REC_RESET_LOW;
+            s->enable_ts_ms = now - 50u;
+        }
+        if ((now - s->enable_ts_ms) < 50u) {
             return;
         }
-        if ((now - s->rec_attempt_ms) < EROB_FAULT_RETRY_MS) {
+        s->enable_ts_ms = now;
+        if (s->rec_step == REC_RESET_HIGH) {
+            (void)send_cw_pos(s, EROB_CW_FAULT_RESET, s->hold_pos);
+            s->rec_step = REC_WAIT;
+        } else {
+            (void)send_cw_pos(s, 0x0000, s->hold_pos);
+            s->rec_step = REC_RESET_HIGH;
+        }
+        return;
+    }
+
+    if (s->need_nmt_start) {
+        (void)co_nmt(s->co, CO_NMT_START, s->co->node_id);
+        s->need_nmt_start = false;
+    }
+
+    if (s->rec_step == REC_RESET_LOW || s->rec_step == REC_RESET_HIGH ||
+        s->rec_step == REC_WAIT) {
+        if (s->fault_backoff_ms < EROB_FAULT_RETRY_MS) {
+            s->fault_backoff_ms = EROB_FAULT_RETRY_MS;
+        }
+        if ((now - s->rec_attempt_ms) < s->fault_backoff_ms) {
+            if ((now - s->enable_ts_ms) >= 50u) {
+                s->enable_ts_ms = now;
+                (void)send_cw_pos(s, EROB_CW_SHUTDOWN, s->hold_pos);
+            }
+            s->rec_step = REC_WAIT;
             return;
         }
-        s->rec_attempt_ms = now;
-        s->rec_step = 0;
-        s->hold_pos = s->pos_actual;
+        s->rec_step = REC_SHUTDOWN;
         s->enable_ts_ms = now - 50u;
     }
+
     if ((now - s->enable_ts_ms) < 50u) {
         return;
     }
     s->enable_ts_ms = now;
-    if (s->rec_step == 0 && s->need_nmt_start) {
-        (void)co_nmt(s->co, CO_NMT_START, s->co->node_id);
-    }
     s->hold_pos = s->pos_actual;
-    (void)send_cw_pos(s, recover_cw[s->rec_step], s->hold_pos);
-    s->rec_step++;
+
+    if (s->rec_step == REC_SHUTDOWN) {
+        (void)send_cw_pos(s, EROB_CW_SHUTDOWN, s->hold_pos);
+        s->rec_step = REC_SWITCH_ON;
+    } else if (s->rec_step == REC_SWITCH_ON) {
+        (void)send_cw_pos(s, EROB_CW_SWITCH_ON, s->hold_pos);
+        s->rec_step = REC_ENABLE;
+    } else if (s->rec_step == REC_ENABLE) {
+        (void)send_cw_pos(s, EROB_CW_ENABLE_OP, s->hold_pos);
+        s->rec_step = REC_ENABLE_WAIT;
+    } else if (s->rec_step == REC_ENABLE_WAIT) {
+        if (op_enabled(sw)) {
+            enter_bumpless(s, now);
+            return;
+        }
+        /* Still switch-on-disabled after one enable pulse. */
+        begin_backoff(s, now, 1);
+        s->rec_step = REC_WAIT;
+        (void)send_cw_pos(s, EROB_CW_SHUTDOWN, s->hold_pos);
+    }
 }
 
 static int32_t sat_i32(int64_t v);
@@ -394,6 +488,7 @@ static int32_t sat_i32(int64_t v);
 static int32_t ramp_toward(erob_servo_t *s, uint32_t now)
 {
     int32_t res = s->counts_per_rev > 0 ? s->counts_per_rev : EROB_PLUS_PER_REV;
+    int32_t rate = s->rate_deg_s > 0 ? s->rate_deg_s : EROB_RECOVER_DEG_PER_S;
     uint32_t elapsed = now - s->ramp_t0_ms;
     uint32_t dt = now - s->ramp_last_ms;
     int64_t err;
@@ -411,7 +506,7 @@ static int32_t ramp_toward(erob_servo_t *s, uint32_t now)
     }
     err = (int64_t)s->target_pos - (int64_t)s->ramp_pos;
     mag = err < 0 ? -err : err;
-    step = (int64_t)res * (int64_t)EROB_RECOVER_DEG_PER_S * (int64_t)dt / 360 / 1000;
+    step = (int64_t)res * (int64_t)rate * (int64_t)dt / 360 / 1000;
     {
         uint32_t remain = EROB_RECOVER_RAMP_MS - elapsed;
         int64_t hurry;
@@ -438,9 +533,170 @@ static int32_t ramp_toward(erob_servo_t *s, uint32_t now)
     return s->ramp_pos;
 }
 
+/*
+ * Continuous CSP command slew while Operation enabled.
+ * RATE caps speed. ACC/DEC shape a trapezoid (deg/s^2). ACC=0 keeps the
+ * legacy constant-RATE step. DEC=0 uses ACC. dt is capped so a stalled poll
+ * cannot jump.
+ */
+static int32_t slew_toward(erob_servo_t *s, uint32_t now)
+{
+    int32_t res = s->counts_per_rev > 0 ? s->counts_per_rev : EROB_PLUS_PER_REV;
+    uint32_t dt = now - s->ramp_last_ms;
+    int64_t err;
+    int64_t mag;
+    int32_t vmax;
+    int32_t a_acc;
+    int32_t a_dec;
+    int32_t v;
+    int64_t v_abs;
+    int64_t stop;
+    int32_t dir;
+    int64_t dpos;
+    int64_t dv;
+
+    if (dt == 0) {
+        dt = 1;
+    }
+    if (dt > 50u) {
+        dt = 50u;
+    }
+    err = (int64_t)s->target_pos - (int64_t)s->ramp_pos;
+    mag = err < 0 ? -err : err;
+    if (mag == 0) {
+        s->cmd_vel_plus_s = 0;
+        s->ramp_last_ms = now;
+        return s->ramp_pos;
+    }
+
+    a_acc = 0;
+    a_dec = 0;
+    if (s->acc_deg_s2 > 0) {
+        a_acc = (int32_t)((int64_t)res * (int64_t)s->acc_deg_s2 / 360);
+        if (a_acc < 1) {
+            a_acc = 1;
+        }
+    }
+    if (s->dec_deg_s2 > 0) {
+        a_dec = (int32_t)((int64_t)res * (int64_t)s->dec_deg_s2 / 360);
+        if (a_dec < 1) {
+            a_dec = 1;
+        }
+    } else {
+        a_dec = a_acc;
+    }
+
+    /* Legacy path: constant RATE, no accel curve. */
+    if (a_acc <= 0 && a_dec <= 0) {
+        int64_t step = (int64_t)res * (int64_t)s->rate_deg_s * (int64_t)dt / 360 / 1000;
+        if (step < 1) {
+            step = 1;
+        }
+        if (mag <= step) {
+            s->ramp_pos = s->target_pos;
+            s->cmd_vel_plus_s = 0;
+        } else if (err > 0) {
+            s->ramp_pos = sat_i32((int64_t)s->ramp_pos + step);
+            s->cmd_vel_plus_s = (int32_t)((int64_t)res * (int64_t)s->rate_deg_s / 360);
+        } else {
+            s->ramp_pos = sat_i32((int64_t)s->ramp_pos - step);
+            s->cmd_vel_plus_s = -(int32_t)((int64_t)res * (int64_t)s->rate_deg_s / 360);
+        }
+        s->ramp_last_ms = now;
+        return s->ramp_pos;
+    }
+
+    vmax = (int32_t)((int64_t)res * (int64_t)s->rate_deg_s / 360);
+    if (vmax < 1) {
+        vmax = 1;
+    }
+    dir = err > 0 ? 1 : -1;
+    v = s->cmd_vel_plus_s;
+    v_abs = v >= 0 ? v : -v;
+    stop = 0;
+    if (a_dec > 0 && v_abs > 0) {
+        stop = (v_abs * v_abs) / (2 * (int64_t)a_dec);
+    }
+
+    if ((v > 0 && dir < 0) || (v < 0 && dir > 0)) {
+        /* Wrong way: brake toward zero first. */
+        dv = (int64_t)(a_dec > 0 ? a_dec : a_acc) * (int64_t)dt / 1000;
+        if (dv < 1) {
+            dv = 1;
+        }
+        if (v_abs <= dv) {
+            v = 0;
+        } else if (v > 0) {
+            v = (int32_t)(v_abs - dv);
+        } else {
+            v = -(int32_t)(v_abs - dv);
+        }
+    } else if (a_dec > 0 && mag <= stop) {
+        /* Inside stopping distance: decelerate. */
+        dv = (int64_t)a_dec * (int64_t)dt / 1000;
+        if (dv < 1) {
+            dv = 1;
+        }
+        if (v_abs <= dv) {
+            v = 0;
+        } else {
+            v = dir * (int32_t)(v_abs - dv);
+        }
+    } else if (a_acc > 0 && v_abs < (int64_t)vmax) {
+        dv = (int64_t)a_acc * (int64_t)dt / 1000;
+        if (dv < 1) {
+            dv = 1;
+        }
+        v_abs += dv;
+        if (v_abs > (int64_t)vmax) {
+            v_abs = vmax;
+        }
+        v = dir * (int32_t)v_abs;
+    } else {
+        v = dir * vmax;
+    }
+
+    dpos = (int64_t)v * (int64_t)dt / 1000;
+    if (dpos == 0 && v != 0) {
+        dpos = v > 0 ? 1 : -1;
+    }
+    if ((err > 0 && dpos >= err) || (err < 0 && dpos <= err)) {
+        s->ramp_pos = s->target_pos;
+        s->cmd_vel_plus_s = 0;
+    } else {
+        s->ramp_pos = sat_i32((int64_t)s->ramp_pos + dpos);
+        s->cmd_vel_plus_s = v;
+    }
+    s->ramp_last_ms = now;
+    return s->ramp_pos;
+}
+
 void erob_set_counts_per_rev(erob_servo_t *s, int32_t counts)
 {
     s->counts_per_rev = counts;
+}
+
+void erob_set_rate_deg_s(erob_servo_t *s, int32_t deg_per_s)
+{
+    if (deg_per_s > 0 && s->rate_deg_s <= 0) {
+        /* Rate just became active: start the continuous ramp at actual. */
+        s->ramp_pos = s->pos_actual;
+        s->cmd_vel_plus_s = 0;
+        if (s->co != NULL && s->co->bus != NULL) {
+            s->ramp_last_ms = can_bus_millis(s->co->bus);
+        }
+    }
+    s->rate_deg_s = deg_per_s;
+}
+
+void erob_set_acc_deg_s2(erob_servo_t *s, int32_t deg_per_s2)
+{
+    s->acc_deg_s2 = deg_per_s2;
+}
+
+void erob_set_dec_deg_s2(erob_servo_t *s, int32_t deg_per_s2)
+{
+    s->dec_deg_s2 = deg_per_s2;
 }
 
 void erob_poll_motion(erob_servo_t *s)
@@ -470,24 +726,32 @@ void erob_poll_motion(erob_servo_t *s)
     if (s->state == EROB_ST_ENABLE_SEQ) {
         if ((sw & EROB_SW_FAULT_BIT) != 0) {
             arm_recover(s, now, 1);
-        } else {
-            if ((now - s->enable_ts_ms) >= 50) {
-                s->enable_ts_ms = now;
-                if (s->enable_step < 4) {
-                    (void)send_cw_pos(s, enable_cw[s->enable_step], s->hold_pos);
-                    s->enable_step++;
-                } else if ((sw & EROB_SW_MASK) == EROB_SW_OP_ENABLED) {
-                    s->state = EROB_ST_ENABLED;
-                    s->enable_done_ms = now;
-                    s->hold_pos = s->pos_actual;
-                    if (s->co->last_pdo_hb_ms == 0) {
-                        s->co->last_pdo_hb_ms = now;
-                    }
-                    (void)send_cw_pos(s, EROB_CW_ENABLE_OP, s->hold_pos);
-                } else {
-                    (void)send_cw_pos(s, EROB_CW_ENABLE_OP, s->hold_pos);
+        } else if ((now - s->enable_ts_ms) >= 50) {
+            s->enable_ts_ms = now;
+            if (s->enable_step < 4) {
+                (void)send_cw_pos(s, enable_cw[s->enable_step], s->hold_pos);
+                s->enable_step++;
+            } else if ((sw & EROB_SW_MASK) == EROB_SW_OP_ENABLED) {
+                s->state = EROB_ST_ENABLED;
+                s->enable_done_ms = now;
+                s->hold_pos = s->pos_actual;
+                s->ramp_pos = s->pos_actual;
+                s->cmd_vel_plus_s = 0;
+                s->ramp_last_ms = now;
+                s->healthy_since_ms = now;
+                if (s->co->last_pdo_hb_ms == 0) {
+                    s->co->last_pdo_hb_ms = now;
                 }
+                (void)send_cw_pos(s, EROB_CW_ENABLE_OP, s->hold_pos);
+            } else if (s->enable_step >= 8) {
+                /* Repeated 0x000F left the drive in 0x0240. Stop the pulse. */
+                arm_recover(s, now, 0);
+            } else {
+                (void)send_cw_pos(s, EROB_CW_ENABLE_OP, s->hold_pos);
+                s->enable_step++;
             }
+        }
+        if (s->state == EROB_ST_ENABLE_SEQ) {
             return;
         }
     }
@@ -504,7 +768,18 @@ void erob_poll_motion(erob_servo_t *s)
             service_recover(s, now);
             return;
         }
-        if (s->ramp_active) {
+        if (!op_enabled(sw)) {
+            /* 0x0240 with EN clear. Do not keep writing the flight target. */
+            arm_recover(s, now, 0);
+            service_recover(s, now);
+            return;
+        }
+        note_healthy(s, now);
+        if (s->rate_deg_s > 0) {
+            /* Continuous software slew while enabled; replaces step/hold/recovery hurry. */
+            s->ramp_active = false;
+            cmd = slew_toward(s, now);
+        } else if (s->ramp_active) {
             cmd = ramp_toward(s, now);
         } else if ((now - s->enable_done_ms) < EROB_POST_ENABLE_HOLDOFF_MS) {
             cmd = s->hold_pos;

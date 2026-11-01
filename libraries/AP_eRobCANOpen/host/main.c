@@ -404,10 +404,10 @@ int main(void)
         }
     }
     expect_true(count_cw(node, 0x0000) >= 2, "fault-reset edge is re-armed");
-    expect_true(count_cw(node, EROB_CW_FAULT_RESET) >= 2, "fault reset retries without giving up");
-    expect_true(count_cw(node, EROB_CW_SHUTDOWN) >= 1, "recovery sends shutdown");
-    expect_true(count_cw(node, EROB_CW_SWITCH_ON) >= 1, "recovery sends switch on");
-    expect_true(count_cw(node, EROB_CW_ENABLE_OP) >= 1, "recovery sends enable operation");
+    expect_true(count_cw(node, EROB_CW_FAULT_RESET) >= 2, "fault reset retries while bit3 stays set");
+    expect_true(count_cw(node, EROB_CW_SHUTDOWN) == 0, "no shutdown while the fault bit stays set");
+    expect_true(count_cw(node, EROB_CW_SWITCH_ON) == 0, "no switch-on while the fault bit stays set");
+    expect_true(count_cw(node, EROB_CW_ENABLE_OP) == 0, "no enable while the fault bit stays set");
     expect_true(erob_get_state(&servo) == EROB_ST_FAULT, "fault does not latch off");
     expect_true(erob_fault_count(&servo) == 1, "retries do not recount the same fault");
 
@@ -474,6 +474,87 @@ int main(void)
     expect_true(last_rpdo(node, &cw, &pos) && cw == EROB_CW_ENABLE_OP && pos == 0,
                 "silence recovery writes 0x6064 before the ramp");
     expect_true(!can_bus_stub_overflow(), "no queue overflow after recovery");
+
+    erob_set_counts_per_rev(&servo, EROB_PLUS_PER_REV);
+    erob_set_rate_deg_s(&servo, 20);
+    erob_set_acc_deg_s2(&servo, 0);
+    erob_set_dec_deg_s2(&servo, 0);
+    erob_set_target_pos(&servo, 100000);
+    can_bus_stub_advance(50);
+    erob_poll(&servo);
+    expect_true(last_rpdo(node, &cw, &pos), "slew RPDO present");
+    expect_true(cw == EROB_CW_ENABLE_OP && pos == 1456, "50 ms at RATE 20 deg/s is 1456 plus");
+
+    erob_set_rate_deg_s(&servo, 0);
+    erob_set_rate_deg_s(&servo, 100);
+    erob_set_acc_deg_s2(&servo, 100);
+    erob_set_dec_deg_s2(&servo, 100);
+    erob_set_target_pos(&servo, 100000);
+    can_bus_stub_advance(50);
+    erob_poll(&servo);
+    expect_true(last_rpdo(node, &cw, &pos) && pos > 0 && pos < 1000,
+                "ACC 100 deg/s^2 first step is below the RATE cap");
+
+    can_bus_stub_tx_reset();
+    erob_set_target_pos(&servo, 43691);
+    can_bus_stub_lock_status(1, 0x0240);
+    can_bus_stub_push_status(0x0240, 0);
+    {
+        int k;
+        for (k = 0; k < 8; k++) {
+            can_bus_stub_advance(50);
+            erob_poll(&servo);
+        }
+    }
+    expect_true(count_cw(node, EROB_CW_ENABLE_OP) == 0, "0x0240 does not repeat enable operation");
+    expect_true(last_rpdo(node, &cw, &pos) && pos != 43691, "0x0240 does not hold the flight target");
+    expect_true(cw == EROB_CW_SHUTDOWN || cw == 0x0000, "0x0240 commands shutdown at the actual position");
+    can_bus_stub_lock_status(0, 0);
+    {
+        int k;
+        for (k = 0; k < 30 && erob_get_state(&servo) != EROB_ST_ENABLED; k++) {
+            can_bus_stub_advance(50);
+            erob_poll(&servo);
+        }
+    }
+    expect_true(erob_get_state(&servo) == EROB_ST_ENABLED, "dropout recovery reaches operation enabled");
+    (void)erob_take_recovered(&servo);
+
+    can_bus_stub_tx_reset();
+    can_bus_stub_set_fault_on_enable(1);
+    erob_set_rate_deg_s(&servo, 0);
+    erob_set_target_pos(&servo, 43691);
+    {
+        int k;
+        int enable_at_limit = 0;
+        int seen_reset = 0;
+        for (k = 0; k < 40; k++) {
+            can_bus_stub_advance(50);
+            erob_poll(&servo);
+        }
+        for (k = 0; k < (int)can_bus_stub_tx_count(); k++) {
+            const can_frame_t *fr = can_bus_stub_tx((uint16_t)k);
+            uint16_t frame_cw;
+            int32_t frame_pos;
+            if (fr->is_ext || fr->id != (uint32_t)(0x200u + node) || fr->dlc < 6) {
+                continue;
+            }
+            frame_cw = (uint16_t)(fr->data[0] | (fr->data[1] << 8));
+            frame_pos = (int32_t)((uint32_t)fr->data[2] | ((uint32_t)fr->data[3] << 8) |
+                                  ((uint32_t)fr->data[4] << 16) | ((uint32_t)fr->data[5] << 24));
+            if (frame_cw == 0x0000) {
+                seen_reset = 1;
+            }
+            if (seen_reset && frame_cw == EROB_CW_ENABLE_OP && frame_pos == 43691) {
+                enable_at_limit++;
+            }
+        }
+        expect_true(count_cw(node, EROB_CW_ENABLE_OP) >= 1, "persistent fault still attempts one enable");
+        expect_true(count_cw(node, EROB_CW_ENABLE_OP) <= 4, "persistent fault does not re-enable every 0.2 s");
+        expect_true(enable_at_limit == 0, "fault re-enable does not command the +30 deg target");
+        expect_true(erob_get_state(&servo) == EROB_ST_FAULT, "persistent fault stays in recovery");
+    }
+    can_bus_stub_set_fault_on_enable(0);
 
     if (g_fails != 0) {
         fprintf(stderr, "%d check(s) failed\n", g_fails);

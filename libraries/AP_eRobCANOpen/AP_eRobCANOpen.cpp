@@ -217,6 +217,33 @@ const AP_Param::GroupInfo AP_eRobCANOpen::var_info[] = {
 
     // indices 26..33 were CT1..CT8 and must not be reused
 
+    // @Param: RATE
+    // @DisplayName: eRob CAN slew rate
+    // @Description: Max output-shaft slew for CSP targets. Applies while Operation enabled. 0 disables the software ramp (step to target). Bench with a small PSU use 10-30; design cruise ~100.
+    // @Units: deg/s
+    // @Range: 0 500
+    // @Increment: 1
+    // @User: Standard
+    AP_GROUPINFO("RATE", 34, AP_eRobCANOpen, _rate_deg_s, 20),
+
+    // @Param: ACC
+    // @DisplayName: eRob CAN slew accel
+    // @Description: Acceleration of the CSP command ramp toward RATE. 0 keeps the old constant-speed RATE step (no accel curve). Customer default ~1000 reaches 100 deg/s in about 0.1 s.
+    // @Units: deg/s/s
+    // @Range: 0 10000
+    // @Increment: 10
+    // @User: Standard
+    AP_GROUPINFO("ACC", 35, AP_eRobCANOpen, _acc_deg_s2, 1000),
+
+    // @Param: DEC
+    // @DisplayName: eRob CAN slew decel
+    // @Description: Deceleration of the CSP command ramp into the target. 0 uses ACC. Softens stop shock on the swashplate.
+    // @Units: deg/s/s
+    // @Range: 0 10000
+    // @Increment: 10
+    // @User: Standard
+    AP_GROUPINFO("DEC", 36, AP_eRobCANOpen, _dec_deg_s2, 1000),
+
     AP_GROUPEND
 };
 
@@ -605,6 +632,9 @@ void AP_eRobCANOpen::poll_axes()
     for (uint8_t i = 0; i < _num_axes; i++) {
         const uint32_t now_ms = AP_HAL::millis();
         erob_set_counts_per_rev(&_axis[i].servo, counts_per_rev());
+        erob_set_rate_deg_s(&_axis[i].servo, _rate_deg_s.get());
+        erob_set_acc_deg_s2(&_axis[i].servo, _acc_deg_s2.get());
+        erob_set_dec_deg_s2(&_axis[i].servo, _dec_deg_s2.get());
         // Text first, then the fault-reset edge inside poll_motion.
         warn_statusword_fault(i, now_ms);
         warn_node_silent(i, now_ms);
