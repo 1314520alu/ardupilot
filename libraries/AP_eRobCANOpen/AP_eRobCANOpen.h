@@ -60,12 +60,14 @@ private:
         erob_servo_t servo;
         uint8_t node;
         uint8_t channel;
+        uint8_t slot; // 1-based CAN_Dx_EROB_SVn index; NODE+BM uses axis order
         bool tried;
         bool reported;
         bool fault_active;
         uint32_t last_try_ms;
         uint32_t last_log_ms;
         uint32_t last_named_ms;
+        uint32_t last_fast_ms;
         uint32_t last_fault_ms;
         uint32_t last_silent_ms;
     };
@@ -73,7 +75,7 @@ private:
     void loop();
     void setup_axes();
     bool slots_configured() const;
-    void add_axis(uint8_t &num, uint8_t node, uint8_t channel);
+    void add_axis(uint8_t &num, uint8_t node, uint8_t channel, uint8_t slot);
     void probe_nodes();
     void poll_axes();
     void warn_statusword_fault(uint8_t index, uint32_t now_ms);

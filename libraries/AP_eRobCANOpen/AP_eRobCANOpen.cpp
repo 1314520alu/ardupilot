@@ -275,6 +275,9 @@ bool AP_eRobCANOpen::add_interface(AP_HAL::CANIface* can_iface)
 }
 
 static constexpr uint32_t EROB_FAULT_WARN_MS = 5000;
+/* Status and position are already on TPDO1. The rest stays slower. */
+static constexpr uint32_t EROB_NAMED_FAST_MS = 500;
+static constexpr uint32_t EROB_NAMED_SLOW_MS = 1000;
 
 bool AP_eRobCANOpen::slots_configured() const
 {
@@ -286,17 +289,19 @@ bool AP_eRobCANOpen::slots_configured() const
     return false;
 }
 
-void AP_eRobCANOpen::add_axis(uint8_t &num, uint8_t node, uint8_t channel)
+void AP_eRobCANOpen::add_axis(uint8_t &num, uint8_t node, uint8_t channel, uint8_t slot)
 {
     Axis &axis = _axis[num];
     axis.node = node;
     axis.channel = channel;
+    axis.slot = slot;
     axis.tried = false;
     axis.reported = false;
     axis.fault_active = false;
     axis.last_try_ms = 0;
     axis.last_log_ms = 0;
     axis.last_named_ms = 0;
+    axis.last_fast_ms = 0;
     axis.last_fault_ms = 0;
     axis.last_silent_ms = 0;
     co_master_init(&axis.master, &_bus, node);
@@ -347,7 +352,7 @@ void AP_eRobCANOpen::setup_axes()
             }
             seen_id[id] = true;
             seen_sv[sv] = true;
-            add_axis(num, uint8_t(id), uint8_t(sv - 1));
+            add_axis(num, uint8_t(id), uint8_t(sv - 1), uint8_t(i + 1));
         }
         if (num == 0) {
             GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "eRob CAN: no servo slots");
@@ -374,7 +379,7 @@ void AP_eRobCANOpen::setup_axes()
                 truncated = true;
                 break;
             }
-            add_axis(num, uint8_t(node + num), chan);
+            add_axis(num, uint8_t(node + num), chan, uint8_t(num + 1));
         }
         if (num == 0) {
             GCS_SEND_TEXT(MAV_SEVERITY_INFO, "eRob CAN: servo mask is 0");
@@ -621,17 +626,33 @@ void AP_eRobCANOpen::poll_axes()
     }
 }
 
-static void erob_named(char *out, size_t len, uint8_t servo_num, char tag)
+#if HAL_GCS_ENABLED
+/*
+ * NAMED_VALUE_FLOAT name is 10 bytes. Slot is 1..8, so "ER8_" plus a
+ * tag of at most 5 characters fits. Tags are stable; do not reuse one
+ * for a different unit.
+ */
+static_assert(sizeof("ER8_MENC") - 1 <= 10, "eRob named value");
+static_assert(sizeof("ER8_TPCT") - 1 <= 10, "eRob named value");
+
+static void erob_mp_name(char *out, size_t len, uint8_t slot, const char *tag)
 {
-    snprintf(out, len, "ER%u%c", unsigned(servo_num), tag);
+    snprintf(out, len, "ER%u_%s", unsigned(slot), tag);
 }
+
+static void erob_send_named(char *name, size_t len, uint8_t slot, const char *tag, float value)
+{
+    erob_mp_name(name, len, slot, tag);
+    gcs().send_named_float(name, value);
+}
+#endif
 
 void AP_eRobCANOpen::publish_feedback(uint8_t index, uint32_t now_ms)
 {
     Axis &axis = _axis[index];
     const erob_feedback_t *fb = erob_feedback(&axis.servo);
     const uint8_t servo_num = uint8_t(axis.channel + 1);
-    char name[8];
+    char name[12];
 
     if (fb == nullptr || (fb->valid & EROB_FB_TPDO1) == 0) {
         return;
@@ -754,73 +775,93 @@ void AP_eRobCANOpen::publish_feedback(uint8_t index, uint32_t now_ms)
 #endif
 
 #if HAL_GCS_ENABLED
-    if ((now_ms - axis.last_named_ms) < 1000) {
+    /*
+     * Mission Planner names are ERn_<tag>, n = slot (SVn/IDn), all floats.
+     * Enable is (statusword & 0x006F) == 0x0027. No separate object.
+     * Fast: status, enable, and positions already on the bus.
+     * Slow: speeds, current, torque, voltage, temperature, fault, warning, mode.
+     * A field is omitted until that object has been seen.
+     */
+    /*
+     * First sample is delayed by the slot so four servos do not emit
+     * on the same millisecond. 50 ms is inside the 500 ms fast period.
+     */
+    if (axis.last_fast_ms == 0 && axis.last_named_ms == 0) {
+        const uint32_t phase_ms = uint32_t(axis.slot > 0 ? axis.slot - 1 : 0) * 50u;
+        uint32_t fast_stamp = now_ms - EROB_NAMED_FAST_MS + phase_ms;
+        uint32_t slow_stamp = now_ms - EROB_NAMED_SLOW_MS + phase_ms;
+        // 0 means "not phased yet", so a wrapped stamp must not stay 0.
+        axis.last_fast_ms = fast_stamp == 0 ? 1u : fast_stamp;
+        axis.last_named_ms = slow_stamp == 0 ? 1u : slow_stamp;
+    }
+    const bool fast_due = (now_ms - axis.last_fast_ms) >= EROB_NAMED_FAST_MS;
+    const bool slow_due = (now_ms - axis.last_named_ms) >= EROB_NAMED_SLOW_MS;
+    if (!fast_due && !slow_due) {
         return;
     }
-    axis.last_named_ms = now_ms;
-    erob_named(name, sizeof(name), servo_num, 'P');
-    gcs().send_named_int(name, fb->pos_actual);
-    erob_named(name, sizeof(name), servo_num, 'G');
-    gcs().send_named_float(name, erob_position_deg(erob_plus_rel_center(fb->pos_actual, center), res));
-    if ((fb->valid & EROB_FB_TPDO2) != 0) {
-        erob_named(name, sizeof(name), servo_num, 'M');
-        gcs().send_named_int(name, fb->motor_enc);
-        erob_named(name, sizeof(name), servo_num, 'L');
-        gcs().send_named_int(name, fb->load_enc);
-    }
-    if ((fb->valid & EROB_FB_TPDO3) != 0) {
-        const float out_rpm = erob_output_rpm(fb->vel_plus_s, res);
-        const float gear = _gear.get();
-        erob_named(name, sizeof(name), servo_num, 'S');
-        gcs().send_named_int(name, fb->vel_plus_s);
-        erob_named(name, sizeof(name), servo_num, 'I');
-        gcs().send_named_int(name, fb->current_permille);
-        erob_named(name, sizeof(name), servo_num, 'R');
-        gcs().send_named_float(name, out_rpm);
-        if (is_positive(gear)) {
-            erob_named(name, sizeof(name), servo_num, 'N');
-            gcs().send_named_float(name, out_rpm * gear);
-        }
-        if ((fb->valid & EROB_FB_IRATED) != 0) {
-            erob_named(name, sizeof(name), servo_num, 'C');
-            gcs().send_named_float(name, erob_current_a(fb->current_permille, fb->rated_current_mA));
-        }
-        if ((fb->valid & EROB_FB_TRATED) != 0) {
-            erob_named(name, sizeof(name), servo_num, 'Q');
-            gcs().send_named_float(name, erob_torque_nm(fb->torque_permille, fb->rated_torque_mNm));
+    const uint8_t slot = axis.slot;
+    if (fast_due) {
+        axis.last_fast_ms = now_ms;
+        erob_send_named(name, sizeof(name), slot, "STAT", fb->statusword);
+        erob_send_named(name, sizeof(name), slot, "EN", fb->op_enabled ? 1.0f : 0.0f);
+        erob_send_named(name, sizeof(name), slot, "POS", float(fb->pos_actual));
+        if ((fb->valid & EROB_FB_TPDO2) != 0) {
+            erob_send_named(name, sizeof(name), slot, "MENC", float(fb->motor_enc));
+            erob_send_named(name, sizeof(name), slot, "LENC", float(fb->load_enc));
         }
     }
-    if ((fb->valid & EROB_FB_TPDO4) != 0) {
-        erob_named(name, sizeof(name), servo_num, 'U');
-        gcs().send_named_float(name, fb->dc_mv * 0.001f);
-        erob_named(name, sizeof(name), servo_num, 'F');
-        gcs().send_named_int(name, fb->follow_err);
+    if (slow_due) {
+        axis.last_named_ms = now_ms;
+        erob_send_named(name, sizeof(name), slot, "DEG",
+                        erob_position_deg(erob_plus_rel_center(fb->pos_actual, center), res));
+        if ((fb->valid & EROB_FB_TPDO3) != 0) {
+            const float out_rpm = erob_output_rpm(fb->vel_plus_s, res);
+            const float gear = _gear.get();
+            /*
+             * 0x606C is output plus/s. OVPS keeps that unit. ORPM is
+             * 606C * 60 / RES (RES <= 0 uses 524288). Motor rpm is
+             * output rpm times GEAR. No motor-side velocity object
+             * exists, so GEAR 0 omits MRPM.
+             */
+            erob_send_named(name, sizeof(name), slot, "OVPS", float(fb->vel_plus_s));
+            erob_send_named(name, sizeof(name), slot, "ORPM", out_rpm);
+            if (is_positive(gear)) {
+                erob_send_named(name, sizeof(name), slot, "MRPM", out_rpm * gear);
+            }
+            if ((fb->valid & EROB_FB_IRATED) != 0) {
+                erob_send_named(name, sizeof(name), slot, "AMP",
+                                erob_current_a(fb->current_permille, fb->rated_current_mA));
+            } else {
+                erob_send_named(name, sizeof(name), slot, "IPCT", float(fb->current_permille));
+            }
+            if ((fb->valid & EROB_FB_TRATED) != 0) {
+                erob_send_named(name, sizeof(name), slot, "NM",
+                                erob_torque_nm(fb->torque_permille, fb->rated_torque_mNm));
+            } else {
+                erob_send_named(name, sizeof(name), slot, "TPCT", float(fb->torque_permille));
+            }
+        }
+        if ((fb->valid & EROB_FB_TPDO4) != 0) {
+            erob_send_named(name, sizeof(name), slot, "VBUS", fb->dc_mv * 0.001f);
+            erob_send_named(name, sizeof(name), slot, "FERR", float(fb->follow_err));
+        }
+        if ((fb->valid & EROB_FB_TEMP) != 0) {
+            erob_send_named(name, sizeof(name), slot, "TEMP", float(fb->drive_temp_c));
+        }
+        if ((fb->valid & EROB_FB_ERR) != 0) {
+            erob_send_named(name, sizeof(name), slot, "FLT", float(fb->error_code));
+        }
+        if ((fb->valid & EROB_FB_WARN) != 0) {
+            erob_send_named(name, sizeof(name), slot, "WARN", float(fb->warning_code));
+        }
+        if ((fb->valid & EROB_FB_MODE) != 0) {
+            erob_send_named(name, sizeof(name), slot, "MODE", float(fb->mode_disp));
+        }
     }
-    if ((fb->valid & EROB_FB_TEMP) != 0) {
-        erob_named(name, sizeof(name), servo_num, 'T');
-        gcs().send_named_float(name, fb->drive_temp_c);
-    }
-    if ((fb->valid & EROB_FB_ERR) != 0) {
-        erob_named(name, sizeof(name), servo_num, 'E');
-        gcs().send_named_int(name, fb->error_code);
-    }
-    if ((fb->valid & EROB_FB_WARN) != 0) {
-        erob_named(name, sizeof(name), servo_num, 'W');
-        gcs().send_named_int(name, int32_t(fb->warning_code));
-    }
-    if ((fb->valid & EROB_FB_MODE) != 0) {
-        erob_named(name, sizeof(name), servo_num, 'O');
-        gcs().send_named_int(name, fb->mode_disp);
-    }
-    if ((fb->valid & EROB_FB_DIFF) != 0) {
-        erob_named(name, sizeof(name), servo_num, 'D');
-        gcs().send_named_int(name, fb->enc_diff);
-    }
-    erob_named(name, sizeof(name), servo_num, 'A');
-    gcs().send_named_int(name, fb->op_enabled ? 1 : 0);
 #else
     (void)servo_num;
     (void)name;
+    (void)now_ms;
 #endif
 }
 
