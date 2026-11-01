@@ -66,9 +66,22 @@
 #define EROB_DIAG_PERIOD_MS 250u
 #endif
 
-/* CiA402 fault reset is repeated until the fault bit clears. No give-up. */
+/*
+ * Minimum gap before another enable attempt after a fault or a dropout
+ * to switch-on-disabled. While statusword bit3 is set, only the fault-reset
+ * edge is sent. A failed enable doubles the gap up to EROB_FAULT_BACKOFF_MAX_MS.
+ */
 #ifndef EROB_FAULT_RETRY_MS
 #define EROB_FAULT_RETRY_MS 500u
+#endif
+
+#ifndef EROB_FAULT_BACKOFF_MAX_MS
+#define EROB_FAULT_BACKOFF_MAX_MS 5000u
+#endif
+
+/* This long in Operation enabled with no fault restores the base gap. */
+#ifndef EROB_FAULT_HEALTHY_MS
+#define EROB_FAULT_HEALTHY_MS 1000u
 #endif
 
 /* No heartbeat and no TPDO for this long means the node is silent. */

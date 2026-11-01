@@ -17,6 +17,9 @@ struct can_bus {
     int32_t sim_pos;
     uint16_t sim_sw;
     int force_fault;
+    int fault_on_enable;
+    int lock_sw;
+    uint16_t locked_sw;
     int silent;
     can_frame_t tx_log[TX_LOG_MAX];
     uint16_t tx_count;
@@ -161,6 +164,13 @@ static void reply_rpdo(struct can_bus *bus, const can_frame_t *req)
     } else if (cw == EROB_CW_ENABLE_OP) {
         sw = EROB_SW_OP_ENABLED;
     }
+    if (bus->fault_on_enable && cw == EROB_CW_ENABLE_OP) {
+        /* Bench trace: enable reaches a fault status, not a clean 0x1637. */
+        sw = 0x020F;
+    }
+    if (bus->lock_sw) {
+        sw = bus->locked_sw;
+    }
     if (bus->force_fault) {
         sw = (uint16_t)(sw | EROB_SW_FAULT_BIT);
     }
@@ -212,6 +222,19 @@ static void drop_rx(struct can_bus *bus)
 void can_bus_stub_set_fault(int fault)
 {
     g_bus.force_fault = fault ? 1 : 0;
+    drop_rx(&g_bus);
+}
+
+void can_bus_stub_set_fault_on_enable(int enable)
+{
+    g_bus.fault_on_enable = enable ? 1 : 0;
+    drop_rx(&g_bus);
+}
+
+void can_bus_stub_lock_status(int lock, uint16_t sw)
+{
+    g_bus.lock_sw = lock ? 1 : 0;
+    g_bus.locked_sw = sw;
     drop_rx(&g_bus);
 }
 

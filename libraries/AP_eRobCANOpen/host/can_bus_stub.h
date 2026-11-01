@@ -12,6 +12,12 @@ void can_bus_stub_tx_reset(void);
 /* While set, every RPDO reply keeps statusword bit3 set. Drops queued RX. */
 void can_bus_stub_set_fault(int fault);
 
+/* ENABLE_OP replies with 0x020F. Other control words follow CiA402. */
+void can_bus_stub_set_fault_on_enable(int enable);
+
+/* RPDO replies use sw and ignore the control word. lock=0 clears it. */
+void can_bus_stub_lock_status(int lock, uint16_t sw);
+
 /* While set, RPDO replies carry no TPDO. Drops queued RX. */
 void can_bus_stub_set_silent(int silent);
 
