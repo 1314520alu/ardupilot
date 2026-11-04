@@ -37,9 +37,13 @@
  *    以在 ArduPilot 侧将障碍物报告限制在 40m（0 表示使用厂家默认/本驱动返回值）。
  * 5) CUAV-X7：任选支持 1Mbps 的串口（如 TELEM2），SERIALn_PROTOCOL=11 (Lidar360)，SERIALn_BAUD=1000000，
  *    PRX1_TYPE=5 (RPLidarA2 后端，含 S3)。
- * 6) 再次 RESET 前若已识别为 S3，先发 STOP(0x25) 并 flush 串口。
+ * 6) 再次 RESET 前若已识别为 S3，先发 STOP(0x25) 并丢掉 RX 里残留的扫描字节。
  * 7) Mission Planner: (a) STATUSTEXT is queued only when a MAVLink channel is active (see try_send_s3_gcs_pending).
  *    (b) Long strings are chunked; UTF-8 split mid-character shows as garbled text in MP — keep lines short ASCII.
+ * 8) Dense 帧按字节重同步：sync 0xA/0x5 对上但 XOR 校验失败时只滑动 1 字节，不把整机 RESET。
+ *    校验通过的胶囊（含全 0 距离）会刷新链路时间，避免空场约 10s 被 COMM 超时复位掐断扫描。
+ *    健康/采样率/扫描描述符 500ms 无应答则重发，连续失败才 STOP+RESET。
+ * 9) 以太网 S3M1-R2E 走 AP_Proximity_RPLidarS3UDP（PRXn_TYPE=19），协议状态机与本文件相同。
  *
  * Author: Steven Josefs, IAV GmbH
  * Based on the LightWare SF40C ArduPilot device driver from Randy Mackay
@@ -53,8 +57,8 @@
 #include "AP_Proximity_RPLidarA2.h"
 
 #include <AP_HAL/AP_HAL.h>
-#include "AP_Proximity_RPLidarA2.h"
 #include <AP_InternalError/AP_InternalError.h>
+#include <AP_SerialManager/AP_SerialManager.h>
 
 #include <ctype.h>
 #include <stdio.h>
@@ -64,9 +68,9 @@
 
 #include <GCS_MAVLink/GCS.h>
 #if RP_DEBUG_LEVEL
-  #define Debug(level, fmt, args ...)  do { if (level <= RP_DEBUG_LEVEL) { GCS_SEND_TEXT(MAV_SEVERITY_INFO, fmt, ## args); } } while (0)
+#define Debug(level, fmt, args ...)  do { if (level <= RP_DEBUG_LEVEL) { GCS_SEND_TEXT(MAV_SEVERITY_INFO, fmt, ## args); } } while (0)
 #else
-  #define Debug(level, fmt, args ...)
+#define Debug(level, fmt, args ...)
 #endif
 
 #define COMM_ACTIVITY_TIMEOUT_MS        200
@@ -110,6 +114,78 @@
 
 extern const AP_HAL::HAL& hal;
 
+AP_Proximity_RPLidarA2::AP_Proximity_RPLidarA2(AP_Proximity &_frontend,
+        AP_Proximity::Proximity_State &prox_state,
+        AP_Proximity_Params &_params,
+        uint8_t serial_instance) :
+    AP_Proximity_Backend_Serial(_frontend, prox_state, _params, serial_instance)
+{
+    // Backend_Serial::begin() runs inside the base constructor, where this
+    // override of rxspace() is not yet active. Re-begin so S3's ~70 KB/s
+    // dense stream has an 8 KB RX buffer. A1/A2/S1 use the same port and
+    // only gain spare RAM.
+    if (_uart != nullptr) {
+        const uint32_t baud = AP::serialmanager().find_baudrate(AP_SerialManager::SerialProtocol_Lidar360, serial_instance);
+        _uart->begin(baud, rxspace(), 0);
+    }
+}
+
+AP_Proximity_RPLidarA2::AP_Proximity_RPLidarA2(AP_Proximity &_frontend,
+        AP_Proximity::Proximity_State &prox_state,
+        AP_Proximity_Params &_params) :
+    AP_Proximity_Backend_Serial(_frontend, prox_state, _params)
+{
+}
+
+uint32_t AP_Proximity_RPLidarA2::transport_available() const
+{
+    if (_uart == nullptr) {
+        return 0;
+    }
+    return _uart->available();
+}
+
+uint32_t AP_Proximity_RPLidarA2::transport_read(uint8_t *buf, uint32_t maxlen)
+{
+    if (_uart == nullptr || buf == nullptr || maxlen == 0U) {
+        return 0;
+    }
+    const uint16_t n = uint16_t(MIN(maxlen, uint32_t(0xFFFFU)));
+    const ssize_t got = _uart->read(buf, n);
+    if (got <= 0) {
+        return 0;
+    }
+    return uint32_t(got);
+}
+
+void AP_Proximity_RPLidarA2::transport_write(const uint8_t *buf, uint32_t len)
+{
+    if (_uart == nullptr || buf == nullptr || len == 0U) {
+        return;
+    }
+    _uart->write(buf, len);
+}
+
+void AP_Proximity_RPLidarA2::transport_discard_rx()
+{
+    if (_uart != nullptr) {
+        _uart->discard_input();
+    }
+}
+
+void AP_Proximity_RPLidarA2::note_transport_connected()
+{
+    // UDP has no boot banner to wait out. Backdate the reset timestamp so
+    // this same update sends GET_DEVICE_INFO. UART never calls this.
+    const uint32_t now = AP_HAL::millis();
+    _last_reset_ms = now - 3001U;
+}
+
+void AP_Proximity_RPLidarA2::s3_note_step()
+{
+    _s3_step_ms = AP_HAL::millis();
+}
+
 void AP_Proximity_RPLidarA2::try_send_s3_gcs_pending()
 {
 #if HAL_GCS_ENABLED && AP_HAVE_GCS_SEND_TEXT
@@ -133,7 +209,7 @@ void AP_Proximity_RPLidarA2::try_send_s3_gcs_pending()
 
 void AP_Proximity_RPLidarA2::update(void)
 {
-    if (_uart == nullptr) {
+    if (!transport_ready()) {
         return;
     }
 
@@ -146,6 +222,19 @@ void AP_Proximity_RPLidarA2::update(void)
         send_request_for_device_info();
         _state = State::AWAITING_RESPONSE;
         _byte_count = 0;
+    }
+
+    // Ethernet S3E may not emit the UART boot banner. If GET_INFO never
+    // arrives, still bring the known S3 express path up.
+    if (prefer_s3_express() && model == Model::UNKNOWN && !_s3_forced_express &&
+        (now_ms - _last_reset_ms) > 4000U &&
+        (_state == State::RESET || _state == State::AWAITING_RESPONSE)) {
+        _s3_forced_express = true;
+        model = Model::S3;
+        _s3_bootstrap = S3Bootstrap::SentHealth;
+        _byte_count = 0;
+        send_request_for_health();
+        _state = State::AWAITING_RESPONSE;
     }
 
     if (_state == State::S3_WAIT_MOTOR_SETTLE) {
@@ -164,14 +253,20 @@ void AP_Proximity_RPLidarA2::update(void)
     get_readings();
 
     // check for timeout and set health status
-    if (AP_HAL::millis() - _last_distance_received_ms > COMM_ACTIVITY_TIMEOUT_MS) {
+    if (now_ms - _last_distance_received_ms > COMM_ACTIVITY_TIMEOUT_MS) {
         set_status(AP_Proximity::Status::NoData);
         Debug(1, "LIDAR NO DATA");
-        if (AP_HAL::millis() - _last_reset_ms > 10000) {
+        if (model == Model::S3) {
+            // Do not RESET a live dense stream on the legacy 10s timer.
+            // s3_manage_link retries the current step, then soft-restarts
+            // EXPRESS, and only power-cycles the protocol after a long stall.
+            s3_manage_link(now_ms);
+        } else if (now_ms - _last_reset_ms > 10000) {
             reset_rplidar();
         }
     } else {
         set_status(AP_Proximity::Status::Good);
+        _s3_step_retries = 0;
     }
 }
 
@@ -213,16 +308,17 @@ float AP_Proximity_RPLidarA2::distance_min() const
 
 void AP_Proximity_RPLidarA2::reset_rplidar()
 {
-    if (_uart != nullptr && model == Model::S3) {
+    if (model == Model::S3) {
         send_stop();
-        _uart->flush();
+        transport_discard_rx();
     }
     static const uint8_t tx_buffer[2] {RPLIDAR_PREAMBLE, RPLIDAR_CMD_RESET};
-    _uart->write(tx_buffer, 2);
+    transport_write(tx_buffer, 2);
     Debug(1, "LIDAR reset");
     // To-Do: ensure delay of 8m after sending reset request
     _last_reset_ms =  AP_HAL::millis();
     reset();
+    s3_note_step();
 }
 
 // set Lidar into legacy SCAN mode (non-S3, or S3 fallback path if device_info used legacy scan)
@@ -230,8 +326,9 @@ void AP_Proximity_RPLidarA2::send_scan_mode_request()
 {
     const uint8_t cmd = RPLIDAR_CMD_SCAN;
     const uint8_t tx_buffer[2] {RPLIDAR_PREAMBLE, cmd};
-    _uart->write(tx_buffer, 2);
+    transport_write(tx_buffer, 2);
     Debug(1, "Sent SCAN mode request");
+    s3_note_step();
 }
 
 void AP_Proximity_RPLidarA2::send_s3_express_scan_dense()
@@ -247,31 +344,27 @@ void AP_Proximity_RPLidarA2::send_s3_express_scan_dense()
     send_command_with_payload_xor(RPLIDAR_CMD_EXPRESS_SCAN, payload, sizeof(payload));
     Debug(1, "Sent S3 EXPRESS_SCAN dense (BOOST)");
     _s3_pending_gcs_express_msg = true;
+    _s3_scan_requested = true;
+    _s3_bootstrap = S3Bootstrap::None;
+    s3_note_step();
 }
 
 void AP_Proximity_RPLidarA2::send_stop()
 {
     static const uint8_t tx_buffer[2] {RPLIDAR_PREAMBLE, RPLIDAR_CMD_STOP};
-    _uart->write(tx_buffer, 2);
+    transport_write(tx_buffer, 2);
     Debug(1, "Sent STOP");
 }
 
 void AP_Proximity_RPLidarA2::send_command_with_payload_xor(const uint8_t cmd, const void *payload, const uint8_t payload_len)
 {
-    if (_uart == nullptr || payload_len > 32U || ((cmd & RPLIDAR_CMDFLAG_HAS_PAYLOAD) == 0U)) {
+    uint8_t buf[3U + 32U + 1U];
+    const uint8_t n = AP_RPLidar::build_payload_cmd(buf, sizeof(buf), cmd,
+                      static_cast<const uint8_t *>(payload), payload_len);
+    if (n == 0U) {
         return;
     }
-    uint8_t buf[3U + 32U + 1U];
-    buf[0] = RPLIDAR_PREAMBLE;
-    buf[1] = cmd;
-    buf[2] = payload_len;
-    memcpy(&buf[3], payload, payload_len);
-    uint8_t xsum = 0;
-    for (uint8_t i = 0; i < 3U + payload_len; i++) {
-        xsum ^= buf[i];
-    }
-    buf[3U + payload_len] = xsum;
-    _uart->write(buf, 3U + payload_len + 1U);
+    transport_write(buf, n);
 }
 
 void AP_Proximity_RPLidarA2::send_s3_motor_rpm(const uint16_t rpm)
@@ -284,23 +377,26 @@ void AP_Proximity_RPLidarA2::send_s3_motor_rpm(const uint16_t rpm)
 void AP_Proximity_RPLidarA2::send_request_for_health()
 {
     static const uint8_t tx_buffer[2] {RPLIDAR_PREAMBLE, RPLIDAR_CMD_GET_DEVICE_HEALTH};
-    _uart->write(tx_buffer, 2);
+    transport_write(tx_buffer, 2);
     Debug(1, "Sent health request");
+    s3_note_step();
 }
 
 void AP_Proximity_RPLidarA2::send_request_for_sample_rate()
 {
     static const uint8_t tx_buffer[2] {RPLIDAR_PREAMBLE, RPLIDAR_CMD_GET_SAMPLERATE};
-    _uart->write(tx_buffer, 2);
+    transport_write(tx_buffer, 2);
     Debug(1, "Sent sample rate request");
+    s3_note_step();
 }
 
 // send request for device information
 void AP_Proximity_RPLidarA2::send_request_for_device_info()
 {
     static const uint8_t tx_buffer[2] {RPLIDAR_PREAMBLE, RPLIDAR_CMD_GET_DEVICE_INFO};
-    _uart->write(tx_buffer, 2);
+    transport_write(tx_buffer, 2);
     Debug(1, "Sent device information request");
+    s3_note_step();
 }
 
 void AP_Proximity_RPLidarA2::consume_bytes(uint16_t count)
@@ -321,12 +417,12 @@ void AP_Proximity_RPLidarA2::reset()
     _state = State::RESET;
     _byte_count = 0;
     _s3_bootstrap = S3Bootstrap::None;
-    _s3_dense_have_prev = false;
-    _s3_dense_last_sync = 0;
-    _s3_express_sample_us = 0;
+    _s3_step_retries = 0;
+    _s3_scan_requested = false;
+    _s3_forced_express = false;
+    AP_RPLidar::dense_reset(_dense);
     _s3_pending_gcs_connected_msg = false;
     _s3_pending_gcs_express_msg = false;
-    memset(_s3_dense_prev_payload, 0, sizeof(_s3_dense_prev_payload));
 }
 
 bool AP_Proximity_RPLidarA2::make_first_byte_in_payload(uint8_t desired_byte)
@@ -352,26 +448,37 @@ void AP_Proximity_RPLidarA2::get_readings()
 {
     Debug(2, "             CURRENT STATE: %u ", (unsigned)_state);
 
+    // After STOP+RESET, scan bytes still in the FIFO can look like the
+    // "RP..." banner. Drop them briefly; GET_INFO at 3s covers a missed banner.
+    if (model == Model::S3 && _state == State::RESET &&
+        (AP_HAL::millis() - _last_reset_ms) < 100U) {
+        transport_discard_rx();
+        _byte_count = 0;
+        return;
+    }
+
     if (_state == State::S3_WAIT_MOTOR_SETTLE) {
         uint8_t dump[128];
-        while (_uart->available() > 0) {
-            const uint32_t n = MIN((uint32_t)_uart->available(), (uint32_t)sizeof(dump));
-            (void)_uart->read(dump, n);
+        while (transport_available() > 0U) {
+            const uint32_t n = MIN(transport_available(), uint32_t(sizeof(dump)));
+            if (transport_read(dump, n) == 0U) {
+                break;
+            }
         }
         return;
     }
 
-    const uint32_t nbytes = _uart->available();
+    const uint32_t nbytes = transport_available();
     if (nbytes == 0) {
         return;
     }
-    const uint32_t bytes_to_read = MIN(nbytes, sizeof(_payload)-_byte_count);
+    const uint32_t bytes_to_read = MIN(nbytes, uint32_t(sizeof(_payload) - _byte_count));
     if (bytes_to_read == 0) {
         INTERNAL_ERROR(AP_InternalError::error_t::flow_of_control);
         reset();
         return;
     }
-    const uint32_t bytes_read = _uart->read(&_payload[_byte_count], bytes_to_read);
+    const uint32_t bytes_read = transport_read(&_payload[_byte_count], bytes_to_read);
     if (bytes_read == 0) {
         // this is bad; we were told there were bytes available
         INTERNAL_ERROR(AP_InternalError::error_t::flow_of_control);
@@ -391,7 +498,7 @@ void AP_Proximity_RPLidarA2::get_readings()
         }
         previous_loop_byte_count = _byte_count;
 
-        switch(_state){
+        switch (_state) {
         case State::RESET: {
             // looking for 0x52 at start of buffer; the 62 following
             // bytes are "information"
@@ -405,7 +512,7 @@ void AP_Proximity_RPLidarA2::get_readings()
             // optionally spit out via mavlink the 63-bytes of cruft
             // that is spat out on device reset
             Debug(1, "Got RPLidar Information");
-            char xbuffer[64]{};
+            char xbuffer[64] {};
             memcpy((void*)xbuffer, (void*)&_payload.information, 63);
             GCS_SEND_TEXT(MAV_SEVERITY_INFO, "RPLidar: (%s)", xbuffer);
 #endif
@@ -419,9 +526,11 @@ void AP_Proximity_RPLidarA2::get_readings()
         }
         case State::AWAITING_RESPONSE:
             if (_payload[0] != RPLIDAR_PREAMBLE) {
-                // this is a protocol error.  Reset.
-                reset();
-                return;
+                // Noise before a descriptor. Slide to the next 0xA5
+                // instead of abandoning the session (that used to force a
+                // hunt for the boot banner and, on S3, a 10s RESET).
+                consume_bytes(1);
+                break;
             }
 
             // descriptor packet has 7 byte in total
@@ -447,18 +556,25 @@ void AP_Proximity_RPLidarA2::get_readings()
             Debug(2,"LIDAR descriptor found");
             if (memcmp((void*)&_payload[0], SCAN_DATA_DESCRIPTOR, sizeof(_descriptor)) == 0) {
                 _state = State::AWAITING_SCAN_DATA;
+                consume_bytes(sizeof(_descriptor));
             } else if (memcmp((void*)&_payload[0], DENSE_CAPSULE_DESCRIPTOR, sizeof(_descriptor)) == 0) {
                 _state = State::AWAITING_DENSE_CAPSULE;
+                _s3_valid_capsule_ms = AP_HAL::millis();
+                _last_distance_received_ms = _s3_valid_capsule_ms;
+                consume_bytes(sizeof(_descriptor));
             } else if (memcmp((void*)&_payload[0], DEVICE_INFO_DESCRIPTOR, sizeof(_descriptor)) == 0) {
                 _state = State::AWAITING_DEVICE_INFO;
+                consume_bytes(sizeof(_descriptor));
             } else if (memcmp((void*)&_payload[0], HEALTH_DESCRIPTOR, sizeof(_descriptor)) == 0) {
                 _state = State::AWAITING_HEALTH;
+                consume_bytes(sizeof(_descriptor));
             } else if (memcmp((void*)&_payload[0], SAMPLERATE_DESCRIPTOR, sizeof(_descriptor)) == 0) {
                 _state = State::AWAITING_SAMPLE_RATE;
+                consume_bytes(sizeof(_descriptor));
             } else {
-                // unknown descriptor.  Ignore it.
+                // 0xA5 was not the start of a known descriptor. Slide one byte.
+                consume_bytes(1);
             }
-            consume_bytes(sizeof(_descriptor));
             break;
 
         case State::AWAITING_DEVICE_INFO:
@@ -477,13 +593,35 @@ void AP_Proximity_RPLidarA2::get_readings()
             consume_bytes(sizeof(_payload.sensor_scan));
             break;
 
-        case State::AWAITING_DENSE_CAPSULE:
-            if (_byte_count < RPLIDAR_DENSE_CAPSULE_BYTES) {
-                return;
+        case State::AWAITING_DENSE_CAPSULE: {
+            // Resync on the 0xA/0x5 nibbles. A checksum miss is a false
+            // header: slide one byte (checksum fallback) and keep the
+            // previous good capsule. Do not RESET the lidar here.
+            const uint32_t start_us = AP_HAL::micros();
+            uint8_t parsed = 0;
+            while (_byte_count >= 2U) {
+                if (parsed >= 24U || (AP_HAL::micros() - start_us) > 2000U) {
+                    return;
+                }
+                if (!AP_RPLidar::dense_sync_ok(&_payload[0])) {
+                    consume_bytes(1);
+                    continue;
+                }
+                if (_byte_count < RPLIDAR_DENSE_CAPSULE_BYTES) {
+                    return;
+                }
+                if (!AP_RPLidar::dense_checksum_ok(&_payload[0])) {
+                    consume_bytes(1);
+                    continue;
+                }
+                _s3_valid_capsule_ms = AP_HAL::millis();
+                _last_distance_received_ms = _s3_valid_capsule_ms;
+                parse_response_dense_capsule();
+                consume_bytes(RPLIDAR_DENSE_CAPSULE_BYTES);
+                parsed++;
             }
-            parse_response_dense_capsule();
-            consume_bytes(RPLIDAR_DENSE_CAPSULE_BYTES);
-            break;
+            return;
+        }
 
         case State::AWAITING_HEALTH:
             if (_byte_count < sizeof(_payload.sensor_health)) {
@@ -547,14 +685,23 @@ void AP_Proximity_RPLidarA2::parse_response_device_info()
         }
         break;
     }
+    if (model != Model::S3 && prefer_s3_express()) {
+        // S3M1-R2E is this backend's only device. An unexpected model byte
+        // still speaks Dense Express; record it as S3 so recovery stays on
+        // the express path.
+        model = Model::S3;
+        device_type = "S3E";
+    }
     GCS_SEND_TEXT(MAV_SEVERITY_INFO, "RPLidar %s hw=%u fw=%u.%u", device_type, _payload.device_info.hardware, _payload.device_info.firmware_minor, _payload.device_info.firmware_major);
     // S2/S3 UART default is 1 Mbps in Slamtec SDK; model 0x82 uses 460800.
     if (model == Model::S3) {
         _s3_pending_gcs_connected_msg = true;
-        if (model_id == 0x82) {
-            GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "RPLidar S3: set this serial port to 460800 baud");
-        } else {
-            GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "RPLidar S3: set this serial port to 1000000 baud");
+        if (_uart != nullptr) {
+            if (model_id == 0x82) {
+                GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "RPLidar S3: set this serial port to 460800 baud");
+            } else {
+                GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "RPLidar S3: set this serial port to 1000000 baud");
+            }
         }
         _s3_bootstrap = S3Bootstrap::SentHealth;
         send_request_for_health();
@@ -570,28 +717,37 @@ void AP_Proximity_RPLidarA2::handle_proximity_sample(const float angle_deg, cons
 {
     const float dm = MIN(distance_m, distance_max());
     _last_distance_received_ms = AP_HAL::millis();
-    if (!ignore_reading(angle_deg, dm)) {
-        const AP_Proximity_Boundary_3D::Face face = frontend.boundary.get_face(angle_deg);
-
-        if (face != _last_face) {
-            if (_last_distance_valid) {
-                frontend.boundary.set_face_attributes(_last_face, _last_angle_deg, _last_distance_m, state.instance);
-            } else {
-                frontend.boundary.reset_face(face, state.instance);
-            }
-
-            _last_face = face;
-            _last_distance_valid = false;
-        }
-        if (dm > distance_min()) {
-            if (!_last_distance_valid || (dm < _last_distance_m)) {
-                _last_distance_m = dm;
-                _last_distance_valid = true;
-                _last_angle_deg = angle_deg;
-            }
-            database_push(_last_angle_deg, _last_distance_m);
-        }
+    if (note_face_sample(angle_deg, dm)) {
+        database_push(_last_angle_deg, _last_distance_m);
     }
+}
+
+bool AP_Proximity_RPLidarA2::note_face_sample(const float angle_deg, const float distance_m)
+{
+    if (ignore_reading(angle_deg, distance_m)) {
+        return false;
+    }
+    const AP_Proximity_Boundary_3D::Face face = frontend.boundary.get_face(angle_deg);
+
+    if (face != _last_face) {
+        if (_last_distance_valid) {
+            frontend.boundary.set_face_attributes(_last_face, _last_angle_deg, _last_distance_m, state.instance);
+        } else {
+            frontend.boundary.reset_face(face, state.instance);
+        }
+
+        _last_face = face;
+        _last_distance_valid = false;
+    }
+    if (!(distance_m > distance_min())) {
+        return false;
+    }
+    if (!_last_distance_valid || (distance_m < _last_distance_m)) {
+        _last_distance_m = distance_m;
+        _last_distance_valid = true;
+        _last_angle_deg = angle_deg;
+    }
+    return true;
 }
 
 void AP_Proximity_RPLidarA2::parse_response_data()
@@ -627,88 +783,36 @@ void AP_Proximity_RPLidarA2::parse_response_data()
 
 void AP_Proximity_RPLidarA2::parse_response_dense_capsule()
 {
-    const uint8_t *b = &_payload[0];
+    // Caller has already accepted the XOR checksum. Activity time is
+    // refreshed there so an all-zero scan still counts as a live link.
+    AP_RPLidar::Point pts[AP_RPLidar::DENSE_POINTS];
+    const uint8_t n = AP_RPLidar::dense_emit(_dense, &_payload[0], pts, AP_RPLidar::DENSE_POINTS);
+    const float angle_sign = (params.orientation == 1) ? -1.0f : 1.0f;
 
-    if ((b[0] >> 4) != RPLIDAR_RESP_MEASUREMENT_EXP_SYNC_1 ||
-        (b[1] >> 4) != RPLIDAR_RESP_MEASUREMENT_EXP_SYNC_2) {
-        _s3_dense_have_prev = false;
-        return;
-    }
-
-    const uint8_t recv_chksum = (b[0] & 0x0FU) | ((b[1] & 0x0FU) << 4);
-    uint8_t calc = 0;
-    for (uint16_t i = 2; i < RPLIDAR_DENSE_CAPSULE_BYTES; i++) {
-        calc ^= b[i];
-    }
-    if (recv_chksum != calc) {
-        _s3_dense_have_prev = false;
-        Debug(1, "dense capsule checksum err");
-        return;
-    }
-
-    const _dense_capsule_meas * const curr = reinterpret_cast<const _dense_capsule_meas *>(b);
-    const uint16_t start_cur = curr->start_angle_sync_q6;
-
-    if ((start_cur & RPLIDAR_RESP_MEASUREMENT_EXP_SYNCBIT) != 0U) {
-        _s3_dense_have_prev = false;
-        _s3_dense_last_sync = 0;
-    }
-
-    if (_s3_dense_have_prev) {
-        const _dense_capsule_meas * const prev = reinterpret_cast<const _dense_capsule_meas *>(_s3_dense_prev_payload);
-
-        const int32_t prevStart_q8 = int32_t((prev->start_angle_sync_q6 & 0x7FFFU) << 2);
-        const int32_t currStart_q8 = int32_t((start_cur & 0x7FFFU) << 2);
-
-        int32_t diff_q8 = currStart_q8 - prevStart_q8;
-        if (prevStart_q8 > currStart_q8) {
-            diff_q8 += int32_t(360 << 8);
+    float closest_m = 0.0f;
+    float closest_ang = 0.0f;
+    bool have_closest = false;
+    for (uint8_t i = 0; i < n; i++) {
+        const float angle_deg = wrap_360(pts[i].angle_deg * angle_sign + params.yaw_correction);
+        const float dm = MIN(pts[i].distance_m, distance_max());
+        if (!note_face_sample(angle_deg, dm)) {
+            continue;
         }
-
-        uint32_t sus = _s3_express_sample_us;
-        if (sus < 20U) {
-            sus = 55U;
-        }
-        const int64_t maxDiff_q8 = (int64_t(360) * 100LL * 40LL / (1000000LL / int64_t(sus))) << 8;
-        if (int64_t(diff_q8) > maxDiff_q8) {
-            memcpy(_s3_dense_prev_payload, b, RPLIDAR_DENSE_CAPSULE_BYTES);
-            _s3_dense_have_prev = true;
-            return;
-        }
-
-        const int32_t angleInc_q16 = (diff_q8 << 8) / 40;
-        int32_t currentAngle_raw_q16 = (prevStart_q8 << 8);
-
-        const float angle_sign = (params.orientation == 1) ? -1.0f : 1.0f;
-
-        for (unsigned pos = 0; pos < 40U; pos++) {
-            const uint16_t dist_mm = prev->cabins[pos].distance_mm;
-
-            const int32_t angle_q6 = (currentAngle_raw_q16 >> 10);
-            int32_t syncBit = (((currentAngle_raw_q16 + angleInc_q16) % (360 << 16)) < (angleInc_q16 << 1)) ? 1 : 0;
-            syncBit = (syncBit ^ _s3_dense_last_sync) & syncBit;
-            _s3_dense_last_sync = (int8_t)syncBit;
-
-            currentAngle_raw_q16 += angleInc_q16;
-
-            int32_t aq = angle_q6;
-            if (aq < 0) {
-                aq += (360 << 6);
-            }
-            if (aq >= (360 << 6)) {
-                aq -= (360 << 6);
-            }
-
-            if (dist_mm != 0U) {
-                const float angle_deg = wrap_360((aq / 64.0f) * angle_sign + params.yaw_correction);
-                const float dist_m = float(dist_mm) * 0.001f;
-                handle_proximity_sample(angle_deg, dist_m);
-            }
+        if (!have_closest || dm < closest_m) {
+            have_closest = true;
+            closest_m = dm;
+            closest_ang = angle_deg;
         }
     }
-
-    memcpy(_s3_dense_prev_payload, b, RPLIDAR_DENSE_CAPSULE_BYTES);
-    _s3_dense_have_prev = true;
+    // One OA push per capsule. Pushing all ~32k ranges/s stalls the
+    // flight loop, the UART overruns, and the 10s reset then kills scan.
+    if (have_closest) {
+        Vector3f current_pos;
+        Matrix3f body_to_ned;
+        if (database_prepare_for_push(current_pos, body_to_ned)) {
+            database_push(closest_ang, 0.0f, closest_m, AP_HAL::millis(), current_pos, body_to_ned);
+        }
+    }
 }
 
 void AP_Proximity_RPLidarA2::parse_response_health()
@@ -741,7 +845,7 @@ void AP_Proximity_RPLidarA2::parse_response_health()
 void AP_Proximity_RPLidarA2::parse_response_sample_rate()
 {
     _last_distance_received_ms = AP_HAL::millis();
-    _s3_express_sample_us = _payload.sample_rate.express_sample_duration_us;
+    _dense.express_sample_us = _payload.sample_rate.express_sample_duration_us;
 
     if (model == Model::S3) {
         GCS_SEND_TEXT(MAV_SEVERITY_INFO, "RPLidar S3: sample std=%uus expr=%uus",
@@ -754,6 +858,83 @@ void AP_Proximity_RPLidarA2::parse_response_sample_rate()
         _s3_bootstrap = S3Bootstrap::SentMotor;
         _state = State::S3_WAIT_MOTOR_SETTLE;
         _s3_deadline_ms = AP_HAL::millis() + RPLIDAR_S3_MOTOR_SETTLE_MS;
+    }
+}
+
+bool AP_Proximity_RPLidarA2::s3_soft_restart()
+{
+    const uint32_t now = AP_HAL::millis();
+    if (now - _s3_soft_restart_ms < 1000U) {
+        return false;
+    }
+    _s3_soft_restart_ms = now;
+    send_stop();
+    transport_discard_rx();
+    _byte_count = 0;
+    _dense.have_prev = false;
+    _dense.last_sync = 0;
+    _state = State::S3_WAIT_MOTOR_SETTLE;
+    _s3_deadline_ms = now + RPLIDAR_S3_MOTOR_SETTLE_MS;
+    _s3_bootstrap = S3Bootstrap::None;
+    s3_note_step();
+    return true;
+}
+
+void AP_Proximity_RPLidarA2::s3_manage_link(const uint32_t now_ms)
+{
+    const uint32_t last_ok = MAX(_last_distance_received_ms, _s3_valid_capsule_ms);
+    if ((now_ms - last_ok) > 8000U && (now_ms - _last_reset_ms) > 8000U) {
+        reset_rplidar();
+        return;
+    }
+
+    const bool waiting = _state == State::AWAITING_RESPONSE ||
+                         _state == State::AWAITING_HEALTH ||
+                         _state == State::AWAITING_DEVICE_INFO ||
+                         _state == State::AWAITING_SAMPLE_RATE;
+    if (waiting && (now_ms - _s3_step_ms) > 500U) {
+        if (_s3_step_retries >= 3U) {
+            if (now_ms - _last_reset_ms > 2000U) {
+                reset_rplidar();
+            }
+            return;
+        }
+        _byte_count = 0;
+        bool sent = false;
+        switch (_s3_bootstrap) {
+        case S3Bootstrap::SentHealth:
+            send_request_for_health();
+            _state = State::AWAITING_RESPONSE;
+            sent = true;
+            break;
+        case S3Bootstrap::SentSampleRate:
+            send_request_for_sample_rate();
+            _state = State::AWAITING_RESPONSE;
+            sent = true;
+            break;
+        case S3Bootstrap::SentMotor:
+            sent = s3_soft_restart();
+            break;
+        case S3Bootstrap::None:
+        default:
+            if (_s3_scan_requested) {
+                sent = s3_soft_restart();
+            } else {
+                send_request_for_device_info();
+                _state = State::AWAITING_RESPONSE;
+                sent = true;
+            }
+            break;
+        }
+        if (sent) {
+            _s3_step_retries++;
+        }
+        return;
+    }
+
+    if ((_state == State::AWAITING_DENSE_CAPSULE || _state == State::AWAITING_SCAN_DATA) &&
+        (now_ms - last_ok) > 1000U) {
+        s3_soft_restart();
     }
 }
 

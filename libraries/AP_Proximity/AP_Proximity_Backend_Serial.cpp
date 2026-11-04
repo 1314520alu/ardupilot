@@ -37,6 +37,14 @@ AP_Proximity_Backend_Serial::AP_Proximity_Backend_Serial(AP_Proximity &_frontend
     }
 }
 
+AP_Proximity_Backend_Serial::AP_Proximity_Backend_Serial(AP_Proximity &_frontend,
+                                                         AP_Proximity::Proximity_State &_state,
+                                                         AP_Proximity_Params &_params) :
+    AP_Proximity_Backend(_frontend, _state, _params)
+{
+    _uart = nullptr;
+}
+
 // static detection function
 // detect if a proximity sensor is connected by looking for a configured serial port
 // serial_instance affects which serial port is used.  Should be 0 or 1 depending on whether this is the 1st or 2nd proximity sensor with a serial interface

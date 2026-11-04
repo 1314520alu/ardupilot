@@ -27,6 +27,9 @@
  * SERIALn_PROTOCOL=Lidar360(11), baud 1000000 (460800 if model byte 0x82), PRXn_TYPE=RPLidarA2(5),
  * and set PRXn_MAX=40 for 40m OA range.
  *
+ * S3 Ethernet (S3M1-R2E) is AP_Proximity_RPLidarS3UDP: PRXn_TYPE=19, same parser,
+ * UDP to the lidar (default 192.168.144.2:8089). Requires networking.
+ *
  * Author: Steven Josefs, IAV GmbH
  * Based on the LightWare SF40C ArduPilot device driver from Randy Mackay
  *
@@ -53,13 +56,22 @@ reboot
 #if AP_PROXIMITY_RPLIDARA2_ENABLED
 
 #include "AP_Proximity_Backend_Serial.h"
+#include "AP_Proximity_RPLidarProtocol.h"
 
 class AP_Proximity_RPLidarA2 : public AP_Proximity_Backend_Serial
 {
 
 public:
 
-    using AP_Proximity_Backend_Serial::AP_Proximity_Backend_Serial;
+    AP_Proximity_RPLidarA2(AP_Proximity &_frontend,
+                           AP_Proximity::Proximity_State &prox_state,
+                           AP_Proximity_Params &_params,
+                           uint8_t serial_instance);
+
+    // No UART. S3E UDP supplies the byte transport.
+    AP_Proximity_RPLidarA2(AP_Proximity &_frontend,
+                           AP_Proximity::Proximity_State &prox_state,
+                           AP_Proximity_Params &_params);
 
     // update state
     void update(void) override;
@@ -67,6 +79,31 @@ public:
     // get maximum and minimum distances (in meters) of sensor
     float distance_max() const override;
     float distance_min() const override;
+
+protected:
+    // Byte transport. Serial uses the UART opened by Backend_Serial.
+    // S3E UDP overrides these and does not own a UART.
+    virtual bool transport_ready() const
+    {
+        return _uart != nullptr;
+    }
+    virtual uint32_t transport_available() const;
+    virtual uint32_t transport_read(uint8_t *buf, uint32_t maxlen);
+    virtual void transport_write(const uint8_t *buf, uint32_t len);
+    virtual void transport_discard_rx();
+    // UDP S3E has no model byte until GET_INFO returns; allow forcing express.
+    virtual bool prefer_s3_express() const
+    {
+        return false;
+    }
+    void note_transport_connected();
+
+    // S3 dense at ~32 kHz needs headroom beyond the baud-sized default.
+    // 8192 bytes is ~80 ms at 1 Mbit/s. A1/A2/S1 are unchanged on the wire.
+    uint16_t rxspace() const override
+    {
+        return 8192;
+    }
 
 private:
 
@@ -112,6 +149,14 @@ private:
     void get_readings();
     void reset_rplidar();
     void reset();
+    void s3_note_step();
+    // STOP, drop RX, then EXPRESS_SCAN after a short settle. False if
+    // called again inside the 1s gate.
+    bool s3_soft_restart();
+    void s3_manage_link(uint32_t now_ms);
+    // Face update shared with legacy SCAN. Returns true when this sample
+    // should also be pushed to the OA database (A1/A2/S1 push every point).
+    bool note_face_sample(float angle_deg, float distance_m);
 
     // remove bytes from read buffer:
     void consume_bytes(uint16_t count);
@@ -124,10 +169,13 @@ private:
     uint32_t  _last_reset_ms;
     S3Bootstrap _s3_bootstrap{S3Bootstrap::None};
     uint32_t _s3_deadline_ms{0};
-    uint16_t _s3_express_sample_us{0};
-    bool _s3_dense_have_prev{false};
-    uint8_t _s3_dense_prev_payload[84];
-    int8_t _s3_dense_last_sync{0};
+    uint32_t _s3_valid_capsule_ms{0};
+    uint32_t _s3_step_ms{0};
+    uint32_t _s3_soft_restart_ms{0};
+    uint8_t _s3_step_retries{0};
+    bool _s3_scan_requested{false};
+    bool _s3_forced_express{false};
+    AP_RPLidar::DenseParse _dense{};
 
     // STATUSTEXT for Mission Planner: deferred until MAVLink active; keep text short ASCII (MP UTF-8 chunking).
     bool _s3_pending_gcs_connected_msg{false};
@@ -145,7 +193,7 @@ private:
         uint8_t firmware_major;
         uint8_t hardware;
         uint8_t serial[16];
-   };
+    };
 
     struct PACKED _sensor_scan {
         uint8_t startbit      : 1;            ///< on the first revolution 1 else 0

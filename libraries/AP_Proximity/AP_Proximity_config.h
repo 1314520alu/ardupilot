@@ -3,6 +3,7 @@
 #include <AP_HAL/AP_HAL_Boards.h>
 #include <GCS_MAVLink/GCS_config.h>
 #include <AP_RangeFinder/AP_RangeFinder_config.h>
+#include <AP_Networking/AP_Networking_Config.h>
 
 #ifndef HAL_PROXIMITY_ENABLED
 #define HAL_PROXIMITY_ENABLED HAL_PROGRAM_SIZE_LIMIT_KB > 1024
@@ -56,6 +57,12 @@
 
 #ifndef AP_PROXIMITY_RPLIDARA2_ENABLED
 #define AP_PROXIMITY_RPLIDARA2_ENABLED AP_PROXIMITY_BACKEND_DEFAULT_ENABLED
+#endif
+
+// Slamtec RPLIDAR S3 Ethernet (S3M1-R2E) over UDP. Same Dense Express
+// parser as the serial driver; needs AP_Networking (Ethernet FC or SITL).
+#ifndef AP_PROXIMITY_RPLIDARS3UDP_ENABLED
+#define AP_PROXIMITY_RPLIDARS3UDP_ENABLED AP_PROXIMITY_BACKEND_DEFAULT_ENABLED && AP_NETWORKING_ENABLED && AP_PROXIMITY_RPLIDARA2_ENABLED
 #endif
 
 #ifndef AP_PROXIMITY_SITL_ENABLED
