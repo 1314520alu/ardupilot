@@ -308,6 +308,7 @@ BUILD_OPTIONS = [
     Feature('Proximity', 'PROXIMITY_MAV', 'AP_PROXIMITY_MAV_ENABLED', 'Enable MAVLink Proximity Sensors', 0, "PROXIMITY"),  # noqa
     Feature('Proximity', 'PROXIMITY_RANGEFINDER', 'AP_PROXIMITY_RANGEFINDER_ENABLED', 'Use RangeFinders as proximity sensors', 0, "PROXIMITY,RANGEFINDER"),  # noqa
     Feature('Proximity', 'PROXIMITY_RPLIDARA2', 'AP_PROXIMITY_RPLIDARA2_ENABLED', 'Enable RPLidarA2 Proximity Sensors', 0, "PROXIMITY"),  # noqa
+    Feature('Proximity', 'PROXIMITY_RPLIDARS3UDP', 'AP_PROXIMITY_RPLIDARS3UDP_ENABLED', 'Enable RPLidar S3 Ethernet UDP Proximity', 0, "PROXIMITY,Networking"),  # noqa
     Feature('Proximity', 'PROXIMITY_TERRARANGERTOWER', 'AP_PROXIMITY_TERARANGERTOWER_ENABLED', 'Enable TerraRangerTower Proximity Sensors', 0, "PROXIMITY"),  # noqa
     Feature('Proximity', 'PROXIMITY_TERRARANGERTOWEREVO', 'AP_PROXIMITY_TERARANGERTOWEREVO_ENABLED', 'Enable TerraRangerTower Evo Proximity Sensors', 0, "PROXIMITY"),  # noqa
     Feature('Proximity', 'PROXIMITY_MR72_ENABLED', 'AP_PROXIMITY_MR72_ENABLED', 'Enable NanoRadar MR72 Proximity Sensors', 0, "PROXIMITY"),  # noqa

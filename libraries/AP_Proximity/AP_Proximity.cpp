@@ -18,6 +18,7 @@
 #if HAL_PROXIMITY_ENABLED
 #include "AP_Proximity_Backend.h"
 #include "AP_Proximity_RPLidarA2.h"
+#include "AP_Proximity_RPLidarS3UDP.h"
 #include "AP_Proximity_TeraRangerTower.h"
 #include "AP_Proximity_TeraRangerTowerEvo.h"
 #include "AP_Proximity_RangeFinder.h"
@@ -166,6 +167,12 @@ void AP_Proximity::init()
                 drivers[instance] = NEW_NOTHROW AP_Proximity_RPLidarA2(*this, state[instance], params[instance], serial_instance);
                 serial_instance++;
             }
+            break;
+#endif
+#if AP_PROXIMITY_RPLIDARS3UDP_ENABLED
+        case Type::RPLidarS3UDP:
+            state[instance].instance = instance;
+            drivers[instance] = NEW_NOTHROW AP_Proximity_RPLidarS3UDP(*this, state[instance], params[instance]);
             break;
 #endif
 #if AP_PROXIMITY_MAV_ENABLED
