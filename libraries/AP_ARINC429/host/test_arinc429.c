@@ -581,6 +581,85 @@ static void test_invalid_sm_clears_fresh(void)
     }
 }
 
+static void test_rs422_label_wire(void)
+{
+    uint32_t ng = 0;
+    uint32_t pdf = 0x629218C1u;
+    uint32_t logical;
+    uint32_t wire;
+    uint32_t bad;
+    uint8_t frame[5];
+    uint8_t legacy[5];
+    uint8_t n = 0;
+    uint8_t rate[5];
+    uint32_t out = 0;
+    a429_frame_dec_t dec;
+    int mismatches = 0;
+    int label;
+
+    expect_true(a429_encode_bnr(0144, 0, A429_SM_NORMAL, 50.0f, &ng) == 1 && ng == 0xE2710064u,
+                "Ng50 logical word");
+    wire = a429_label_wire_swap(ng);
+    expect_true(wire == 0xE2710026u, "Ng octal 144 logical 0x64 becomes wire 0x26");
+    expect_true((wire & 0xFFFFFF00u) == (ng & 0xFFFFFF00u), "only the label byte moves");
+    expect_true(a429_parity_ok(ng) == 1 && a429_parity_ok(wire) == 1, "label reversal keeps odd parity");
+    expect_true(a429_label_wire_swap(wire) == ng, "the swap is its own inverse");
+    logical = a429_label_wire_swap(pdf);
+    expect_true((logical & 0xFFu) == 0203u, "PDF 0x629218C1 decodes label octal 203");
+    expect_true(a429_parity_ok(pdf) == a429_parity_ok(logical), "the PDF word's parity bit is not rewritten");
+
+    expect_true(a429_frame_encode(A429_FRAME_UART429S_C0, &ng, 1, legacy, 5, &n) == 1 &&
+                legacy[0] == 0xC0u && legacy[1] == 0x64u, "FRAME 1 still sends logical 0x64");
+    expect_true(a429_frame_encode(A429_FRAME_RS422_429_1C, &ng, 1, frame, 5, &n) == 1 && n == 5u &&
+                frame[0] == 0xC0u && frame[1] == 0x26u && frame[2] == 0x00u &&
+                frame[3] == 0x71u && frame[4] == 0xE2u, "RS422 frame is C0 26 00 71 E2");
+    a429_frame_dec_init(&dec, A429_FRAME_RS422_429_1C);
+    expect_true(a429_frame_push(&dec, frame, 5, &out, 1) == 1 && out == ng, "RX restores the logical word");
+    bad = ng ^ (1u << 31);
+    expect_true(a429_frame_encode(A429_FRAME_RS422_429_1C, &bad, 1, frame, 5, &n) == 1, "bad parity still frames");
+    a429_frame_dec_init(&dec, A429_FRAME_RS422_429_1C);
+    expect_true(a429_frame_push(&dec, frame, 5, &out, 1) == 1, "bad parity is delivered");
+    expect_true(a429_parity_ok(out) == 0 && (out & 0xFFu) == 0144u, "RX does not repair parity");
+
+    for (label = 0; label < 256; label++) {
+        uint32_t base = a429_apply_odd_parity((uint32_t)label | (0x1555u << 13) | ((uint32_t)A429_SM_NORMAL << 29));
+        uint32_t flipped = base ^ (1u << 31);
+        uint32_t on_wire = a429_label_wire_swap(base);
+        uint32_t back = a429_label_wire_swap(on_wire);
+        uint32_t bad_wire = a429_label_wire_swap(flipped);
+        uint8_t encoded[5];
+        uint8_t decoded_n = 0;
+        uint32_t decoded = 0;
+        a429_frame_dec_t round;
+        if (back != base || (on_wire & 0xFFu) != a429_label_bit_reverse((uint8_t)label) ||
+            (on_wire & 0xFFFFFF00u) != (base & 0xFFFFFF00u) ||
+            a429_parity_ok(base) != 1 || a429_parity_ok(on_wire) != 1 ||
+            a429_parity_ok(flipped) != 0 || a429_parity_ok(bad_wire) != 0 ||
+            a429_label_wire_swap(bad_wire) != flipped) {
+            mismatches++;
+            continue;
+        }
+        if (a429_frame_encode(A429_FRAME_RS422_429_1C, &base, 1, encoded, 5, &decoded_n) != 1 ||
+            decoded_n != 5u || encoded[1] != a429_label_bit_reverse((uint8_t)label)) {
+            mismatches++;
+            continue;
+        }
+        a429_frame_dec_init(&round, A429_FRAME_RS422_429_1C);
+        if (a429_frame_push(&round, encoded, 5, &decoded, 1) != 1 || decoded != base) {
+            mismatches++;
+        }
+    }
+    expect_true(mismatches == 0, "all 256 labels round-trip and keep parity");
+    expect_true(a429_rs422_rate_encode(A429_RS422_RATE_100K, rate, 5, &n) == 1 &&
+                rate[0] == 0xCDu && rate[1] == 0x00u && rate[2] == 0x00u &&
+                rate[3] == 0x55u && rate[4] == 0x55u, "100 kbps command bytes");
+    expect_true(a429_rs422_rate_encode(A429_RS422_RATE_50K, rate, 5, &n) == 1 && rate[1] == 0x03u,
+                "50 kbps command bytes");
+    expect_true(a429_rs422_rate_encode(A429_RS422_RATE_12K5, rate, 5, &n) == 1 && rate[1] == 0x07u,
+                "12.5 kbps command bytes");
+    expect_true(a429_rs422_rate_encode(9u, rate, 5, &n) == 0, "an unknown rate encodes nothing");
+}
+
 int a429_host_tests(void);
 
 int a429_host_tests(void)
@@ -595,6 +674,7 @@ int a429_host_tests(void)
     test_carrier_interface();
     test_disc_sm_matrix();
     test_invalid_sm_clears_fresh();
+    test_rs422_label_wire();
     if (g_fails == 0) {
         printf("RESULT: all passed\n");
     } else {

@@ -45,9 +45,16 @@
 #define A429_FRAME_NONE 0u
 /* Provisional UART429-S profile: 0xC0 plus the logical codec word,
  * little-endian. The label integer is not bit-reversed and no CD rate
- * command is generated. RS422-429-1C page 4 requires a different label
- * byte on the wire; this value does not select that profile. */
+ * command is generated. Persisted value 1 keeps this meaning. */
 #define A429_FRAME_UART429S_C0 1u
+/* RS422-429-1C manual, pages 3 and 4. Same C0 plus four little-endian
+ * bytes, but the low byte is the label with its eight bits reversed.
+ * Not selected by value 1. Not a claim that the NT1-M board matches it. */
+#define A429_FRAME_RS422_429_1C 2u
+/* Pure encoders for the three page-3 rate commands. Nothing schedules them. */
+#define A429_RS422_RATE_100K 0u
+#define A429_RS422_RATE_50K 1u
+#define A429_RS422_RATE_12K5 2u
 
 #define A429_TCP_TX_CAP 32u
 #define A429_TCP_RX_CAP 64u

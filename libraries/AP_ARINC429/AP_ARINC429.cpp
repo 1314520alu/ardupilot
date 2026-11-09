@@ -142,8 +142,8 @@ const AP_Param::GroupInfo AP_ARINC429::var_info[] = {
 
     // @Param: FRAME
     // @DisplayName: Provisional byte framing
-    // @Description: 0 leaves the TCP bytes uninterpreted. 1 opts into the provisional UART429-S profile: C0 plus the codec logical word little-endian, label integer not bit-reversed, and no CD rate command. The RS422-429-1C manual dated 2026-01-18, pages 3 and 4, describes a C0 frame whose label byte is bit-reversed when decoded. This value does not select that wire profile and does not enable transmission by itself.
-    // @Values: 0:None,1:UART429-S_C0_provisional
+    // @Description: 0 leaves the TCP bytes uninterpreted. 1 is the provisional UART429-S profile and still sends the codec logical word with the label integer not bit-reversed. 2 is the RS422-429-1C profile from the 2026-01-18 manual pages 3 and 4: the same C0 frame, with only the label byte bit-reversed. Neither value sends a CD rate command or enables transmission by itself. The NT1-M path is not hardware-validated.
+    // @Values: 0:None,1:UART429-S_C0_provisional,2:RS422-429-1C
     // @User: Advanced
     AP_GROUPINFO("FRAME", 15, AP_ARINC429, _frame, 0),
 
@@ -192,7 +192,7 @@ void AP_ARINC429::apply_params(void)
     if (sdi < 0 || sdi > 3) {
         sdi = 0;
     }
-    a429_link_set_sdi(&_core.link, (uint8_t)sdi);
+    a429_core_set_sdi(&_core, (uint8_t)sdi);
     a429_link_set_timeout_us(&_core.link, 0, timeout_ms_to_us(_to_ng_ms.get()));
     a429_link_set_timeout_us(&_core.link, 1, timeout_ms_to_us(_to_np_ms.get()));
     a429_link_set_timeout_us(&_core.link, 2, timeout_ms_to_us(_to_t45_ms.get()));
@@ -214,8 +214,16 @@ void AP_ARINC429::apply_params(void)
         _core.endpoint.carrier = A429_CARRIER_UNSPECIFIED;
     }
     a429_tcp_configure(&_core.tcp, 1, _core.endpoint.remote_ipv4, _core.endpoint.remote_port);
-    a429_core_set_frame(&_core, _frame.get() == (int8_t)A429_FRAME_UART429S_C0 ?
-                        A429_FRAME_UART429S_C0 : A429_FRAME_NONE);
+    {
+        int8_t frame = _frame.get();
+        uint8_t profile = A429_FRAME_NONE;
+        if (frame == (int8_t)A429_FRAME_UART429S_C0) {
+            profile = A429_FRAME_UART429S_C0;
+        } else if (frame == (int8_t)A429_FRAME_RS422_429_1C) {
+            profile = A429_FRAME_RS422_429_1C;
+        }
+        a429_core_set_frame(&_core, profile);
+    }
 }
 
 #if AP_NETWORKING_ENABLED
@@ -435,7 +443,7 @@ void AP_ARINC429::sim_clear_tx(void)
 bool AP_ARINC429::get_fresh_eu(uint8_t rx_index, float &eu) const
 {
     float value;
-    if (a429_link_fresh_eu(&_core.link, rx_index, &value) != 1) {
+    if (a429_core_fresh_eu(&_core, rx_index, &value) != 1) {
         return false;
     }
     eu = value;
@@ -445,7 +453,7 @@ bool AP_ARINC429::get_fresh_eu(uint8_t rx_index, float &eu) const
 bool AP_ARINC429::get_fresh_disc(uint8_t rx_index, int16_t &data) const
 {
     int16_t value;
-    if (a429_link_fresh_disc(&_core.link, rx_index, &value) != 1) {
+    if (a429_core_fresh_disc(&_core, rx_index, &value) != 1) {
         return false;
     }
     data = value;

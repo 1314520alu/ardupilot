@@ -86,6 +86,23 @@ void a429_tcp_set_lock(a429_tcp_t *tcp, void (*lock)(void *ctx), void (*unlock)(
     tcp->lock_ctx = ctx;
 }
 
+void a429_tcp_abandon_hold(a429_tcp_t *tcp)
+{
+    if (tcp == 0) {
+        return;
+    }
+    tcp_lock(tcp);
+    if (tcp->tx_off > 0u && tcp->tx_off < tcp->tx_len) {
+        /* A prefix of the previous profile is already in the socket.
+         * The owner thread closes it. This call does not. */
+        tcp->force_close = 1;
+    }
+    tcp_drop_tx(tcp);
+    tcp_drop_rx(tcp);
+    tcp->epoch++;
+    tcp_unlock(tcp);
+}
+
 void a429_tcp_configure(a429_tcp_t *tcp, uint8_t enabled, uint32_t peer_ip, uint16_t peer_port)
 {
     uint8_t changed;

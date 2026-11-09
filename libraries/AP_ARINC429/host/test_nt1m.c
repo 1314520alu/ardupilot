@@ -900,6 +900,216 @@ static void test_unstable_backoff(void)
     nt_expect(tcp.state == A429_TCP_BACKOFF, "200 ms is too soon after an unstable drop");
 }
 
+static int buffer_has_cd(const uint8_t *bytes, int n)
+{
+    int i;
+    for (i = 0; i < n; i++) {
+        if (bytes[i] == 0xCDu) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void test_rs422_session(void)
+{
+    a429_core_t core;
+    a429_pcmd_levels_t levels;
+    uint32_t ng = 0;
+    uint32_t nr = 0;
+    uint32_t pcmd = 0;
+    uint32_t sdi1 = 0;
+    uint8_t wire[5];
+    uint8_t n = 0;
+    uint8_t logical_b;
+    uint8_t wire_b;
+    uint32_t now;
+    float eu = -1.0f;
+    int i;
+
+    nt_expect(a429_encode_bnr(0144, 0, A429_SM_NORMAL, 50.0f, &ng) == 1, "Ng50 for RS422 session");
+    nt_expect(a429_frame_encode(A429_FRAME_RS422_429_1C, &ng, 1, wire, 5, &n) == 1, "wire Ng frame");
+    a429_core_init(&core);
+    script_reset(&core.tcp);
+    a429_core_set_frame(&core, A429_FRAME_RS422_429_1C);
+    a429_tcp_configure(&core.tcp, 1, 0x0A000001u, 8887);
+    now = 0;
+    a429_core_update(&core, now);
+    g_io.recv_max = 2;
+    g_io.inbox[0] = wire[0];
+    g_io.inbox[1] = wire[1];
+    g_io.inbox_n = 2;
+    g_io.inbox_r = 0;
+    now += 1000u;
+    a429_core_update(&core, now);
+    nt_expect(core.frame_dec.primed == 1u && core.link.rx[0].fresh == 0u, "a split RS422 frame waits");
+    g_io.recv_max = 3;
+    g_io.inbox[0] = wire[2];
+    g_io.inbox[1] = wire[3];
+    g_io.inbox[2] = wire[4];
+    g_io.inbox_n = 3;
+    g_io.inbox_r = 0;
+    now += 1000u;
+    a429_core_update(&core, now);
+    nt_expect(a429_core_fresh_eu(&core, 0, &eu) == 1 && core.link.rx[0].view.raw == ng,
+              "the split RS422 frame is logical Ng50");
+
+    g_io.recv_max = 16;
+    for (i = 0; i < 5; i++) {
+        g_io.inbox[i] = wire[i];
+        g_io.inbox[5 + i] = wire[i];
+    }
+    g_io.inbox_n = 10;
+    g_io.inbox_r = 0;
+    now += 1000u;
+    a429_core_update(&core, now);
+    nt_expect(core.link.counters.rx_count >= 3u && core.link.rx[0].view.raw == ng,
+              "two coalesced RS422 frames stay Ng50");
+
+    g_io.recv_max = 3;
+    g_io.inbox[0] = wire[0];
+    g_io.inbox[1] = wire[1];
+    g_io.inbox[2] = wire[2];
+    g_io.inbox_n = 3;
+    g_io.inbox_r = 0;
+    now += 1000u;
+    a429_core_update(&core, now);
+    nt_expect(core.frame_dec.primed == 1u, "a later partial RS422 frame is held");
+    g_io.connected = 0;
+    now += 1000u;
+    a429_core_update(&core, now);
+    nt_expect(core.frame_dec.primed == 0u && core.link.rx[0].fresh == 0u, "session loss drops the partial and freshness");
+    nt_expect(core.link.rx[0].last_valid.raw == ng, "Ng history remains");
+    now = core.tcp.next_attempt_us;
+    a429_core_update(&core, now);
+    g_io.recv_max = 5;
+    memcpy(g_io.inbox, wire, 5);
+    g_io.inbox_n = 5;
+    g_io.inbox_r = 0;
+    now += 1000u;
+    a429_core_update(&core, now);
+    nt_expect(core.link.rx[0].fresh == 1u && core.link.rx[0].view.raw == ng,
+              "the new session accepts a whole RS422 frame");
+
+    memset(&levels, 0, sizeof(levels));
+    levels.mode = A429_MODE_FLIGHT;
+    levels.cold_run = 1;
+    nt_expect(a429_encode_pcmd(0340, 0, A429_SM_NORMAL, &levels, &pcmd) == 1, "pcmd high");
+    a429_link_ingest(&core.link, pcmd, now);
+    nt_expect(core.link.pcmd[0].edge.have == 1u && core.link.pcmd[0].edges.cold_run == 0u,
+              "the first command sample does not edge");
+    levels.cold_run = 0;
+    nt_expect(a429_encode_pcmd(0340, 0, A429_SM_NORMAL, &levels, &pcmd) == 1, "pcmd low");
+    a429_link_ingest(&core.link, pcmd, now + 1u);
+    levels.cold_run = 1;
+    nt_expect(a429_encode_pcmd(0340, 0, A429_SM_NORMAL, &levels, &pcmd) == 1, "pcmd rise");
+    a429_link_ingest(&core.link, pcmd, now + 2u);
+    nt_expect(core.link.pcmd[0].edges.cold_run == 1u, "a real rising edge is latched");
+
+    g_io.recv_max = 2;
+    g_io.inbox[0] = 0xC0u;
+    g_io.inbox[1] = 0x64u;
+    g_io.inbox_n = 2;
+    g_io.inbox_r = 0;
+    a429_core_set_frame(&core, A429_FRAME_UART429S_C0);
+    now += 1000u;
+    a429_core_update(&core, now);
+    nt_expect(core.frame_dec.primed == 1u, "FRAME 1 holds a logical partial");
+    a429_core_set_frame(&core, A429_FRAME_RS422_429_1C);
+    nt_expect(core.frame_dec.primed == 0u && core.link.rx[0].fresh == 0u, "the profile switch clears the half-frame and freshness");
+    nt_expect(core.link.pcmd[0].edge.have == 0u && core.link.pcmd[0].edges.cold_run == 0u,
+              "the profile switch re-arms command edges");
+    g_io.recv_max = 5;
+    memcpy(g_io.inbox, wire, 5);
+    g_io.inbox_n = 5;
+    g_io.inbox_r = 0;
+    now += 1000u;
+    a429_core_update(&core, now);
+    nt_expect(core.link.rx[0].view.raw == ng, "old FRAME 1 bytes are not stitched onto the RS422 frame");
+    levels.mode = A429_MODE_FLIGHT;
+    levels.cold_run = 1;
+    nt_expect(a429_encode_pcmd(0340, 0, A429_SM_NORMAL, &levels, &pcmd) == 1, "pcmd after switch");
+    a429_link_ingest(&core.link, pcmd, now);
+    nt_expect(core.link.pcmd[0].edges.cold_run == 0u && core.link.pcmd[0].edge.have == 1u,
+              "the first sample after the switch does not synthesize an edge");
+
+    script_reset(&core.tcp);
+    a429_core_init(&core);
+    script_reset(&core.tcp);
+    a429_core_set_frame(&core, A429_FRAME_UART429S_C0);
+    a429_tcp_configure(&core.tcp, 1, 0x0A000001u, 8887);
+    a429_sim_set_nr(&core.link, 100.0f);
+    nt_expect(a429_encode_bnr(0311, 0, A429_SM_NORMAL, 100.0f, &nr) == 1, "Nr word");
+    logical_b = (uint8_t)nr;
+    wire_b = a429_label_bit_reverse(logical_b);
+    g_io.block_send = 1;
+    a429_core_update(&core, 0);
+    a429_core_update(&core, 12500u);
+    a429_core_update(&core, 25000u);
+    nt_expect(core.tcp.tx_len == 5u && core.tcp.tx[0] == 0xC0u && core.tcp.tx[1] == logical_b,
+              "FRAME 1 queues the logical label");
+    a429_core_set_frame(&core, A429_FRAME_RS422_429_1C);
+    nt_expect(core.tcp.tx_len == 0u && core.frame_dec.primed == 0u, "the unsent logical slot is dropped on the switch");
+    g_io.block_send = 0;
+    g_io.send_max = 5;
+    g_io.sent_n = 0;
+    a429_core_update(&core, 37500u);
+    a429_core_update(&core, 50000u);
+    nt_expect(g_io.sent_n == 5 && g_io.sent[0] == 0xC0u && g_io.sent[1] == wire_b,
+              "the next slot is a whole RS422 frame");
+    nt_expect(!buffer_has_cd(g_io.sent, g_io.sent_n), "the scheduler does not emit a CD rate command");
+
+    script_reset(&core.tcp);
+    a429_core_init(&core);
+    script_reset(&core.tcp);
+    a429_core_set_frame(&core, A429_FRAME_UART429S_C0);
+    a429_tcp_configure(&core.tcp, 1, 0x0A000001u, 8887);
+    a429_sim_set_nr(&core.link, 100.0f);
+    g_io.send_max = 2;
+    a429_core_update(&core, 0);
+    a429_core_update(&core, 12500u);
+    a429_core_update(&core, 25000u);
+    nt_expect(g_io.sent_n == 2 && core.tcp.tx_off == 2u, "two bytes of the logical frame were accepted");
+    a429_core_set_frame(&core, A429_FRAME_RS422_429_1C);
+    nt_expect(core.tcp.force_close == 1u && core.tcp.tx_len == 0u, "a partial old frame requests a connection reset");
+    g_io.send_max = 5;
+    g_io.sent_n = 0;
+    a429_core_update(&core, 37500u);
+    a429_core_update(&core, 50000u);
+    nt_expect(core.tcp.state == A429_TCP_UP && g_io.sent_n == 5 && g_io.sent[0] == 0xC0u &&
+              g_io.sent[1] == wire_b, "the reset session sends one whole RS422 frame");
+
+    a429_core_init(&core);
+    script_reset(&core.tcp);
+    a429_core_set_frame(&core, A429_FRAME_RS422_429_1C);
+    a429_tcp_configure(&core.tcp, 1, 0x0A000001u, 8887);
+    a429_core_update(&core, 0);
+    g_io.recv_max = 5;
+    memcpy(g_io.inbox, wire, 5);
+    g_io.inbox_n = 5;
+    g_io.inbox_r = 0;
+    a429_core_update(&core, 1000u);
+    nt_expect(a429_core_fresh_eu(&core, 0, &eu) == 1, "Ng is fresh before the epoch moves");
+    core.tcp.io_external = 1;
+    a429_tcp_abandon_hold(&core.tcp);
+    nt_expect(core.link.rx[0].fresh == 1u, "the stored flag waits for the vehicle update");
+    nt_expect(a429_core_fresh_eu(&core, 0, &eu) == 0, "the getter sees the new epoch immediately");
+    a429_core_update(&core, 2000u);
+    nt_expect(core.link.rx[0].fresh == 0u && core.tcp_epoch_seen == core.tcp.epoch,
+              "the vehicle update then clears the stored flag");
+
+    nt_expect(a429_encode_bnr(0144, 1, A429_SM_NORMAL, 40.0f, &sdi1) == 1, "Ng SDI 1");
+    a429_link_ingest(&core.link, ng, 3000u);
+    nt_expect(core.link.rx[0].fresh == 1u, "SDI 0 sample is fresh again");
+    a429_core_set_sdi(&core, 1);
+    nt_expect(core.link.rx[0].fresh == 0u && core.link.pcmd[0].edge.have == 0u,
+              "an SDI change clears freshness and re-arms edges");
+    a429_link_ingest(&core.link, ng, 4000u);
+    nt_expect(core.link.rx[0].fresh == 0u, "the old SDI is no longer current");
+    a429_link_ingest(&core.link, sdi1, 5000u);
+    nt_expect(core.link.rx[0].fresh == 1u && core.link.rx[0].view.raw == sdi1, "the new SDI becomes fresh");
+}
+
 static void test_unframed_does_not_send(void)
 {
     a429_core_t core;
@@ -1035,6 +1245,7 @@ int a429_nt1m_tests(void)
     test_unstable_backoff();
     test_disconnect_clears_fresh();
     test_backoff_needs_a_completed_frame();
+    test_rs422_session();
 #if !defined(_WIN32)
     test_mock_server();
 #endif

@@ -41,18 +41,56 @@ void a429_core_init(a429_core_t *core)
     core->transport = a429_transport_null();
 }
 
+static void core_drop_wire_state(a429_core_t *core)
+{
+    a429_frame_dec_resync(&core->frame_dec);
+    a429_tcp_abandon_hold(&core->tcp);
+    a429_link_session_lost(&core->link);
+}
+
 void a429_core_set_frame(a429_core_t *core, uint8_t profile)
 {
     if (core == 0) {
         return;
     }
-    if (profile != A429_FRAME_UART429S_C0) {
+    if (!a429_frame_profile_active(profile)) {
         profile = A429_FRAME_NONE;
     }
     if (core->frame_profile != profile) {
         core->frame_profile = profile;
         a429_frame_dec_init(&core->frame_dec, profile);
+        core_drop_wire_state(core);
     }
+}
+
+void a429_core_set_sdi(a429_core_t *core, uint8_t sdi)
+{
+    uint8_t prev;
+    if (core == 0 || sdi > 3u) {
+        return;
+    }
+    prev = core->link.expected_sdi;
+    a429_link_set_sdi(&core->link, sdi);
+    if (prev != core->link.expected_sdi) {
+        a429_frame_dec_resync(&core->frame_dec);
+        a429_tcp_abandon_hold(&core->tcp);
+    }
+}
+
+int a429_core_fresh_eu(const a429_core_t *core, uint8_t rx_index, float *eu)
+{
+    if (core == 0 || core->tcp_epoch_seen != core->tcp.epoch) {
+        return 0;
+    }
+    return a429_link_fresh_eu(&core->link, rx_index, eu);
+}
+
+int a429_core_fresh_disc(const a429_core_t *core, uint8_t rx_index, int16_t *data)
+{
+    if (core == 0 || core->tcp_epoch_seen != core->tcp.epoch) {
+        return 0;
+    }
+    return a429_link_fresh_disc(&core->link, rx_index, data);
 }
 
 void a429_core_set_transport(a429_core_t *core, const a429_transport_t *transport)
@@ -81,7 +119,7 @@ void a429_core_update(a429_core_t *core, uint32_t now_us)
     transport = (core->transport != 0) ? core->transport : a429_transport_null();
     if (a429_sched_poll(&core->sched, now_us)) {
         n = a429_link_build_tx(&core->link, tx, A429_TX_MAX);
-        if (n > 0 && core->frame_profile == A429_FRAME_UART429S_C0) {
+        if (n > 0 && a429_frame_profile_active(core->frame_profile)) {
             uint8_t framed[A429_TCP_TX_CAP];
             uint8_t framed_n = 0;
             if (a429_frame_encode(core->frame_profile, tx, n, framed, (uint8_t)sizeof(framed), &framed_n) &&
@@ -113,7 +151,7 @@ void a429_core_update(a429_core_t *core, uint32_t now_us)
             if (gotb == 0) {
                 break;
             }
-            if (core->frame_profile == A429_FRAME_UART429S_C0) {
+            if (a429_frame_profile_active(core->frame_profile)) {
                 uint32_t words[8];
                 uint8_t nw = a429_frame_push(&core->frame_dec, raw, gotb, words, 8);
                 uint8_t wi;

@@ -20,7 +20,7 @@ unchanged. `AP_EROB_CANOPEN_ENABLED` stays set on ZeroOneX6.
 | Simulation inject / simulation transmit snapshot | In the library. Nothing in the vehicle fills a snapshot from a flight mode. |
 | NT1-M TCP client byte pipe | Implemented on the existing `AP_Networking` lwIP stack. Host-tested against a scripted pipe and a local mock TCP server. Not a physical NT1-M. |
 | UART429-S `C0` framing | Provisional and off by default (`A429_FRAME=1`). Sends the codec logical word. Does not bit-reverse the label and does not send a `CD` rate command. |
-| RS422-429-1C manual | Read. Pages 3 and 4 describe that product's `C0` frame and label-byte reversal. `A429_FRAME=1` was not switched to that wire profile. The NT1-M path is not this box and is not hardware-validated. |
+| RS422-429-1C wire profile | `A429_FRAME=2`. Page 3 `C0` plus four little-endian bytes. Page 4 reverses only the label byte. Host-tested. Not a test of the NT1-M or of the internal TTL board. |
 | Flight-controller IP, PROFINET sharing, physical 429 bit timing | Not changed and not proven by these tests. |
 | Hardware loopback, flashing, engine actuation | Not done. |
 
@@ -226,6 +226,12 @@ same to every phase-one label even when its timeout is 0: `fresh` becomes
 0, while `last_valid`, `last_valid_eu`, and `valid_us` stay. Reconnect
 does not copy that history back into a fresh sample. `A429_ENABLE` 0
 clears freshness in that same update and does not schedule a slot.
+`get_fresh_eu` and `get_fresh_disc` also return false as soon as the TCP
+epoch changes, including before the next `update()` stores that fact.
+The raw `fresh` flag itself is cleared when `update()` runs. A worker
+disconnect and a getter on another thread are therefore not the same
+instant, and reading the slot directly can still see the old flag until
+that update.
 
 ## NT1-M TCP client
 
@@ -315,7 +321,7 @@ either byte. A `0xCD` byte is skipped as unknown. No speed command is
 generated. Setting `A429_FRAME=1` does not by itself enable the TCP
 client, and `A429_ENABLE` still defaults to 0.
 
-## RS422-429-1C manual, not selected by `A429_FRAME`
+## RS422-429-1C wire profile, `A429_FRAME=2`
 
 Source checked against the file itself: 天津展翼航空科技有限责任公司,
 title page "RS422转ARINC429控制器 产品说明书", model RS422-429-1C on
@@ -345,16 +351,22 @@ byte.
 
 The codec in this tree does the other thing. It stores the octal label as
 an integer in the low byte and applies odd parity to that logical word.
-`A429_FRAME=1` then writes that logical word after `0xC0`. For octal 0144
-the serial label byte is `0x64`. Under the page 4 decode rule, the label
-byte for octal 0144 would be the reverse, `0x26`. Reversing those eight
-bits only reorders them, so the popcount is unchanged and the odd parity
-of the 32-bit word is unchanged. `0xE2710064` and `0xE2710026` are both
-odd. SDI, the data field, and SSM stay in the same bit positions. A later
-encoder may recompute odd parity after that swap; the result has to match
-the parity bit already on the word. That wire profile is not implemented.
-`A429_FRAME` has no value for it, and this tree does not transmit
-`CD 00 00 55 55`, `CD 03 00 55 55`, or `CD 07 00 55 55`.
+`A429_FRAME=1` still writes that logical word after `0xC0`. For octal
+0144 the serial label byte is `0x64`. `A429_FRAME=2` is the separate
+RS422-429-1C selector. It reverses only those eight label bits, so octal
+0144 goes out as `0x26` and the frame is `C0 26 00 71 E2`. The other 24
+bits stay put. Reversing the byte does not change its popcount, so a
+valid odd parity bit stays valid and an invalid one stays invalid. Receive
+applies the same swap and does not recompute parity. The manual example
+`0x629218C1` has label byte `C1`, which reverses to `0x83`, octal 203.
+
+Changing `A429_FRAME` or `A429_SDI` drops a half-parsed frame, drops an
+unsent slot, and asks the socket owner to close the connection when a
+prefix was already accepted. It clears `fresh` in that same call and
+re-arms the command-edge detectors, so the next valid sample only latches.
+`A429_ENABLE` still defaults to 0. Neither frame value sends
+`CD 00 00 55 55`, `CD 03 00 55 55`, or `CD 07 00 55 55`. Those three
+commands have a standalone encoder for tests. The scheduler does not call it.
 
 Page 2 fixes the RS422 baud at 115200 and does not state the data bits,
 parity, or stop bits. Pages 2 and 3 describe the DB9, the 6–28 V supply,

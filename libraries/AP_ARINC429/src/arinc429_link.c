@@ -78,12 +78,25 @@ void a429_link_init(a429_link_t *link)
     memset(link, 0, sizeof(*link));
 }
 
+void a429_link_rearm_edges(a429_link_t *link)
+{
+    uint8_t i;
+    if (link == 0) {
+        return;
+    }
+    for (i = 0; i < A429_PCMD_N; i++) {
+        a429_edge_reset(&link->pcmd[i].edge);
+        memset(&link->pcmd[i].edges, 0, sizeof(link->pcmd[i].edges));
+    }
+}
+
 void a429_link_set_sdi(a429_link_t *link, uint8_t sdi)
 {
-    if (link == 0 || sdi > 3u) {
+    if (link == 0 || sdi > 3u || link->expected_sdi == sdi) {
         return;
     }
     link->expected_sdi = sdi;
+    a429_link_session_lost(link);
 }
 
 void a429_link_set_timeout_us(a429_link_t *link, uint8_t rx_index, uint32_t timeout_us)
@@ -161,6 +174,8 @@ void a429_link_session_lost(a429_link_t *link)
          * stays in last_valid / last_valid_eu / valid_us. */
         link->rx[i].fresh = 0;
     }
+    /* The next valid command sample only latches. It does not emit an edge. */
+    a429_link_rearm_edges(link);
 }
 
 int a429_link_fresh_eu(const a429_link_t *link, uint8_t rx_index, float *eu)
