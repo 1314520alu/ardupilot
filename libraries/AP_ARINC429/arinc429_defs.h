@@ -43,15 +43,24 @@
 
 /* Byte interpretation. 0 does not turn socket bytes into words. */
 #define A429_FRAME_NONE 0u
-/* Provisional UART429-S profile: 0xC0 plus the logical word, little-endian.
- * It does not bit-reverse the label and is not confirmed for the supplied
- * converter's RS422 format. */
+/* Provisional UART429-S profile: 0xC0 plus the logical codec word,
+ * little-endian. The label integer is not bit-reversed and no CD rate
+ * command is generated. RS422-429-1C page 4 requires a different label
+ * byte on the wire; this value does not select that profile. */
 #define A429_FRAME_UART429S_C0 1u
 
 #define A429_TCP_TX_CAP 32u
 #define A429_TCP_RX_CAP 64u
 #define A429_TCP_BACKOFF_MIN_US 200000u
 #define A429_TCP_BACKOFF_MAX_US 5000000u
+/* Abandon an application frame that send() has not finished within 50 ms
+ * (four 12.5 ms slots). A prefix already accepted by send() resets the
+ * connection instead of being spliced to a newer frame. Closing the socket
+ * does not purge bytes the OS or the NT1-M has already accepted. */
+#define A429_TCP_TX_MAX_AGE_US 50000u
+/* Backoff returns to the minimum only after a completed frame or this long
+ * up. A connect that dies sooner keeps the grown backoff. */
+#define A429_TCP_STABLE_US 200000u
 
 #define A429_TCP_OFF 0u
 #define A429_TCP_BACKOFF 1u
@@ -137,6 +146,7 @@ typedef struct {
     uint8_t have_valid;
     uint8_t fresh;
     float last_valid_eu;
+    a429_word_view_t last_valid;
     uint32_t timeout_us;
     uint32_t timeout_count;
     a429_word_view_t view;
@@ -240,6 +250,10 @@ typedef struct {
     uint32_t tx_dropped;
     uint32_t rx_backpressure;
     uint32_t partial_sends;
+    uint32_t tx_expired;
+    uint32_t tx_queued_us;
+    uint32_t up_since_us;
+    uint8_t session_stable;
     uint8_t tx[A429_TCP_TX_CAP];
     uint8_t tx_len;
     uint8_t tx_off;
@@ -267,4 +281,5 @@ typedef struct {
     a429_frame_dec_t frame_dec;
     uint32_t rx_unframed_bytes;
     uint32_t tx_unframed;
+    uint32_t tcp_epoch_seen;
 } a429_core_t;

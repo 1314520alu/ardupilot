@@ -37,6 +37,7 @@ typedef struct {
     int progress_left;
     int send_max;
     int fail_send;
+    int block_send;
     uint8_t sent[256];
     int sent_n;
     uint8_t inbox[256];
@@ -74,8 +75,12 @@ static int script_send(void *ctx, const uint8_t *bytes, uint16_t n)
     if (!io->connected) {
         return -1;
     }
+    if (io->block_send) {
+        return 0;
+    }
     if (io->fail_send) {
-        io->connected = 0;
+        /* Leave the script connected so this poll can still read. The
+         * client close, not this return, ends the session. */
         return -1;
     }
     if (n == 0) {
@@ -194,7 +199,7 @@ static void test_scripted_session(void)
     nt_expect(g_io.open_calls == 0, "address without a port does not connect");
 
     a429_tcp_configure(&tcp, 1, 0xC0A80307u, 8887);
-    nt_expect(a429_tcp_submit(&tcp, frame, 5) == 0, "submit before connect is dropped");
+    nt_expect(a429_tcp_submit(&tcp, frame, 5, 0) == 0, "submit before connect is dropped");
     nt_expect(tcp.tx_dropped == 1u, "pre-connect submit counted");
     g_io.progress_left = 1;
     a429_tcp_poll(&tcp, 2000);
@@ -203,11 +208,11 @@ static void test_scripted_session(void)
     nt_expect(tcp.state == A429_TCP_UP && tcp.connect_ok == 1u, "second open completes");
     nt_expect(g_io.sent_n == 0, "bytes queued before connect are not replayed");
 
-    nt_expect(a429_tcp_submit(&tcp, frame, 5) == 1, "submit one frame");
+    nt_expect(a429_tcp_submit(&tcp, frame, 5, 4000u) == 1, "submit one frame");
     a429_tcp_poll(&tcp, 4000);
     nt_expect(g_io.sent_n == 1 && g_io.sent[0] == 0xC0u, "partial write sends one byte");
     nt_expect(tcp.partial_sends == 1u, "partial write is counted");
-    a429_tcp_submit(&tcp, other, 5);
+    a429_tcp_submit(&tcp, other, 5, 4000u);
     nt_expect(tcp.tx_dropped == 2u, "a second frame is not queued behind the partial");
     for (i = 0; i < 4; i++) {
         a429_tcp_poll(&tcp, 5000u + (uint32_t)i);
@@ -216,7 +221,7 @@ static void test_scripted_session(void)
     nt_expect(memcmp(g_io.sent, frame, 5) == 0, "finished bytes are the first frame only");
 
     g_io.fail_send = 1;
-    nt_expect(a429_tcp_submit(&tcp, other, 5) == 1, "submit after the pipe is idle");
+    nt_expect(a429_tcp_submit(&tcp, other, 5, 6000u) == 1, "submit after the pipe is idle");
     a429_tcp_poll(&tcp, 6000);
     nt_expect(tcp.state == A429_TCP_BACKOFF && tcp.disconnects == 1u, "send failure disconnects");
     nt_expect(tcp.tx_len == 0, "unsent tail is discarded");
@@ -227,7 +232,7 @@ static void test_scripted_session(void)
     a429_tcp_poll(&tcp, 6000u + A429_TCP_BACKOFF_MIN_US);
     nt_expect(tcp.state == A429_TCP_UP && tcp.connect_ok == 2u, "reconnects after backoff");
     nt_expect(g_io.sent_n == 0, "reconnect does not replay the discarded frame");
-    nt_expect(a429_tcp_submit(&tcp, other, 5) == 1, "a new slot can be sent");
+    nt_expect(a429_tcp_submit(&tcp, other, 5, 7000u + A429_TCP_BACKOFF_MIN_US) == 1, "a new slot can be sent");
     for (i = 0; i < 5; i++) {
         a429_tcp_poll(&tcp, 7000u + A429_TCP_BACKOFF_MIN_US + (uint32_t)i);
     }
@@ -434,6 +439,223 @@ static int accept_once(int srv)
     return -1;
 }
 
+static void test_connection_framing(void)
+{
+    a429_core_t core;
+    uint32_t ng50 = 0;
+    uint8_t frame[5];
+    uint8_t n = 0;
+    uint8_t i;
+
+    nt_expect(a429_encode_bnr(0144, 0, A429_SM_NORMAL, 50.0f, &ng50) == 1, "Ng50 word");
+    nt_expect(a429_frame_encode(A429_FRAME_UART429S_C0, &ng50, 1, frame, 5, &n) == 1 && n == 5u,
+              "Ng50 provisional frame");
+
+    a429_core_init(&core);
+    script_reset(&core.tcp);
+    a429_core_set_frame(&core, A429_FRAME_UART429S_C0);
+    a429_tcp_configure(&core.tcp, 1, 0xC0A80307u, 8887);
+    a429_core_update(&core, 0);
+    nt_expect(core.tcp.state == A429_TCP_UP, "framing session is up");
+    g_io.recv_max = 8;
+    g_io.inbox[0] = 0xC0u;
+    g_io.inbox[1] = 0x64u;
+    g_io.inbox[2] = 0x20u;
+    g_io.inbox_n = 3;
+    g_io.inbox_r = 0;
+    a429_core_update(&core, 1000u);
+    nt_expect(core.link.counters.rx_count == 0u, "a partial C0 frame is not a word");
+    g_io.connected = 0;
+    a429_core_update(&core, 2000u);
+    nt_expect(core.tcp.state == A429_TCP_BACKOFF, "partial frame is followed by disconnect");
+    a429_core_update(&core, 2000u + A429_TCP_BACKOFF_MIN_US);
+    nt_expect(core.tcp.state == A429_TCP_UP, "session reconnects");
+    for (i = 0; i < 5u; i++) {
+        g_io.inbox[i] = frame[i];
+    }
+    g_io.inbox_n = 5;
+    g_io.inbox_r = 0;
+    a429_core_update(&core, 3000u + A429_TCP_BACKOFF_MIN_US);
+    nt_expect(core.link.rx[0].fresh == 1, "Ng50 after reconnect is fresh");
+    nt_expect(core.link.rx[0].view.eu > 49.9f && core.link.rx[0].view.eu < 50.1f,
+              "reconnect does not assemble Ng97.29 from the previous connection");
+    nt_expect(core.link.rx[0].view.raw == ng50, "reconnect delivers the new word only");
+
+    a429_core_init(&core);
+    script_reset(&core.tcp);
+    a429_core_set_frame(&core, A429_FRAME_UART429S_C0);
+    a429_tcp_configure(&core.tcp, 1, 0xC0A80307u, 8887);
+    a429_core_update(&core, 0);
+    g_io.recv_max = 2;
+    g_io.inbox[0] = frame[0];
+    g_io.inbox[1] = frame[1];
+    g_io.inbox_n = 2;
+    g_io.inbox_r = 0;
+    a429_core_update(&core, 1000u);
+    nt_expect(core.link.counters.rx_count == 0u && core.frame_dec.primed == 1u,
+              "same connection keeps a split header");
+    g_io.recv_max = 3;
+    g_io.inbox[0] = frame[2];
+    g_io.inbox[1] = frame[3];
+    g_io.inbox[2] = frame[4];
+    g_io.inbox_n = 3;
+    g_io.inbox_r = 0;
+    a429_core_update(&core, 2000u);
+    nt_expect(core.link.rx[0].fresh == 1 && core.link.rx[0].view.raw == ng50,
+              "same connection accepts a split frame");
+
+    a429_core_init(&core);
+    script_reset(&core.tcp);
+    a429_core_set_frame(&core, A429_FRAME_UART429S_C0);
+    a429_tcp_configure(&core.tcp, 1, 0xC0A80307u, 8887);
+    a429_core_update(&core, 0);
+    g_io.recv_max = 16;
+    for (i = 0; i < 5u; i++) {
+        g_io.inbox[i] = frame[i];
+        g_io.inbox[5u + i] = frame[i];
+    }
+    g_io.inbox_n = 10;
+    g_io.inbox_r = 0;
+    a429_core_update(&core, 1000u);
+    nt_expect(core.link.counters.rx_count == 2u, "same connection accepts two coalesced frames");
+    nt_expect(core.link.rx[0].view.raw == ng50, "coalesced frames stay Ng50");
+}
+
+static void test_zero_octet_peer(void)
+{
+    a429_tcp_t tcp;
+    script_reset(&tcp);
+    a429_tcp_configure(&tcp, 1, 0x0A000001u, 8887);
+    a429_tcp_poll(&tcp, 0);
+    nt_expect(g_io.open_calls == 1 && tcp.state == A429_TCP_UP, "10.0.0.1 is a configured peer");
+    script_reset(&tcp);
+    a429_tcp_configure(&tcp, 1, 0xC0A80007u, 8887);
+    a429_tcp_poll(&tcp, 0);
+    nt_expect(g_io.open_calls == 1 && tcp.state == A429_TCP_UP, "192.168.0.7 keeps its zero octet");
+    script_reset(&tcp);
+    a429_tcp_configure(&tcp, 1, 0, 8887);
+    a429_tcp_poll(&tcp, 0);
+    nt_expect(g_io.open_calls == 0, "0.0.0.0 is an unconfigured destination");
+}
+
+static void test_tx_age_and_write_fail(void)
+{
+    a429_tcp_t tcp;
+    a429_core_t core;
+    uint8_t frame[5] = {0xC0u, 0x64u, 0x00u, 0x71u, 0xE2u};
+    uint8_t newer[5] = {0xC0u, 0x65u, 0x01u, 0x02u, 0x03u};
+    uint32_t ng50 = 0;
+    uint8_t ngframe[5];
+    uint8_t n = 0;
+    int calls_before;
+
+    script_reset(&tcp);
+    a429_tcp_configure(&tcp, 1, 0x0A000001u, 8887);
+    a429_tcp_poll(&tcp, 0);
+    g_io.block_send = 1;
+    nt_expect(a429_tcp_submit(&tcp, frame, 5, 1000u) == 1, "queue a frame that cannot be written");
+    a429_tcp_poll(&tcp, 1000u + A429_TCP_TX_MAX_AGE_US - 1u);
+    nt_expect(tcp.tx_len == 5u && g_io.sent_n == 0, "a young would-block keeps the current frame");
+    a429_tcp_submit(&tcp, newer, 5, 1000u + A429_TCP_TX_MAX_AGE_US - 1u);
+    nt_expect(tcp.tx_dropped >= 1u, "a newer snapshot is not queued behind it");
+    a429_tcp_poll(&tcp, 1000u + A429_TCP_TX_MAX_AGE_US);
+    g_io.block_send = 0;
+    a429_tcp_poll(&tcp, 1000u + A429_TCP_TX_MAX_AGE_US + 1u);
+    nt_expect(g_io.sent_n == 0 && tcp.tx_expired >= 1u, "a 50 ms would-block drops the unsent frame");
+    nt_expect(tcp.state == A429_TCP_UP, "no prefix was sent, so the connection stays up");
+
+    script_reset(&tcp);
+    a429_tcp_configure(&tcp, 1, 0x0A000001u, 8887);
+    a429_tcp_poll(&tcp, 0);
+    g_io.send_max = 2;
+    nt_expect(a429_tcp_submit(&tcp, frame, 5, 1000u) == 1, "queue a frame that sends a prefix");
+    a429_tcp_poll(&tcp, 1000u);
+    nt_expect(g_io.sent_n == 2, "two bytes were accepted by send");
+    g_io.block_send = 1;
+    a429_tcp_poll(&tcp, 1000u + A429_TCP_TX_MAX_AGE_US);
+    nt_expect(tcp.state == A429_TCP_BACKOFF, "a stale partial frame resets the connection");
+    nt_expect(g_io.sent_n == 2, "the suffix is not written after the age limit");
+    /* Bytes already returned by send() can remain in the OS or NT1-M cache.
+     * This assertion only covers bytes our session has not handed to send(). */
+    g_io.block_send = 0;
+    g_io.sent_n = 0;
+    a429_tcp_poll(&tcp, 1000u + A429_TCP_TX_MAX_AGE_US + A429_TCP_BACKOFF_MIN_US);
+    nt_expect(tcp.state == A429_TCP_UP, "reconnects after the partial-frame reset");
+    nt_expect(a429_tcp_submit(&tcp, newer, 5, 1000u + A429_TCP_TX_MAX_AGE_US + A429_TCP_BACKOFF_MIN_US) == 1,
+              "the post-reset snapshot is a whole frame");
+    g_io.send_max = 5;
+    a429_tcp_poll(&tcp, 1000u + A429_TCP_TX_MAX_AGE_US + A429_TCP_BACKOFF_MIN_US);
+    nt_expect(g_io.sent_n == 5 && memcmp(g_io.sent, newer, 5) == 0,
+              "the new frame is not concatenated onto the old suffix");
+
+    nt_expect(a429_encode_bnr(0144, 0, A429_SM_NORMAL, 50.0f, &ng50) == 1, "Ng50 for write-fail");
+    nt_expect(a429_frame_encode(A429_FRAME_UART429S_C0, &ng50, 1, ngframe, 5, &n) == 1, "Ng50 frame");
+    a429_core_init(&core);
+    script_reset(&core.tcp);
+    a429_core_set_frame(&core, A429_FRAME_UART429S_C0);
+    a429_tcp_configure(&core.tcp, 1, 0x0A000001u, 8887);
+    a429_core_update(&core, 0);
+    g_io.recv_max = 2;
+    g_io.inbox[0] = 0xC0u;
+    g_io.inbox[1] = 0x64u;
+    g_io.inbox_n = 2;
+    g_io.inbox_r = 0;
+    a429_core_update(&core, 1000u);
+    nt_expect(core.frame_dec.primed == 1u, "parser holds C0 64");
+    g_io.inbox[0] = 0x20u;
+    g_io.inbox_n = 1;
+    g_io.inbox_r = 0;
+    g_io.recv_max = 1;
+    g_io.fail_send = 1;
+    nt_expect(a429_tcp_submit(&core.tcp, frame, 5, 2000u) == 1, "a write is in flight");
+    calls_before = g_io.recv_calls;
+    a429_core_update(&core, 2000u);
+    nt_expect(g_io.recv_calls > calls_before && g_io.inbox_r == 1,
+              "the same poll consumed a received byte and the write then failed");
+    nt_expect(core.tcp.disconnects >= 1u, "the write failure drops the connection");
+    nt_expect(core.frame_dec.primed == 0u && core.tcp.rx_count == 0u,
+              "write failure clears staged RX and the decoder");
+    g_io.fail_send = 0;
+    a429_core_update(&core, 2000u + A429_TCP_BACKOFF_MIN_US);
+    g_io.recv_max = 5;
+    memcpy(g_io.inbox, ngframe, 5);
+    g_io.inbox_n = 5;
+    g_io.inbox_r = 0;
+    a429_core_update(&core, 3000u + A429_TCP_BACKOFF_MIN_US);
+    nt_expect(core.link.rx[0].fresh == 1 && core.link.rx[0].view.raw == ng50,
+              "bytes read beside the failed write do not continue into the next session");
+}
+
+static void test_unstable_backoff(void)
+{
+    a429_tcp_t tcp;
+    uint32_t connected_at;
+    uint32_t dropped_at;
+
+    script_reset(&tcp);
+    g_io.fail_open = 1;
+    a429_tcp_configure(&tcp, 1, 0x0A000001u, 8887);
+    a429_tcp_poll(&tcp, 0);
+    nt_expect(tcp.connect_fail == 1u && tcp.next_attempt_us == A429_TCP_BACKOFF_MIN_US,
+              "the first refusal waits the minimum");
+    g_io.fail_open = 0;
+    a429_tcp_poll(&tcp, A429_TCP_BACKOFF_MIN_US);
+    connected_at = A429_TCP_BACKOFF_MIN_US;
+    nt_expect(tcp.state == A429_TCP_UP && tcp.backoff_us != A429_TCP_BACKOFF_MIN_US,
+              "a successful connect does not shrink the grown backoff");
+    g_io.fail_send = 1;
+    nt_expect(a429_tcp_submit(&tcp, (const uint8_t *)"\xC0\x01\x02\x03\x04", 5, connected_at + 1u) == 1,
+              "unstable session still accepts one attempt");
+    a429_tcp_poll(&tcp, connected_at + 1u);
+    dropped_at = connected_at + 1u;
+    nt_expect(tcp.state == A429_TCP_BACKOFF, "immediate drop disconnects");
+    nt_expect(tcp.next_attempt_us == dropped_at + (2u * A429_TCP_BACKOFF_MIN_US),
+              "an unstable drop waits the grown backoff, not 200 ms again");
+    g_io.fail_send = 0;
+    a429_tcp_poll(&tcp, dropped_at + A429_TCP_BACKOFF_MIN_US);
+    nt_expect(tcp.state == A429_TCP_BACKOFF, "200 ms is too soon after an unstable drop");
+}
+
 static void test_unframed_does_not_send(void)
 {
     a429_core_t core;
@@ -520,7 +742,7 @@ static void test_mock_server(void)
         nt_expect(n == 10u, "coalesced socket read");
     }
 
-    nt_expect(a429_tcp_submit(&tcp, frame, 5) == 1, "client submits one frame");
+    nt_expect(a429_tcp_submit(&tcp, frame, 5, 4000u) == 1, "client submits one frame");
     for (i = 0; i < 5; i++) {
         a429_tcp_poll(&tcp, 4000u + (uint32_t)i);
     }
@@ -540,7 +762,7 @@ static void test_mock_server(void)
     cli = -1;
     a429_tcp_poll(&tcp, 5000);
     nt_expect(tcp.state == A429_TCP_BACKOFF, "peer close is a disconnect");
-    nt_expect(a429_tcp_submit(&tcp, frame, 5) == 0, "submit while down is dropped");
+    nt_expect(a429_tcp_submit(&tcp, frame, 5, 5000u) == 0, "submit while down is dropped");
     a429_tcp_poll(&tcp, 5000u + A429_TCP_BACKOFF_MIN_US);
     cli = accept_once(srv);
     nt_expect(cli >= 0 && tcp.state == A429_TCP_UP, "client reconnects");
@@ -563,6 +785,10 @@ int a429_nt1m_tests(void)
     test_label_and_provisional_frame();
     test_scripted_session();
     test_unframed_does_not_send();
+    test_connection_framing();
+    test_zero_octet_peer();
+    test_tx_age_and_write_fail();
+    test_unstable_backoff();
 #if !defined(_WIN32)
     test_mock_server();
 #endif

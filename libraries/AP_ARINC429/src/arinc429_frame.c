@@ -55,6 +55,15 @@ void a429_frame_dec_init(a429_frame_dec_t *dec, uint8_t profile)
     dec->frames = 0;
 }
 
+void a429_frame_dec_resync(a429_frame_dec_t *dec)
+{
+    if (dec == 0) {
+        return;
+    }
+    dec->primed = 0;
+    dec->hold_n = 0;
+}
+
 uint8_t a429_frame_push(a429_frame_dec_t *dec, const uint8_t *bytes, uint8_t n,
                         uint32_t *words, uint8_t max_words)
 {

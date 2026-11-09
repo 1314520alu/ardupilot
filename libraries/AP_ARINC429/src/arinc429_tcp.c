@@ -27,6 +27,11 @@ static void tcp_drop_tx(a429_tcp_t *tcp)
     tcp->tx_off = 0;
 }
 
+static void tcp_drop_rx(a429_tcp_t *tcp)
+{
+    tcp->rx_count = 0;
+}
+
 void a429_tcp_init(a429_tcp_t *tcp)
 {
     if (tcp == 0) {
@@ -85,6 +90,7 @@ void a429_tcp_configure(a429_tcp_t *tcp, uint8_t enabled, uint32_t peer_ip, uint
         /* The owner thread closes the socket. Closing here would run on
          * the vehicle main thread. */
         tcp_drop_tx(tcp);
+        tcp_drop_rx(tcp);
         tcp->force_close = 1;
         tcp->backoff_us = A429_TCP_BACKOFF_MIN_US;
         tcp->epoch++;
@@ -97,12 +103,19 @@ static void tcp_fail(a429_tcp_t *tcp, uint32_t now_us, int established)
     void (*close_fn)(void *) = tcp->stream.close;
     void *ctx = tcp->stream.ctx;
     tcp_drop_tx(tcp);
+    tcp_drop_rx(tcp);
     tcp->state = A429_TCP_BACKOFF;
     if (established) {
         tcp->disconnects++;
+        /* A session that completed a frame, or stayed up, starts the next
+         * wait at the minimum. An immediate connect/drop keeps growing it. */
+        if (tcp->session_stable) {
+            tcp->backoff_us = A429_TCP_BACKOFF_MIN_US;
+        }
     } else {
         tcp->connect_fail++;
     }
+    tcp->session_stable = 0;
     tcp->next_attempt_us = now_us + tcp->backoff_us;
     if (tcp->backoff_us > (A429_TCP_BACKOFF_MAX_US / 2u)) {
         tcp->backoff_us = A429_TCP_BACKOFF_MAX_US;
@@ -127,6 +140,7 @@ void a429_tcp_poll(a429_tcp_t *tcp, uint32_t now_us)
     uint8_t tx_copy[A429_TCP_TX_CAP];
     uint8_t tx_len;
     uint8_t tx_off;
+    uint32_t tx_queued_us;
     uint8_t rx_space;
     int ns = 0;
     int nr = 0;
@@ -145,6 +159,7 @@ void a429_tcp_poll(a429_tcp_t *tcp, uint32_t now_us)
     port = tcp->peer_port;
     tx_len = tcp->tx_len;
     tx_off = tcp->tx_off;
+    tx_queued_us = tcp->tx_queued_us;
     if (tx_off < tx_len) {
         memcpy(tx_copy, tcp->tx, tx_len);
     }
@@ -154,6 +169,7 @@ void a429_tcp_poll(a429_tcp_t *tcp, uint32_t now_us)
         void *ctx = tcp->stream.ctx;
         uint8_t was_up = (uint8_t)(state != A429_TCP_OFF || tcp->force_close);
         tcp_drop_tx(tcp);
+        tcp_drop_rx(tcp);
         tcp->state = A429_TCP_OFF;
         tcp->force_close = 0;
         tcp->epoch++;
@@ -185,6 +201,24 @@ void a429_tcp_poll(a429_tcp_t *tcp, uint32_t now_us)
     }
 
     if (state == A429_TCP_UP) {
+        if (tx_off < tx_len &&
+            (int32_t)(now_us - tx_queued_us) >= (int32_t)A429_TCP_TX_MAX_AGE_US) {
+            tcp_lock(tcp);
+            if (tcp->epoch == epoch && tcp->state == A429_TCP_UP && tcp->tx_off < tcp->tx_len) {
+                tcp->tx_expired++;
+                if (tcp->tx_off > 0) {
+                    /* Prefix already accepted by send(). Reset instead of
+                     * appending a newer frame onto that prefix. */
+                    tcp_fail(tcp, now_us, 1);
+                    tcp_unlock(tcp);
+                    return;
+                }
+                tcp_drop_tx(tcp);
+            }
+            tcp_unlock(tcp);
+            tx_len = 0;
+            tx_off = 0;
+        }
         if (tx_off < tx_len && tcp->stream.send != 0) {
             ns = tcp->stream.send(tcp->stream.ctx, tx_copy + tx_off, (uint16_t)(tx_len - tx_off));
         }
@@ -223,7 +257,12 @@ void a429_tcp_poll(a429_tcp_t *tcp, uint32_t now_us)
             }
             if (tcp->tx_off >= tcp->tx_len) {
                 tcp_drop_tx(tcp);
+                tcp->session_stable = 1;
             }
+        }
+        if (!tcp->session_stable &&
+            (int32_t)(now_us - tcp->up_since_us) >= (int32_t)A429_TCP_STABLE_US) {
+            tcp->session_stable = 1;
         }
         if (nr < 0) {
             tcp_fail(tcp, now_us, 1);
@@ -258,9 +297,11 @@ void a429_tcp_poll(a429_tcp_t *tcp, uint32_t now_us)
         }
         if (opened == 0) {
             tcp_drop_tx(tcp);
+            tcp_drop_rx(tcp);
             tcp->state = A429_TCP_UP;
             tcp->connect_ok++;
-            tcp->backoff_us = A429_TCP_BACKOFF_MIN_US;
+            tcp->session_stable = 0;
+            tcp->up_since_us = now_us;
             tcp->epoch++;
         } else if (opened > 0) {
             tcp->state = A429_TCP_CONNECTING;
@@ -271,7 +312,7 @@ void a429_tcp_poll(a429_tcp_t *tcp, uint32_t now_us)
     }
 }
 
-int a429_tcp_submit(a429_tcp_t *tcp, const uint8_t *bytes, uint8_t n)
+int a429_tcp_submit(a429_tcp_t *tcp, const uint8_t *bytes, uint8_t n, uint32_t now_us)
 {
     if (tcp == 0 || bytes == 0 || n == 0 || n > A429_TCP_TX_CAP) {
         return 0;
@@ -285,26 +326,37 @@ int a429_tcp_submit(a429_tcp_t *tcp, const uint8_t *bytes, uint8_t n)
     memcpy(tcp->tx, bytes, n);
     tcp->tx_len = n;
     tcp->tx_off = 0;
+    tcp->tx_queued_us = now_us;
     tcp_unlock(tcp);
     return 1;
 }
 
-uint8_t a429_tcp_drain(a429_tcp_t *tcp, uint8_t *out, uint8_t max_n)
+uint8_t a429_tcp_drain_epoch(a429_tcp_t *tcp, uint8_t *out, uint8_t max_n, uint32_t *epoch)
 {
-    uint8_t n;
-    if (tcp == 0 || out == 0 || max_n == 0) {
+    uint8_t n = 0;
+    if (tcp == 0) {
         return 0;
     }
     tcp_lock(tcp);
-    n = tcp->rx_count;
-    if (n > max_n) {
-        n = max_n;
+    if (epoch != 0) {
+        *epoch = tcp->epoch;
     }
-    if (n > 0) {
-        memcpy(out, tcp->rx, n);
-        memmove(tcp->rx, tcp->rx + n, (size_t)(tcp->rx_count - n));
-        tcp->rx_count = (uint8_t)(tcp->rx_count - n);
+    if (out != 0 && max_n > 0) {
+        n = tcp->rx_count;
+        if (n > max_n) {
+            n = max_n;
+        }
+        if (n > 0) {
+            memcpy(out, tcp->rx, n);
+            memmove(tcp->rx, tcp->rx + n, (size_t)(tcp->rx_count - n));
+            tcp->rx_count = (uint8_t)(tcp->rx_count - n);
+        }
     }
     tcp_unlock(tcp);
     return n;
+}
+
+uint8_t a429_tcp_drain(a429_tcp_t *tcp, uint8_t *out, uint8_t max_n)
+{
+    return a429_tcp_drain_epoch(tcp, out, max_n, 0);
 }

@@ -85,7 +85,7 @@ void a429_core_update(a429_core_t *core, uint32_t now_us)
             uint8_t framed[A429_TCP_TX_CAP];
             uint8_t framed_n = 0;
             if (a429_frame_encode(core->frame_profile, tx, n, framed, (uint8_t)sizeof(framed), &framed_n) &&
-                a429_tcp_submit(&core->tcp, framed, framed_n)) {
+                a429_tcp_submit(&core->tcp, framed, framed_n, now_us)) {
                 /* one current slot is in the byte pipe; nothing is queued behind it */
             } else {
                 core->tx_not_sent += n;
@@ -102,7 +102,16 @@ void a429_core_update(a429_core_t *core, uint32_t now_us)
     {
         uint8_t raw[32];
         uint8_t gotb;
-        while ((gotb = a429_tcp_drain(&core->tcp, raw, (uint8_t)sizeof(raw))) > 0) {
+        for (;;) {
+            uint32_t epoch = core->tcp_epoch_seen;
+            gotb = a429_tcp_drain_epoch(&core->tcp, raw, (uint8_t)sizeof(raw), &epoch);
+            if (epoch != core->tcp_epoch_seen) {
+                a429_frame_dec_resync(&core->frame_dec);
+                core->tcp_epoch_seen = epoch;
+            }
+            if (gotb == 0) {
+                break;
+            }
             if (core->frame_profile == A429_FRAME_UART429S_C0) {
                 uint32_t words[8];
                 uint8_t nw = a429_frame_push(&core->frame_dec, raw, gotb, words, 8);

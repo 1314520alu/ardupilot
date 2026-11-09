@@ -113,16 +113,19 @@ void a429_link_ingest(a429_link_t *link, uint32_t raw, uint32_t now_us)
         slot->raw = raw;
         slot->rx_us = now_us;
         slot->have_raw = 1;
+        slot->view = view;
         if (valid) {
-            slot->view = view;
+            slot->last_valid = view;
             slot->have_valid = 1;
             slot->valid_us = now_us;
             slot->fresh = 1;
             if (view.eu_valid) {
                 slot->last_valid_eu = view.eu;
             }
-        } else if (!slot->have_valid) {
-            slot->view = view;
+        } else {
+            /* The current word is the status a getter must see. The previous
+             * normal sample stays in last_valid / valid_us and is not refreshed. */
+            slot->fresh = 0;
         }
         return;
     }

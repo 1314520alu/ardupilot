@@ -339,21 +339,26 @@ static void test_schedule_and_timeout(void)
                 "24 ms nominal refresh is not a timeout");
 
     a429_link_set_timeout_us(&link, 0, 50000u);
-    a429_link_ingest(&link, bad, 40000u);
-    expect_true(link.rx[0].valid_us == 0u, "invalid noise does not move the valid time");
-    expect_true(link.rx[0].fresh == 1, "noise does not by itself clear a still-fresh sample");
     a429_link_poll_timeouts(&link, 50000u);
-    expect_true(link.rx[0].fresh == 0 && link.rx[0].timeout_count == 1u, "timeout once at the policy");
+    expect_true(link.rx[0].fresh == 0 && link.rx[0].timeout_count == 1u, "silence times out once");
+    expect_true(link.rx[0].valid_us == 0u && link.rx[0].last_valid_eu > 9.9f &&
+                link.rx[0].last_valid_eu < 10.1f, "timeout keeps the historical sample");
     a429_link_poll_timeouts(&link, 200000u);
     expect_true(link.rx[0].timeout_count == 1u, "timeout does not count every poll");
-    a429_link_ingest(&link, bad, 200000u);
-    expect_true(link.rx[0].fresh == 0 && link.rx[0].valid_us == 0u, "more noise does not revive data");
-    expect_true(link.rx[0].raw == bad && link.rx[0].rx_us == 200000u, "noise still updates raw and rx time");
     a429_link_ingest(&link, ng, 210000u);
     expect_true(link.rx[0].fresh == 1 && link.rx[0].valid_us == 210000u, "a valid word is fresh again");
-
-    a429_link_poll_timeouts(&link, 260000u);
-    expect_true(link.rx[0].fresh == 0 && link.rx[0].timeout_count == 2u, "second timeout is a new event");
+    a429_link_ingest(&link, bad, 220000u);
+    expect_true(link.rx[0].fresh == 0, "parity error clears current freshness");
+    expect_true(link.rx[0].valid_us == 210000u, "parity error does not refresh valid_us");
+    expect_true(link.rx[0].last_valid_eu > 9.9f && link.rx[0].last_valid_eu < 10.1f,
+                "parity error keeps the last good value");
+    expect_true(link.rx[0].raw == bad && link.rx[0].rx_us == 220000u, "invalid word still updates raw and rx time");
+    a429_link_poll_timeouts(&link, 400000u);
+    expect_true(link.rx[0].timeout_count == 1u, "an already-invalid sample is not a second timeout");
+    a429_link_ingest(&link, ng, 410000u);
+    expect_true(link.rx[0].fresh == 1 && link.rx[0].valid_us == 410000u, "recovery restores freshness");
+    a429_link_poll_timeouts(&link, 460000u);
+    expect_true(link.rx[0].fresh == 0 && link.rx[0].timeout_count == 2u, "silence after recovery times out");
 }
 
 static void test_catalog_and_tx_authority(void)
@@ -535,9 +540,45 @@ static void test_disc_sm_matrix(void)
     expect_true(link.rx[6].view.data == (int16_t)0x00AA, "warn2 data kept");
     word = oracle_word(0177, 0, 0x0001, A429_SM_NCD);
     a429_link_ingest(&link, word, 2000u);
-    expect_true(link.rx[6].fresh == 1, "NCD does not extend or replace the valid sample's freshness time");
-    expect_true(link.rx[6].valid_us == 1003u, "valid time stays on the normal word");
+    expect_true(link.rx[6].fresh == 0, "NCD clears current freshness");
+    expect_true(link.rx[6].valid_us == 1003u, "NCD does not refresh valid_us");
+    expect_true(link.rx[6].last_valid.raw == oracle_word(0177, 0, 0x00AAu, A429_SM_NORMAL),
+                "historical normal word is kept");
     expect_true(link.rx[6].raw == word, "latest raw is the NCD word");
+    expect_true(link.rx[6].view.disc_valid == 0, "current view is the invalid word");
+}
+
+static void test_invalid_sm_clears_fresh(void)
+{
+    uint8_t sm;
+    uint32_t good = 0;
+    uint32_t bad;
+    const uint8_t sms[3] = {A429_SM_FAIL, A429_SM_NCD, A429_SM_FT};
+
+    expect_true(a429_encode_bnr(0144, 0, A429_SM_NORMAL, 50.0f, &good) == 1, "Ng 50 for SM matrix");
+    for (sm = 0; sm < 3u; sm++) {
+        a429_link_t link;
+        a429_link_init(&link);
+        a429_link_ingest(&link, good, 1000u);
+        expect_true(a429_encode_bnr(0144, 0, sms[sm], 50.0f, &bad) == 1, "encode non-normal SM");
+        a429_link_ingest(&link, bad, 2000u);
+        expect_true(link.rx[0].fresh == 0, "non-normal SM is not a fresh getter value");
+        expect_true(link.rx[0].view.eu_valid == 0, "current view is not a valid EU");
+        expect_true(link.rx[0].valid_us == 1000u, "non-normal SM does not refresh valid_us");
+        expect_true(link.rx[0].have_valid == 1 && link.rx[0].last_valid_eu > 49.9f &&
+                    link.rx[0].last_valid_eu < 50.1f, "last good EU remains");
+        expect_true(link.rx[0].last_valid.raw == good, "last good word remains");
+    }
+    {
+        a429_link_t link;
+        a429_link_init(&link);
+        a429_link_ingest(&link, good, 1000u);
+        a429_link_ingest(&link, good ^ (1u << 31), 2000u);
+        expect_true(link.rx[0].fresh == 0 && link.rx[0].valid_us == 1000u, "parity invalidates freshness only");
+        a429_link_ingest(&link, good, 3000u);
+        expect_true(link.rx[0].fresh == 1 && link.rx[0].valid_us == 3000u &&
+                    link.rx[0].view.eu_valid == 1, "normal word recovers freshness");
+    }
 }
 
 int a429_host_tests(void);
@@ -553,6 +594,7 @@ int a429_host_tests(void)
     test_catalog_and_tx_authority();
     test_carrier_interface();
     test_disc_sm_matrix();
+    test_invalid_sm_clears_fresh();
     if (g_fails == 0) {
         printf("RESULT: all passed\n");
     } else {

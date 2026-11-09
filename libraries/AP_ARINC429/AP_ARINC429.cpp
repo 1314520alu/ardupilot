@@ -100,28 +100,28 @@ const AP_Param::GroupInfo AP_ARINC429::var_info[] = {
 
     // @Param: IP0
     // @DisplayName: NT1-M peer address octet 0
-    // @Description: Remote IPv4 octet 0 of the NT1-M TCP server. 0.0.0.0 with any zero octet or a zero port does not open a socket. This does not change the flight controller address. The manual factory example 192.168.3.7 is not programmed here.
+    // @Description: Most significant octet of the NT1-M TCP server address. Zero is a legal octet, so 10.0.0.1 and 192.168.0.7 are usable. The socket stays closed only when all four octets are 0 or A429_REM_PORT is 0. This does not change the flight controller address. The manual example 192.168.3.7 is not programmed here.
     // @Range: 0 255
     // @User: Advanced
     AP_GROUPINFO("IP0", 9, AP_ARINC429, _ip0, 0),
 
     // @Param: IP1
-    // @DisplayName: Future carrier address octet 1
-    // @Description: Stored remote IPv4 octet 1 for a future ARINC429 carrier. Unused.
+    // @DisplayName: NT1-M peer address octet 1
+    // @Description: Second octet of the NT1-M TCP server address. Zero is a legal octet. Combined with IP0, IP2 and IP3; a single zero octet does not disable the client.
     // @Range: 0 255
     // @User: Advanced
     AP_GROUPINFO("IP1", 10, AP_ARINC429, _ip1, 0),
 
     // @Param: IP2
-    // @DisplayName: Future carrier address octet 2
-    // @Description: Stored remote IPv4 octet 2 for a future ARINC429 carrier. Unused.
+    // @DisplayName: NT1-M peer address octet 2
+    // @Description: Third octet of the NT1-M TCP server address. Zero is a legal octet. Combined with the other octets; a single zero octet does not disable the client.
     // @Range: 0 255
     // @User: Advanced
     AP_GROUPINFO("IP2", 11, AP_ARINC429, _ip2, 0),
 
     // @Param: IP3
-    // @DisplayName: Future carrier address octet 3
-    // @Description: Stored remote IPv4 octet 3 for a future ARINC429 carrier. Unused.
+    // @DisplayName: NT1-M peer address octet 3
+    // @Description: Least significant octet of the NT1-M TCP server address. Zero is a legal octet. The destination is unconfigured only when the whole address is 0.0.0.0 or the remote port is 0.
     // @Range: 0 255
     // @User: Advanced
     AP_GROUPINFO("IP3", 12, AP_ARINC429, _ip3, 0),
@@ -142,7 +142,7 @@ const AP_Param::GroupInfo AP_ARINC429::var_info[] = {
 
     // @Param: FRAME
     // @DisplayName: Provisional byte framing
-    // @Description: 0 leaves the TCP bytes uninterpreted. 1 opts into the provisional UART429-S profile, C0 plus the logical ARINC word little-endian, without label bit reversal. That profile is not confirmed for the supplied converter RS422 format and does not command the engine by itself.
+    // @Description: 0 leaves the TCP bytes uninterpreted. 1 opts into the provisional UART429-S profile: C0 plus the codec logical word little-endian, label integer not bit-reversed, and no CD rate command. The RS422-429-1C manual dated 2026-01-18, pages 3 and 4, describes a C0 frame whose label byte is bit-reversed when decoded. This value does not select that wire profile and does not enable transmission by itself.
     // @Values: 0:None,1:UART429-S_C0_provisional
     // @User: Advanced
     AP_GROUPINFO("FRAME", 15, AP_ARINC429, _frame, 0),
