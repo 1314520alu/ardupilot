@@ -150,6 +150,47 @@ void a429_link_ingest(a429_link_t *link, uint32_t raw, uint32_t now_us)
     link->last_untracked_us = now_us;
 }
 
+void a429_link_session_lost(a429_link_t *link)
+{
+    uint8_t i;
+    if (link == 0) {
+        return;
+    }
+    for (i = 0; i < A429_RX_N; i++) {
+        /* The latest word is no longer a live sample. Its last good copy
+         * stays in last_valid / last_valid_eu / valid_us. */
+        link->rx[i].fresh = 0;
+    }
+}
+
+int a429_link_fresh_eu(const a429_link_t *link, uint8_t rx_index, float *eu)
+{
+    const a429_rx_slot_t *slot;
+    if (link == 0 || eu == 0 || rx_index >= A429_RX_N) {
+        return 0;
+    }
+    slot = &link->rx[rx_index];
+    if (!slot->fresh || !slot->view.eu_valid) {
+        return 0;
+    }
+    *eu = slot->view.eu;
+    return 1;
+}
+
+int a429_link_fresh_disc(const a429_link_t *link, uint8_t rx_index, int16_t *data)
+{
+    const a429_rx_slot_t *slot;
+    if (link == 0 || data == 0 || rx_index >= A429_RX_N) {
+        return 0;
+    }
+    slot = &link->rx[rx_index];
+    if (!slot->fresh || !slot->view.disc_valid) {
+        return 0;
+    }
+    *data = slot->view.data;
+    return 1;
+}
+
 void a429_link_poll_timeouts(a429_link_t *link, uint32_t now_us)
 {
     uint8_t i;

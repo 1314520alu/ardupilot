@@ -309,6 +309,12 @@ void AP_ARINC429::tcp_stream_close(void *ctx)
     }
 }
 
+uint32_t AP_ARINC429::tcp_stream_now(void *ctx)
+{
+    (void)ctx;
+    return AP_HAL::micros();
+}
+
 void AP_ARINC429::tcp_lock_cb(void *ctx)
 {
     static_cast<AP_ARINC429 *>(ctx)->_tcp_sem.take_blocking();
@@ -350,6 +356,7 @@ void AP_ARINC429::init(void)
         stream.close = tcp_stream_close;
         stream.ctx = this;
         a429_tcp_set_lock(&_core.tcp, tcp_lock_cb, tcp_unlock_cb, this);
+        a429_tcp_set_clock(&_core.tcp, tcp_stream_now, this);
         a429_tcp_set_stream(&_core.tcp, &stream);
         _core.tcp.io_external = 1;
         if (!_tcp_thread_started) {
@@ -374,6 +381,7 @@ void AP_ARINC429::update(void)
     if (_enable.get() == 0) {
         a429_tcp_configure(&_core.tcp, 0, 0, 0);
         a429_core_set_frame(&_core, A429_FRAME_NONE);
+        a429_link_session_lost(&_core.link);
         return;
     }
     apply_params();
@@ -426,14 +434,21 @@ void AP_ARINC429::sim_clear_tx(void)
 
 bool AP_ARINC429::get_fresh_eu(uint8_t rx_index, float &eu) const
 {
-    if (rx_index >= A429_RX_N) {
+    float value;
+    if (a429_link_fresh_eu(&_core.link, rx_index, &value) != 1) {
         return false;
     }
-    const a429_rx_slot_t &slot = _core.link.rx[rx_index];
-    if (!slot.fresh || !slot.view.eu_valid) {
+    eu = value;
+    return true;
+}
+
+bool AP_ARINC429::get_fresh_disc(uint8_t rx_index, int16_t &data) const
+{
+    int16_t value;
+    if (a429_link_fresh_disc(&_core.link, rx_index, &value) != 1) {
         return false;
     }
-    eu = slot.view.eu;
+    data = value;
     return true;
 }
 

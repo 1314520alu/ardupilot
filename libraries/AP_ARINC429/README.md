@@ -221,7 +221,11 @@ is the operator's policy. The appendix's 24 ms ECU refresh is
 Only a valid word for that label moves `valid_us`. A timeout fires once
 when a sample is still fresh and its age reaches the policy, then waits
 for a new valid word. An already-invalid sample is not counted again.
-Silence does not erase `last_valid`.
+Silence does not erase `last_valid`. A TCP session change does the
+same to every phase-one label even when its timeout is 0: `fresh` becomes
+0, while `last_valid`, `last_valid_eu`, and `valid_us` stay. Reconnect
+does not copy that history back into a fresh sample. `A429_ENABLE` 0
+clears freshness in that same update and does not schedule a slot.
 
 ## NT1-M TCP client
 
@@ -258,11 +262,14 @@ the same way, off the vehicle thread.
 called from `AP_ARINC429::update()`. Socket open, send, receive, and close
 run after the state lock is released. After connect, send and receive are
 non-blocking. The first refusal waits 200 ms. Each later refusal doubles
-that wait, up to 5 s. Opening the socket does not put the wait back to
-200 ms. The wait returns to 200 ms only when the session that just died
-had finished one application frame, or had stayed up for 200 ms. A
-connect that drops sooner keeps the grown wait, so a flapping peer does
-not reconnect every 200 ms. One attempt is started per poll.
+that wait, and the wait stops growing at 5 s. Opening the socket does not
+put the wait back to 200 ms. The wait returns to 200 ms only when the
+session that just died had one submitted slot fully accepted by `send()`.
+Time blocked inside `connect_timeout`, and time spent up while `send()`
+makes no progress, do not count. The stamp stored for the open is read
+from the clock after `open` returns, and that read is not done while the
+state lock is held. A connect that drops without a completed slot keeps
+the grown wait. One attempt is started per poll.
 
 The TX hold is 32 bytes, one slot. A new slot is dropped while that hold
 is unfinished. If `send()` has not finished the slot within 50 ms, the
@@ -279,8 +286,11 @@ backpressure. A failed `send()` in a poll that also received bytes drops
 the connection, discards the RX staging for that connection, and clears
 the frame decoder before those bytes can be decoded. Disconnect, peer
 change, and a new connection do the same for leftover RX and for a
-half-parsed `C0` frame. Nothing queued in the application hold is
-replayed on the next connect. The 12500 microsecond scheduler is
+half-parsed `C0` frame, and they clear `fresh` on every phase-one label.
+Clearing the half-parsed frame does not by itself retire a sample that
+was already decoded. Nothing queued in the application hold is
+replayed on the next connect, and reconnect does not mark the previous
+sample fresh again. The 12500 microsecond scheduler is
 unchanged and still emits one slot per poll.
 
 What this does not prove: electrical 429 bit timing, NT1-M packing delay,

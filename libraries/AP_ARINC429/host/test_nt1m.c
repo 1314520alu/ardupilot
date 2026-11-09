@@ -38,6 +38,7 @@ typedef struct {
     int send_max;
     int fail_send;
     int block_send;
+    uint32_t open_delay_us;
     uint8_t sent[256];
     int sent_n;
     uint8_t inbox[256];
@@ -49,6 +50,13 @@ typedef struct {
 } script_io_t;
 
 static script_io_t g_io;
+static uint32_t g_clock;
+
+static uint32_t test_clock(void *ctx)
+{
+    (void)ctx;
+    return g_clock;
+}
 
 static int script_open(void *ctx, uint32_t ip, uint16_t port)
 {
@@ -58,6 +66,9 @@ static int script_open(void *ctx, uint32_t ip, uint16_t port)
     io->open_calls++;
     if (io->fail_open) {
         return -1;
+    }
+    if (io->open_delay_us != 0u) {
+        g_clock += io->open_delay_us;
     }
     if (io->progress_left > 0) {
         io->progress_left--;
@@ -626,6 +637,239 @@ static void test_tx_age_and_write_fail(void)
               "bytes read beside the failed write do not continue into the next session");
 }
 
+static uint32_t disc_word(uint8_t label, uint16_t data, uint8_t sm)
+{
+    uint32_t w = label;
+    w |= (uint32_t)data << 13;
+    w |= ((uint32_t)(sm & 3u)) << 29;
+    return a429_apply_odd_parity(w);
+}
+
+static void feed_words(a429_core_t *core, const uint32_t *words, uint8_t nwords, uint32_t *now)
+{
+    uint8_t buf[64];
+    uint8_t n = 0;
+    int spins = 0;
+    nt_expect(a429_frame_encode(A429_FRAME_UART429S_C0, words, nwords, buf, (uint8_t)sizeof(buf), &n) == 1,
+              "phase-one frames fit one read buffer pair");
+    memcpy(g_io.inbox, buf, n);
+    g_io.inbox_n = n;
+    g_io.inbox_r = 0;
+    g_io.recv_max = 32;
+    while (g_io.inbox_r < g_io.inbox_n && spins < 4) {
+        *now += 1000u;
+        a429_core_update(core, *now);
+        spins++;
+    }
+    nt_expect(g_io.inbox_r == g_io.inbox_n, "the script delivered every frame byte");
+}
+
+static void test_disconnect_clears_fresh(void)
+{
+    a429_core_t core;
+    uint32_t words[A429_RX_N];
+    uint32_t saved_us[A429_RX_N];
+    uint32_t saved_raw[A429_RX_N];
+    float saved_eu[4];
+    uint32_t rx_count;
+    uint32_t valid_count;
+    uint32_t timeout_count;
+    uint32_t now;
+    uint32_t bad = 0;
+    uint32_t again = 0;
+    float eu = -1.0f;
+    int16_t data = 0;
+    uint8_t i;
+    const float expect_eu[4] = {50.0f, 10.0f, 0.0f, 10.0f};
+
+    nt_expect(a429_encode_bnr(0144, 0, A429_SM_NORMAL, 50.0f, &words[0]) == 1, "Ng50");
+    nt_expect(a429_encode_bnr(0145, 0, A429_SM_NORMAL, 10.0f, &words[1]) == 1, "Np10");
+    nt_expect(a429_encode_bnr(0147, 0, A429_SM_NORMAL, 0.0f, &words[2]) == 1, "T45 0");
+    nt_expect(a429_encode_bnr(0151, 0, A429_SM_NORMAL, 10.0f, &words[3]) == 1, "torque 10");
+    words[4] = disc_word(0175, 0x1111u, A429_SM_NORMAL);
+    words[5] = disc_word(0176, 0x2222u, A429_SM_NORMAL);
+    words[6] = disc_word(0177, 0x3333u, A429_SM_NORMAL);
+
+    a429_core_init(&core);
+    script_reset(&core.tcp);
+    a429_core_set_frame(&core, A429_FRAME_UART429S_C0);
+    a429_tcp_configure(&core.tcp, 1, 0x0A000001u, 8887);
+    now = 0;
+    a429_core_update(&core, now);
+    nt_expect(core.tcp.state == A429_TCP_UP, "freshness session is up");
+    nt_expect(core.link.rx[0].timeout_us == 0u, "Ng timeout stays at the default 0");
+    feed_words(&core, words, A429_RX_N, &now);
+    for (i = 0; i < A429_RX_N; i++) {
+        saved_us[i] = core.link.rx[i].valid_us;
+        saved_raw[i] = core.link.rx[i].last_valid.raw;
+        nt_expect(core.link.rx[i].fresh == 1u, "every phase-one label starts fresh");
+        nt_expect(core.link.rx[i].timeout_count == 0u, "timeout 0 did not fire");
+    }
+    nt_expect(a429_link_fresh_eu(&core.link, 0, &eu) == 1 && eu > 49.9f && eu < 50.1f, "Ng getter is live");
+    nt_expect(a429_link_fresh_eu(&core.link, 1, &eu) == 1 && eu > 9.9f && eu < 10.1f, "Np getter is live");
+    nt_expect(a429_link_fresh_eu(&core.link, 2, &eu) == 1 && eu > -0.1f && eu < 0.1f, "T45 getter is live");
+    nt_expect(a429_link_fresh_eu(&core.link, 3, &eu) == 1 && eu > 9.9f && eu < 10.1f, "torque getter is live");
+    nt_expect(a429_link_fresh_eu(&core.link, 4, &eu) == 0, "a discrete label has no EU getter");
+    nt_expect(a429_link_fresh_disc(&core.link, 4, &data) == 1 && data == (int16_t)0x1111, "warn getter");
+    nt_expect(a429_link_fresh_disc(&core.link, 5, &data) == 1 && data == (int16_t)0x2222, "state getter");
+    nt_expect(a429_link_fresh_disc(&core.link, 6, &data) == 1 && data == (int16_t)0x3333, "warn2 getter");
+    for (i = 0; i < 4u; i++) {
+        saved_eu[i] = core.link.rx[i].last_valid_eu;
+        nt_expect(saved_eu[i] > expect_eu[i] - 0.1f && saved_eu[i] < expect_eu[i] + 0.1f,
+                  "historical EU matches the live sample");
+    }
+    rx_count = core.link.counters.rx_count;
+    valid_count = core.link.counters.valid_count;
+    timeout_count = 0;
+
+    g_io.connected = 0;
+    g_io.inbox_n = 0;
+    g_io.inbox_r = 0;
+    now += 1000u;
+    a429_core_update(&core, now);
+    for (i = 0; i < A429_RX_N; i++) {
+        nt_expect(core.link.rx[i].fresh == 0u, "disconnect clears freshness at timeout 0");
+        nt_expect(core.link.rx[i].valid_us == saved_us[i], "disconnect keeps valid_us");
+        nt_expect(core.link.rx[i].last_valid.raw == saved_raw[i], "disconnect keeps last_valid");
+        nt_expect(core.link.rx[i].timeout_count == 0u, "disconnect is not a timeout");
+    }
+    nt_expect(a429_link_fresh_eu(&core.link, 0, &eu) == 0, "Ng getter is false after disconnect");
+    nt_expect(a429_link_fresh_disc(&core.link, 4, &data) == 0, "warn getter is false after disconnect");
+    nt_expect(core.link.counters.rx_count == rx_count && core.link.counters.valid_count == valid_count,
+              "disconnect does not invent counter events");
+    now += 1000u;
+    a429_core_update(&core, now);
+    nt_expect(core.tcp.disconnects == 1u, "a second poll during backoff is not another disconnect");
+    nt_expect(core.link.rx[0].fresh == 0u && core.link.rx[0].timeout_count == timeout_count,
+              "repeated session loss is idempotent");
+
+    now = core.tcp.next_attempt_us;
+    g_io.inbox_n = 0;
+    g_io.inbox_r = 0;
+    a429_core_update(&core, now);
+    nt_expect(core.tcp.state == A429_TCP_UP, "reconnects with an empty stream");
+    for (i = 0; i < A429_RX_N; i++) {
+        nt_expect(core.link.rx[i].fresh == 0u, "reconnect does not restore a stale sample");
+        nt_expect(core.link.rx[i].valid_us == saved_us[i] && core.link.rx[i].last_valid.raw == saved_raw[i],
+                  "history survives the empty reconnect");
+    }
+    nt_expect(a429_link_fresh_eu(&core.link, 0, &eu) == 0, "Ng getter stays false with no new sample");
+
+    nt_expect(a429_encode_bnr(0144, 0, A429_SM_FAIL, 50.0f, &bad) == 1, "invalid Ng");
+    feed_words(&core, &bad, 1, &now);
+    nt_expect(core.link.rx[0].fresh == 0u && core.link.rx[0].valid_us == saved_us[0],
+              "an invalid first sample stays invalid");
+    nt_expect(core.link.rx[0].last_valid.raw == saved_raw[0], "the invalid word does not replace history");
+    nt_expect(a429_link_fresh_eu(&core.link, 0, &eu) == 0, "Ng getter rejects the invalid word");
+
+    nt_expect(a429_encode_bnr(0144, 0, A429_SM_NORMAL, 60.0f, &again) == 1, "Ng60");
+    feed_words(&core, &again, 1, &now);
+    nt_expect(a429_link_fresh_eu(&core.link, 0, &eu) == 1 && eu > 59.9f && eu < 60.1f,
+              "a new valid sample is fresh");
+    nt_expect(core.link.rx[0].valid_us == now && core.link.rx[0].last_valid.raw == again,
+              "the new sample updates history");
+    nt_expect(core.link.rx[1].fresh == 0u && core.link.rx[1].last_valid.raw == saved_raw[1],
+              "other labels stay historical");
+
+    saved_us[0] = core.link.rx[0].valid_us;
+    a429_tcp_configure(&core.tcp, 1, 0x0A000001u, 9000);
+    now += 1000u;
+    a429_core_update(&core, now);
+    nt_expect(core.link.rx[0].fresh == 0u && core.link.rx[0].valid_us == saved_us[0],
+              "a peer change clears freshness and keeps history");
+    a429_tcp_configure(&core.tcp, 0, 0, 0);
+    now += 1000u;
+    a429_core_update(&core, now);
+    nt_expect(core.link.rx[0].fresh == 0u && core.link.rx[0].last_valid.raw == again,
+              "disabling the client leaves history and stays unfresh");
+    a429_link_session_lost(&core.link);
+    nt_expect(core.link.rx[0].fresh == 0u && core.link.rx[0].valid_us == saved_us[0] &&
+              core.link.rx[0].timeout_count == 0u, "a repeated loss does not move history or counters");
+}
+
+static void grow_to_800ms(a429_tcp_t *tcp)
+{
+    a429_tcp_configure(tcp, 1, 0x0A000001u, 8887);
+    g_io.fail_open = 1;
+    a429_tcp_poll(tcp, 0);
+    a429_tcp_poll(tcp, A429_TCP_BACKOFF_MIN_US);
+    g_io.fail_open = 0;
+    nt_expect(tcp->backoff_us == 800000u, "two refusals grow the wait to 800 ms");
+    nt_expect(tcp->next_attempt_us == 600000u, "the next attempt is at 600 ms");
+}
+
+static void test_backoff_needs_a_completed_frame(void)
+{
+    a429_tcp_t tcp;
+    uint8_t frame[5] = {0xC0u, 0x01u, 0x02u, 0x03u, 0x04u};
+    uint32_t t;
+    int i;
+
+    script_reset(&tcp);
+    grow_to_800ms(&tcp);
+    g_clock = 600000u;
+    g_io.open_delay_us = 200000u;
+    a429_tcp_set_clock(&tcp, test_clock, 0);
+    a429_tcp_poll(&tcp, 600000u);
+    nt_expect(tcp.state == A429_TCP_UP, "slow open still connects");
+    nt_expect(g_clock == 800000u && tcp.up_since_us == g_clock,
+              "up_since is the clock after open returns, not the poll entry");
+    nt_expect(tcp.backoff_us == 800000u, "the slow open does not shrink backoff");
+    g_io.block_send = 1;
+    a429_tcp_poll(&tcp, g_clock);
+    nt_expect(tcp.session_stable == 0u && tcp.state == A429_TCP_UP,
+              "the first poll after a slow open is not a stable session");
+    g_io.block_send = 0;
+    g_io.fail_send = 1;
+    nt_expect(a429_tcp_submit(&tcp, frame, 5, g_clock) == 1, "queue a slot that will fail");
+    t = g_clock;
+    a429_tcp_poll(&tcp, t);
+    nt_expect(tcp.state == A429_TCP_BACKOFF, "the slow session drops");
+    nt_expect(tcp.next_attempt_us == t + 800000u, "slow open/drop keeps the 800 ms wait");
+
+    script_reset(&tcp);
+    grow_to_800ms(&tcp);
+    a429_tcp_poll(&tcp, 600000u);
+    nt_expect(tcp.state == A429_TCP_UP, "zero-progress session connects");
+    g_io.block_send = 1;
+    nt_expect(a429_tcp_submit(&tcp, frame, 5, 600000u) == 1, "queue a slot that would-blocks");
+    a429_tcp_poll(&tcp, 600000u + 1000u);
+    nt_expect(tcp.session_stable == 0u && tcp.state == A429_TCP_UP && g_io.sent_n == 0,
+              "a would-block accepts no progress");
+    a429_tcp_poll(&tcp, 600000u + 200000u);
+    nt_expect(tcp.session_stable == 0u && tcp.state == A429_TCP_UP,
+              "200 ms online with no completed slot is not a stable session");
+    g_io.connected = 0;
+    a429_tcp_poll(&tcp, 800000u);
+    nt_expect(tcp.next_attempt_us == 800000u + 800000u, "zero-TX drop keeps the 800 ms wait");
+
+    script_reset(&tcp);
+    grow_to_800ms(&tcp);
+    a429_tcp_poll(&tcp, 600000u);
+    g_io.send_max = 5;
+    nt_expect(a429_tcp_submit(&tcp, frame, 5, 600000u) == 1, "queue a whole frame");
+    a429_tcp_poll(&tcp, 600000u);
+    nt_expect(tcp.session_stable == 1u && g_io.sent_n == 5, "a completed frame is the stable session");
+    g_io.fail_send = 1;
+    nt_expect(a429_tcp_submit(&tcp, frame, 5, 600001u) == 1, "queue the slot that will fail");
+    a429_tcp_poll(&tcp, 600001u);
+    nt_expect(tcp.next_attempt_us == 600001u + A429_TCP_BACKOFF_MIN_US,
+              "meaningful progress returns the next wait to 200 ms");
+    g_io.fail_send = 0;
+    a429_tcp_poll(&tcp, 600001u + A429_TCP_BACKOFF_MIN_US);
+    nt_expect(tcp.state == A429_TCP_UP, "the minimum wait reconnects after a completed frame");
+
+    script_reset(&tcp);
+    a429_tcp_configure(&tcp, 1, 0x0A000001u, 8887);
+    g_io.fail_open = 1;
+    t = 0;
+    for (i = 0; i < 8; i++) {
+        a429_tcp_poll(&tcp, t);
+        t = tcp.next_attempt_us;
+    }
+    nt_expect(tcp.backoff_us == A429_TCP_BACKOFF_MAX_US, "backoff stops at 5 s");
+}
+
 static void test_unstable_backoff(void)
 {
     a429_tcp_t tcp;
@@ -789,6 +1033,8 @@ int a429_nt1m_tests(void)
     test_zero_octet_peer();
     test_tx_age_and_write_fail();
     test_unstable_backoff();
+    test_disconnect_clears_fresh();
+    test_backoff_needs_a_completed_frame();
 #if !defined(_WIN32)
     test_mock_server();
 #endif

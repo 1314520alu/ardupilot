@@ -58,9 +58,9 @@
  * connection instead of being spliced to a newer frame. Closing the socket
  * does not purge bytes the OS or the NT1-M has already accepted. */
 #define A429_TCP_TX_MAX_AGE_US 50000u
-/* Backoff returns to the minimum only after a completed frame or this long
- * up. A connect that dies sooner keeps the grown backoff. */
-#define A429_TCP_STABLE_US 200000u
+/* A session is stable only after send() has accepted one complete submitted
+ * slot. Handshake time and time spent up with no completed slot do not
+ * qualify. The backoff cap below is unchanged. */
 
 #define A429_TCP_OFF 0u
 #define A429_TCP_BACKOFF 1u
@@ -254,6 +254,8 @@ typedef struct {
     uint32_t tx_queued_us;
     uint32_t up_since_us;
     uint8_t session_stable;
+    uint32_t (*now_us_fn)(void *ctx);
+    void *now_us_ctx;
     uint8_t tx[A429_TCP_TX_CAP];
     uint8_t tx_len;
     uint8_t tx_off;

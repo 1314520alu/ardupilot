@@ -45,6 +45,7 @@ public:
     void sim_clear_tx(void);
 
     bool get_fresh_eu(uint8_t rx_index, float &eu) const;
+    bool get_fresh_disc(uint8_t rx_index, int16_t &data) const;
     uint32_t parity_error_count(void) const
     {
         return _core.link.counters.parity_errors;
@@ -66,6 +67,7 @@ private:
     static void tcp_stream_close(void *ctx);
     static void tcp_lock_cb(void *ctx);
     static void tcp_unlock_cb(void *ctx);
+    static uint32_t tcp_stream_now(void *ctx);
     bool _tcp_thread_started;
     SocketAPM *_tcp_sock;
     HAL_Semaphore _tcp_sem;

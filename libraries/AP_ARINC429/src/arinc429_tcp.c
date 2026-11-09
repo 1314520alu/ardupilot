@@ -65,6 +65,17 @@ void a429_tcp_set_stream(a429_tcp_t *tcp, const a429_stream_t *stream)
     tcp_unlock(tcp);
 }
 
+void a429_tcp_set_clock(a429_tcp_t *tcp, uint32_t (*now_us)(void *ctx), void *ctx)
+{
+    if (tcp == 0) {
+        return;
+    }
+    tcp_lock(tcp);
+    tcp->now_us_fn = now_us;
+    tcp->now_us_ctx = ctx;
+    tcp_unlock(tcp);
+}
+
 void a429_tcp_set_lock(a429_tcp_t *tcp, void (*lock)(void *ctx), void (*unlock)(void *ctx), void *ctx)
 {
     if (tcp == 0) {
@@ -107,8 +118,8 @@ static void tcp_fail(a429_tcp_t *tcp, uint32_t now_us, int established)
     tcp->state = A429_TCP_BACKOFF;
     if (established) {
         tcp->disconnects++;
-        /* A session that completed a frame, or stayed up, starts the next
-         * wait at the minimum. An immediate connect/drop keeps growing it. */
+        /* Only a completed submitted slot returns the wait to the minimum.
+         * A slow handshake or an idle connection keeps the grown wait. */
         if (tcp->session_stable) {
             tcp->backoff_us = A429_TCP_BACKOFF_MIN_US;
         }
@@ -141,6 +152,8 @@ void a429_tcp_poll(a429_tcp_t *tcp, uint32_t now_us)
     uint8_t tx_len;
     uint8_t tx_off;
     uint32_t tx_queued_us;
+    uint32_t (*now_fn)(void *);
+    void *now_ctx;
     uint8_t rx_space;
     int ns = 0;
     int nr = 0;
@@ -160,6 +173,8 @@ void a429_tcp_poll(a429_tcp_t *tcp, uint32_t now_us)
     tx_len = tcp->tx_len;
     tx_off = tcp->tx_off;
     tx_queued_us = tcp->tx_queued_us;
+    now_fn = tcp->now_us_fn;
+    now_ctx = tcp->now_us_ctx;
     if (tx_off < tx_len) {
         memcpy(tx_copy, tcp->tx, tx_len);
     }
@@ -260,10 +275,6 @@ void a429_tcp_poll(a429_tcp_t *tcp, uint32_t now_us)
                 tcp->session_stable = 1;
             }
         }
-        if (!tcp->session_stable &&
-            (int32_t)(now_us - tcp->up_since_us) >= (int32_t)A429_TCP_STABLE_US) {
-            tcp->session_stable = 1;
-        }
         if (nr < 0) {
             tcp_fail(tcp, now_us, 1);
             tcp_unlock(tcp);
@@ -289,7 +300,14 @@ void a429_tcp_poll(a429_tcp_t *tcp, uint32_t now_us)
     }
 
     {
-        int opened = tcp->stream.open(tcp->stream.ctx, ip, port);
+        int opened;
+        uint32_t opened_us = now_us;
+        opened = tcp->stream.open(tcp->stream.ctx, ip, port);
+        if (now_fn != 0) {
+            /* After open returns, outside the state lock. A blocking
+             * connect must not be timed from the poll's entry stamp. */
+            opened_us = now_fn(now_ctx);
+        }
         tcp_lock(tcp);
         if (tcp->epoch != epoch || !peer_ok(tcp)) {
             tcp_unlock(tcp);
@@ -301,7 +319,7 @@ void a429_tcp_poll(a429_tcp_t *tcp, uint32_t now_us)
             tcp->state = A429_TCP_UP;
             tcp->connect_ok++;
             tcp->session_stable = 0;
-            tcp->up_since_us = now_us;
+            tcp->up_since_us = opened_us;
             tcp->epoch++;
         } else if (opened > 0) {
             tcp->state = A429_TCP_CONNECTING;

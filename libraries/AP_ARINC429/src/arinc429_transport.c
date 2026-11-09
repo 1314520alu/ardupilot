@@ -107,6 +107,7 @@ void a429_core_update(a429_core_t *core, uint32_t now_us)
             gotb = a429_tcp_drain_epoch(&core->tcp, raw, (uint8_t)sizeof(raw), &epoch);
             if (epoch != core->tcp_epoch_seen) {
                 a429_frame_dec_resync(&core->frame_dec);
+                a429_link_session_lost(&core->link);
                 core->tcp_epoch_seen = epoch;
             }
             if (gotb == 0) {
