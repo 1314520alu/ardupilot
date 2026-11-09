@@ -337,12 +337,14 @@ The codec in this tree does the other thing. It stores the octal label as
 an integer in the low byte and applies odd parity to that logical word.
 `A429_FRAME=1` then writes that logical word after `0xC0`. For octal 0144
 the serial label byte is `0x64`. Under the page 4 decode rule, the label
-byte for octal 0144 would be the reverse, `0x26`, and odd parity would
-have to be computed again because reversing those eight bits changes the
-parity of the word. SDI, the data field, and SSM stay in the same bit
-positions. That wire profile is not implemented. `A429_FRAME` has no value
-for it, and this tree does not transmit `CD 00 00 55 55`, `CD 03 00 55 55`,
-or `CD 07 00 55 55`.
+byte for octal 0144 would be the reverse, `0x26`. Reversing those eight
+bits only reorders them, so the popcount is unchanged and the odd parity
+of the 32-bit word is unchanged. `0xE2710064` and `0xE2710026` are both
+odd. SDI, the data field, and SSM stay in the same bit positions. A later
+encoder may recompute odd parity after that swap; the result has to match
+the parity bit already on the word. That wire profile is not implemented.
+`A429_FRAME` has no value for it, and this tree does not transmit
+`CD 00 00 55 55`, `CD 03 00 55 55`, or `CD 07 00 55 55`.
 
 Page 2 fixes the RS422 baud at 115200 and does not state the data bits,
 parity, or stop bits. Pages 2 and 3 describe the DB9, the 6–28 V supply,
