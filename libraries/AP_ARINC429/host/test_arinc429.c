@@ -562,8 +562,11 @@ int a429_host_tests(void)
 }
 
 #ifndef A429_NO_MAIN
+int a429_nt1m_tests(void);
 int main(void)
 {
-    return a429_host_tests() == 0 ? 0 : 1;
+    int fails = a429_host_tests();
+    fails += a429_nt1m_tests();
+    return fails == 0 ? 0 : 1;
 }
 #endif

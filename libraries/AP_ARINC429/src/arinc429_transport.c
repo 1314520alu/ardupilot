@@ -35,8 +35,24 @@ void a429_core_init(a429_core_t *core)
     memset(core, 0, sizeof(*core));
     a429_link_init(&core->link);
     a429_sched_init(&core->sched);
+    a429_tcp_init(&core->tcp);
+    a429_frame_dec_init(&core->frame_dec, A429_FRAME_NONE);
     core->endpoint.carrier = A429_CARRIER_UNSPECIFIED;
     core->transport = a429_transport_null();
+}
+
+void a429_core_set_frame(a429_core_t *core, uint8_t profile)
+{
+    if (core == 0) {
+        return;
+    }
+    if (profile != A429_FRAME_UART429S_C0) {
+        profile = A429_FRAME_NONE;
+    }
+    if (core->frame_profile != profile) {
+        core->frame_profile = profile;
+        a429_frame_dec_init(&core->frame_dec, profile);
+    }
 }
 
 void a429_core_set_transport(a429_core_t *core, const a429_transport_t *transport)
@@ -59,12 +75,43 @@ void a429_core_update(a429_core_t *core, uint32_t now_us)
     if (core == 0) {
         return;
     }
+    if (!core->tcp.io_external) {
+        a429_tcp_poll(&core->tcp, now_us);
+    }
     transport = (core->transport != 0) ? core->transport : a429_transport_null();
     if (a429_sched_poll(&core->sched, now_us)) {
         n = a429_link_build_tx(&core->link, tx, A429_TX_MAX);
-        if (n > 0 && transport->send_words != 0) {
+        if (n > 0 && core->frame_profile == A429_FRAME_UART429S_C0) {
+            uint8_t framed[A429_TCP_TX_CAP];
+            uint8_t framed_n = 0;
+            if (a429_frame_encode(core->frame_profile, tx, n, framed, (uint8_t)sizeof(framed), &framed_n) &&
+                a429_tcp_submit(&core->tcp, framed, framed_n)) {
+                /* one current slot is in the byte pipe; nothing is queued behind it */
+            } else {
+                core->tx_not_sent += n;
+            }
+        } else if (n > 0 && core->tcp.stream.open != 0) {
+            /* TCP is present and framing is not opted in. Do not invent bytes. */
+            core->tx_unframed += n;
+        } else if (n > 0 && transport->send_words != 0) {
             if (transport->send_words(transport->ctx, &core->endpoint, tx, n) != 0) {
                 core->tx_not_sent += n;
+            }
+        }
+    }
+    {
+        uint8_t raw[32];
+        uint8_t gotb;
+        while ((gotb = a429_tcp_drain(&core->tcp, raw, (uint8_t)sizeof(raw))) > 0) {
+            if (core->frame_profile == A429_FRAME_UART429S_C0) {
+                uint32_t words[8];
+                uint8_t nw = a429_frame_push(&core->frame_dec, raw, gotb, words, 8);
+                uint8_t wi;
+                for (wi = 0; wi < nw; wi++) {
+                    a429_link_ingest(&core->link, words[wi], now_us);
+                }
+            } else {
+                core->rx_unframed_bytes += gotb;
             }
         }
     }

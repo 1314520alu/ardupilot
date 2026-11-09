@@ -45,8 +45,24 @@ void a429_sim_set_nr(a429_link_t *link, float pct);
 int a429_sim_set_pcmd(a429_link_t *link, uint8_t index, const a429_pcmd_levels_t *levels);
 uint8_t a429_link_build_tx(a429_link_t *link, uint32_t *words, uint8_t max_n);
 
+uint8_t a429_label_bit_reverse(uint8_t logical_label);
+int a429_frame_encode(uint8_t profile, const uint32_t *words, uint8_t nwords,
+                      uint8_t *out, uint8_t cap, uint8_t *out_n);
+void a429_frame_dec_init(a429_frame_dec_t *dec, uint8_t profile);
+uint8_t a429_frame_push(a429_frame_dec_t *dec, const uint8_t *bytes, uint8_t n,
+                        uint32_t *words, uint8_t max_words);
+
+void a429_tcp_init(a429_tcp_t *tcp);
+void a429_tcp_set_stream(a429_tcp_t *tcp, const a429_stream_t *stream);
+void a429_tcp_set_lock(a429_tcp_t *tcp, void (*lock)(void *ctx), void (*unlock)(void *ctx), void *ctx);
+void a429_tcp_configure(a429_tcp_t *tcp, uint8_t enabled, uint32_t peer_ip, uint16_t peer_port);
+void a429_tcp_poll(a429_tcp_t *tcp, uint32_t now_us);
+int a429_tcp_submit(a429_tcp_t *tcp, const uint8_t *bytes, uint8_t n);
+uint8_t a429_tcp_drain(a429_tcp_t *tcp, uint8_t *out, uint8_t max_n);
+
 const a429_transport_t *a429_transport_null(void);
 void a429_core_init(a429_core_t *core);
+void a429_core_set_frame(a429_core_t *core, uint8_t profile);
 void a429_core_set_transport(a429_core_t *core, const a429_transport_t *transport);
 void a429_core_update(a429_core_t *core, uint32_t now_us);
 void a429_core_inject_rx(a429_core_t *core, uint32_t raw, uint32_t now_us);

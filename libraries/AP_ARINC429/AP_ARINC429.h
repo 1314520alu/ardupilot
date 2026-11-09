@@ -13,6 +13,11 @@
 #include "arinc429.h"
 
 #include <AP_Param/AP_Param.h>
+#include <AP_Networking/AP_Networking_Config.h>
+#if AP_NETWORKING_ENABLED
+#include <AP_HAL/Semaphores.h>
+#include <AP_HAL/utility/Socket.h>
+#endif
 
 /*
  * CS35 ARINC429 codec on the flight-controller side.
@@ -53,6 +58,18 @@ public:
 
 private:
     void apply_params(void);
+#if AP_NETWORKING_ENABLED
+    void tcp_worker(void);
+    static int tcp_stream_open(void *ctx, uint32_t ipv4_host, uint16_t port);
+    static int tcp_stream_send(void *ctx, const uint8_t *bytes, uint16_t n);
+    static int tcp_stream_recv(void *ctx, uint8_t *bytes, uint16_t n);
+    static void tcp_stream_close(void *ctx);
+    static void tcp_lock_cb(void *ctx);
+    static void tcp_unlock_cb(void *ctx);
+    bool _tcp_thread_started;
+    SocketAPM *_tcp_sock;
+    HAL_Semaphore _tcp_sem;
+#endif
 
     AP_Int8 _enable;
     AP_Int8 _sdi;
@@ -69,6 +86,7 @@ private:
     AP_Int16 _ip3;
     AP_Int32 _rem_port;
     AP_Int32 _loc_port;
+    AP_Int8 _frame;
 
     a429_core_t _core;
     bool _inited;

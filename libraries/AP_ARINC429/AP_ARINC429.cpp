@@ -15,6 +15,13 @@
 #include "AP_ARINC429.h"
 
 #include <AP_HAL/AP_HAL.h>
+#include <cstdio>
+#include <cstring>
+#include <errno.h>
+
+#if AP_NETWORKING_ENABLED
+#include <AP_Networking/AP_Networking.h>
+#endif
 
 extern const AP_HAL::HAL &hal;
 
@@ -92,8 +99,8 @@ const AP_Param::GroupInfo AP_ARINC429::var_info[] = {
     AP_GROUPINFO("WN2_TO", 8, AP_ARINC429, _to_wn2_ms, 0),
 
     // @Param: IP0
-    // @DisplayName: Future carrier address octet 0
-    // @Description: Stored remote IPv4 octet 0 for a future ARINC429 carrier. Unused. Does not open a socket and does not choose UDP or TCP.
+    // @DisplayName: NT1-M peer address octet 0
+    // @Description: Remote IPv4 octet 0 of the NT1-M TCP server. 0.0.0.0 with any zero octet or a zero port does not open a socket. This does not change the flight controller address. The manual factory example 192.168.3.7 is not programmed here.
     // @Range: 0 255
     // @User: Advanced
     AP_GROUPINFO("IP0", 9, AP_ARINC429, _ip0, 0),
@@ -120,18 +127,25 @@ const AP_Param::GroupInfo AP_ARINC429::var_info[] = {
     AP_GROUPINFO("IP3", 12, AP_ARINC429, _ip3, 0),
 
     // @Param: REM_PORT
-    // @DisplayName: Future carrier remote port
-    // @Description: Stored remote port for a future ARINC429 carrier. Unused. The transport protocol is unspecified.
+    // @DisplayName: NT1-M TCP server port
+    // @Description: Remote TCP port of the NT1-M. 0 does not open a socket. The manual factory example is 8887 and is not programmed here. The flight controller connects as a TCP client and uses an ephemeral local port.
     // @Range: 0 65535
     // @User: Advanced
     AP_GROUPINFO("REM_PORT", 13, AP_ARINC429, _rem_port, 0),
 
     // @Param: LOC_PORT
-    // @DisplayName: Future carrier local port
-    // @Description: Stored local port for a future ARINC429 carrier. Unused. This does not bind the shared Ethernet port.
+    // @DisplayName: Unused local port
+    // @Description: Stored only. The TCP client does not bind this port. The shared Ethernet interface is not claimed.
     // @Range: 0 65535
     // @User: Advanced
     AP_GROUPINFO("LOC_PORT", 14, AP_ARINC429, _loc_port, 0),
+
+    // @Param: FRAME
+    // @DisplayName: Provisional byte framing
+    // @Description: 0 leaves the TCP bytes uninterpreted. 1 opts into the provisional UART429-S profile, C0 plus the logical ARINC word little-endian, without label bit reversal. That profile is not confirmed for the supplied converter RS422 format and does not command the engine by itself.
+    // @Values: 0:None,1:UART429-S_C0_provisional
+    // @User: Advanced
+    AP_GROUPINFO("FRAME", 15, AP_ARINC429, _frame, 0),
 
     AP_GROUPEND
 };
@@ -194,24 +208,178 @@ void AP_ARINC429::apply_params(void)
         (uint32_t)clamp_octet(_ip3.get());
     _core.endpoint.remote_port = clamp_port(_rem_port.get());
     _core.endpoint.local_port = clamp_port(_loc_port.get());
-    _core.endpoint.carrier = A429_CARRIER_UNSPECIFIED;
+    if (_core.endpoint.remote_ipv4 != 0 && _core.endpoint.remote_port != 0) {
+        _core.endpoint.carrier = A429_CARRIER_TCP_CLIENT;
+    } else {
+        _core.endpoint.carrier = A429_CARRIER_UNSPECIFIED;
+    }
+    a429_tcp_configure(&_core.tcp, 1, _core.endpoint.remote_ipv4, _core.endpoint.remote_port);
+    a429_core_set_frame(&_core, _frame.get() == (int8_t)A429_FRAME_UART429S_C0 ?
+                        A429_FRAME_UART429S_C0 : A429_FRAME_NONE);
 }
+
+#if AP_NETWORKING_ENABLED
+int AP_ARINC429::tcp_stream_open(void *ctx, uint32_t ipv4_host, uint16_t port)
+{
+    AP_ARINC429 *self = static_cast<AP_ARINC429 *>(ctx);
+    char addr[16];
+    unsigned octets[4];
+    unsigned i;
+    char *p;
+    if (self->_tcp_sock != nullptr) {
+        delete self->_tcp_sock;
+        self->_tcp_sock = nullptr;
+    }
+    self->_tcp_sock = NEW_NOTHROW SocketAPM(false);
+    if (self->_tcp_sock == nullptr) {
+        return -1;
+    }
+    self->_tcp_sock->set_blocking(false);
+    octets[0] = (unsigned)((ipv4_host >> 24) & 0xFFu);
+    octets[1] = (unsigned)((ipv4_host >> 16) & 0xFFu);
+    octets[2] = (unsigned)((ipv4_host >> 8) & 0xFFu);
+    octets[3] = (unsigned)(ipv4_host & 0xFFu);
+    p = addr;
+    for (i = 0; i < 4u; i++) {
+        unsigned v = octets[i];
+        char tmp[3];
+        uint8_t n = 0;
+        if (i > 0) {
+            *p++ = '.';
+        }
+        do {
+            tmp[n++] = (char)('0' + (v % 10u));
+            v /= 10u;
+        } while (v > 0u && n < 3u);
+        while (n > 0u) {
+            *p++ = tmp[--n];
+        }
+    }
+    *p = '\0';
+    /* Blocks this worker thread for at most 200 ms. Not the vehicle loop. */
+    if (!self->_tcp_sock->connect_timeout(addr, port, 200)) {
+        delete self->_tcp_sock;
+        self->_tcp_sock = nullptr;
+        return -1;
+    }
+    self->_tcp_sock->set_blocking(false);
+    return 0;
+}
+
+int AP_ARINC429::tcp_stream_send(void *ctx, const uint8_t *bytes, uint16_t n)
+{
+    AP_ARINC429 *self = static_cast<AP_ARINC429 *>(ctx);
+    ssize_t wrote;
+    if (self->_tcp_sock == nullptr) {
+        return -1;
+    }
+    wrote = self->_tcp_sock->send(bytes, n);
+    if (wrote > 0) {
+        return (int)wrote;
+    }
+    if (wrote < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        return 0;
+    }
+    return -1;
+}
+
+int AP_ARINC429::tcp_stream_recv(void *ctx, uint8_t *bytes, uint16_t n)
+{
+    AP_ARINC429 *self = static_cast<AP_ARINC429 *>(ctx);
+    ssize_t got;
+    if (self->_tcp_sock == nullptr) {
+        return -1;
+    }
+    got = self->_tcp_sock->recv(bytes, n, 0);
+    if (got > 0) {
+        return (int)got;
+    }
+    if (got < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        return 0;
+    }
+    return -1;
+}
+
+void AP_ARINC429::tcp_stream_close(void *ctx)
+{
+    AP_ARINC429 *self = static_cast<AP_ARINC429 *>(ctx);
+    if (self->_tcp_sock != nullptr) {
+        delete self->_tcp_sock;
+        self->_tcp_sock = nullptr;
+    }
+}
+
+void AP_ARINC429::tcp_lock_cb(void *ctx)
+{
+    static_cast<AP_ARINC429 *>(ctx)->_tcp_sem.take_blocking();
+}
+
+void AP_ARINC429::tcp_unlock_cb(void *ctx)
+{
+    static_cast<AP_ARINC429 *>(ctx)->_tcp_sem.give();
+}
+
+void AP_ARINC429::tcp_worker(void)
+{
+    while (!hal.scheduler->is_system_initialized()) {
+        hal.scheduler->delay(100);
+    }
+    while (true) {
+        /* Do not open a socket until the existing stack has an address.
+         * This function does not write NET_IP or restart the interface. */
+        if (AP::network().get_ip_active() == 0) {
+            hal.scheduler->delay(100);
+            continue;
+        }
+        a429_tcp_poll(&_core.tcp, AP_HAL::micros());
+        hal.scheduler->delay(2);
+    }
+}
+#endif
 
 void AP_ARINC429::init(void)
 {
     a429_core_init(&_core);
+#if AP_NETWORKING_ENABLED
+    {
+        a429_stream_t stream;
+        memset(&stream, 0, sizeof(stream));
+        stream.open = tcp_stream_open;
+        stream.send = tcp_stream_send;
+        stream.recv = tcp_stream_recv;
+        stream.close = tcp_stream_close;
+        stream.ctx = this;
+        a429_tcp_set_lock(&_core.tcp, tcp_lock_cb, tcp_unlock_cb, this);
+        a429_tcp_set_stream(&_core.tcp, &stream);
+        _core.tcp.io_external = 1;
+        if (!_tcp_thread_started) {
+            _tcp_thread_started = hal.scheduler->thread_create(
+                                      FUNCTOR_BIND_MEMBER(&AP_ARINC429::tcp_worker, void),
+                                      "A429TCP", 2048, AP_HAL::Scheduler::PRIORITY_NET, 0);
+            if (!_tcp_thread_started) {
+                _core.tcp.io_external = 0;
+                a429_tcp_set_stream(&_core.tcp, nullptr);
+            }
+        }
+    }
+#endif
     _inited = true;
 }
 
 void AP_ARINC429::update(void)
 {
-    if (!_inited || _enable.get() == 0) {
+    if (!_inited) {
+        return;
+    }
+    if (_enable.get() == 0) {
+        a429_tcp_configure(&_core.tcp, 0, 0, 0);
+        a429_core_set_frame(&_core, A429_FRAME_NONE);
         return;
     }
     apply_params();
     /*
-     * Scheduling and word assembly only. The null carrier returns no
-     * frames. Fresh values are not copied into motors, servos, or EFI.
+     * Scheduling and byte-pipe maintenance. Words are not copied into
+     * motors, servos, EFI, or eRob. Unconfigured framing sends no bytes.
      */
     a429_core_update(&_core, AP_HAL::micros());
 }
@@ -281,6 +449,8 @@ AP_ARINC429 *arinc429()
 #include "src/arinc429_word.c"
 #include "src/arinc429_sched.c"
 #include "src/arinc429_link.c"
+#include "src/arinc429_frame.c"
+#include "src/arinc429_tcp.c"
 #include "src/arinc429_transport.c"
 
 #endif  // AP_ARINC429_ENABLED

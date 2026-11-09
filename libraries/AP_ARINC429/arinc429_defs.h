@@ -37,8 +37,26 @@
 #define A429_MODE_IDLE 3u
 #define A429_MODE_FLIGHT 4u
 
-/* Only value. UDP versus TCP is not chosen here. */
+/* Word transport used by host tests. The NT1-M path is a TCP client. */
 #define A429_CARRIER_UNSPECIFIED 0u
+#define A429_CARRIER_TCP_CLIENT 1u
+
+/* Byte interpretation. 0 does not turn socket bytes into words. */
+#define A429_FRAME_NONE 0u
+/* Provisional UART429-S profile: 0xC0 plus the logical word, little-endian.
+ * It does not bit-reverse the label and is not confirmed for the supplied
+ * converter's RS422 format. */
+#define A429_FRAME_UART429S_C0 1u
+
+#define A429_TCP_TX_CAP 32u
+#define A429_TCP_RX_CAP 64u
+#define A429_TCP_BACKOFF_MIN_US 200000u
+#define A429_TCP_BACKOFF_MAX_US 5000000u
+
+#define A429_TCP_OFF 0u
+#define A429_TCP_BACKOFF 1u
+#define A429_TCP_CONNECTING 2u
+#define A429_TCP_UP 3u
 
 /* Octal label span from the appendix, not individually decoded. */
 #define A429_LIFE_LABEL_FIRST 0200
@@ -186,10 +204,67 @@ typedef struct a429_transport {
     void *ctx;
 } a429_transport_t;
 
+/*
+ * Byte pipe under the TCP session. connect/send/recv must be usable from
+ * one owner thread. connect may block that thread; it must not be the
+ * vehicle main loop. send/recv return a byte count, 0 for would-block,
+ * and -1 for a hard failure or disconnect.
+ */
+typedef struct a429_stream {
+    int (*open)(void *ctx, uint32_t ipv4_host, uint16_t port);
+    int (*send)(void *ctx, const uint8_t *bytes, uint16_t n);
+    int (*recv)(void *ctx, uint8_t *bytes, uint16_t n);
+    void (*close)(void *ctx);
+    void *ctx;
+} a429_stream_t;
+
+typedef struct {
+    a429_stream_t stream;
+    void (*lock)(void *ctx);
+    void (*unlock)(void *ctx);
+    void *lock_ctx;
+    uint8_t enabled;
+    uint8_t io_external;
+    uint8_t force_close;
+    uint8_t state;
+    uint32_t peer_ip;
+    uint16_t peer_port;
+    uint32_t epoch;
+    uint32_t next_attempt_us;
+    uint32_t backoff_us;
+    uint32_t connect_ok;
+    uint32_t connect_fail;
+    uint32_t disconnects;
+    uint32_t tx_bytes;
+    uint32_t rx_bytes;
+    uint32_t tx_dropped;
+    uint32_t rx_backpressure;
+    uint32_t partial_sends;
+    uint8_t tx[A429_TCP_TX_CAP];
+    uint8_t tx_len;
+    uint8_t tx_off;
+    uint8_t rx[A429_TCP_RX_CAP];
+    uint8_t rx_count;
+} a429_tcp_t;
+
+typedef struct {
+    uint8_t profile;
+    uint8_t primed;
+    uint8_t hold[4];
+    uint8_t hold_n;
+    uint32_t skipped;
+    uint32_t frames;
+} a429_frame_dec_t;
+
 typedef struct {
     a429_sched_t sched;
     a429_link_t link;
     a429_endpoint_t endpoint;
     const a429_transport_t *transport;
     uint32_t tx_not_sent;
+    uint8_t frame_profile;
+    a429_tcp_t tcp;
+    a429_frame_dec_t frame_dec;
+    uint32_t rx_unframed_bytes;
+    uint32_t tx_unframed;
 } a429_core_t;

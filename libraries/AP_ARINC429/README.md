@@ -2,7 +2,8 @@
 
 Flight-controller side of appendix B from the CS35 engine electrical ICD.
 The codec builds and inspects 32-bit logical words. It does not command an
-engine, a servo, or a motor, and it does not open a socket.
+engine, a servo, or a motor. A TCP client can carry bytes to an EBYTE
+NT1-M. Those bytes are not ARINC words until framing is opted in.
 
 This branch is cut from `0ac57cc5` (`AP_eRobCANOpen: restore CSP slew and
 back off fault re-enable`, pull request 3). eRob CANopen on CAN2 is
@@ -17,8 +18,10 @@ unchanged. `AP_EROB_CANOPEN_ENABLED` stays set on ZeroOneX6.
 | Per-label freshness timeout | Host-tested. Default is off. 24 ms is the ECU's nominal refresh, not the timeout. |
 | Command-word levels and rising-edge detector | Host-tested. Levels are not edges. |
 | Simulation inject / simulation transmit snapshot | In the library. Nothing in the vehicle fills a snapshot from a flight mode. |
-| Ethernet / vendor framing | Not implemented. The null carrier returns -1 from send and 0 from receive, and it does not write a buffer. |
-| Converter hardware, UDP versus TCP, PROFINET | Not selected. Endpoint octets and ports are stored only. |
+| NT1-M TCP client byte pipe | Implemented on the existing `AP_Networking` lwIP stack. Host-tested against a scripted pipe and a local mock TCP server. Not a physical NT1-M. |
+| UART429-S `C0` framing | Provisional and off by default (`A429_FRAME=1`). Not confirmed for the supplied converter. |
+| Supplied converter RS422 format | Blocked. No RS422 document for that converter has been applied. |
+| Flight-controller IP, PROFINET sharing, physical 429 bit timing | Not changed and not proven by these tests. |
 | Hardware loopback, flashing, engine actuation | Not done. |
 
 `A429_ENABLE` defaults to 0, so a ZeroOneX6 image that contains the codec
@@ -214,27 +217,73 @@ is the operator's policy. The appendix's 24 ms ECU refresh is
 Only a valid word for that label moves `valid_us`. A timeout fires once
 when the age reaches the policy, then waits for a new valid word.
 
-## Carrier
+## NT1-M TCP client
 
-```c
-typedef struct a429_transport {
-    int (*send_words)(...); /* 0 only if a real carrier accepted the words */
-    int (*recv_words)(...); /* count copied, or a negative error */
-    void *ctx;
-} a429_transport_t;
-```
+The NT1-M ("超级网口") is a TTL-UART to Ethernet adapter. It is not the
+ARINC429 converter. The converter's TTL UART is what the module carries.
+The manual (V1.2) factory example is TCP server `192.168.3.7:8887`, serial
+115200 8N1, a 1024-byte serial buffer and a 512-byte packing length. It
+does not state a packing timeout. Those values are the printed defaults,
+not the settings of a delivered module, and this firmware does not write
+them. Heartbeat, registration, and "send the serial cache on connect" are
+module options. If cache-forward is left enabled, the module can still
+emit bytes it held before the TCP session. This client cannot disable that.
 
-`a429_transport_null()` is the only carrier in this tree. `send_words`
-returns -1. `recv_words` returns 0 and does not modify the caller's
-buffer. There is no UDP socket, no TCP socket, and no fake packet.
+The flight controller is a TCP client. `A429_IP0`..`A429_IP3` and
+`A429_REM_PORT` are the peer. Any zero address or a zero port leaves the
+socket closed. `A429_LOC_PORT` is not bound. The client uses an ephemeral
+local port. The manual example `192.168.3.7:8887` is not the parameter
+default. The flight-controller address is whatever `NET_*` already has.
+This code does not write `NET_IP`, `NET_NETMASK`, `NET_GW`, or `NET_DHCP`,
+and it does not restart the MAC. A belief that the bench network is
+`192.168.144.x` is not verified here.
 
-`A429_IP0` .. `A429_IP3`, `A429_REM_PORT` and `A429_LOC_PORT` are stored
-into `a429_endpoint_t` for the day a carrier exists. `carrier` is always
-`A429_CARRIER_UNSPECIFIED`. The endpoint is not bound.
+ZeroOneX6 has `ETH1`, so the hwdef turns on `AP_NETWORKING_ENABLED` and
+`HAL_USE_MAC`. `AP_Networking` already owns that interface and lwIP.
+`SocketAPM` is the socket API on that stack. `NET_ENABLE` still defaults
+to 0. The ARINC worker calls `AP::network().get_ip_active()` and does not
+open a socket while that address is 0. `startup_wait()` is not used,
+because on ChibiOS it blocks until an address exists. The worker waits
+the same way, off the vehicle thread.
 
-The customer checklist names TELEM3 as one possible converter return path
-and Ethernet as the PROFINET path. Converter selection is postponed, so
-neither path is implemented.
+`connect_timeout(..., 200)` can block the worker for 200 ms. It is not
+called from `AP_ARINC429::update()`. After connect, send and receive are
+non-blocking. Retries wait 200 ms, then double, and stop growing at 5 s.
+One attempt is started per poll. The TX hold is 32 bytes, one slot, and
+a new slot is dropped while that hold is unfinished. RX is 64 bytes. A
+full RX buffer stops the socket read and counts backpressure. Disconnect
+and peer change discard the TX hold. Nothing is replayed on the next
+connect. The 12500 microsecond scheduler is unchanged and still emits one
+slot per poll.
+
+What this does not prove: electrical 429 bit timing, NT1-M packing delay,
+PROFINET sharing the same RJ45, or the delivered module's mode. UDP is
+not implemented. The manual's UDP note (512 bit packets) is not a TCP rule.
+
+## Framing
+
+The TCP pipe and the byte interpretation are separate.
+
+`A429_FRAME` defaults to 0. Socket bytes are counted as
+`rx_unframed_bytes` and are not decoded into labels. A due transmit slot
+increments `tx_unframed` and is not written to the socket.
+
+`A429_FRAME=1` is an explicit opt-in named for the UART429-S manual, not
+for the supplied converter. The vendor said the network product uses their
+RS422 format. That sentence does not say the format is UART429-S. No
+RS422 document for the supplied converter is in this tree, so this profile
+stays off and is not a claim about that wire.
+
+The profile, when opted in, is `0xC0` plus the codec `uint32` in
+little-endian order. The first payload byte is the logical label. Octal
+label 036 is `0x1E` in this codec. Bit-reversing that byte is `0x78`,
+which is the UART429-S manual's example of label 036 on that product's
+wire. This profile does not apply that reversal. A `0xCD` byte is skipped
+as unknown. UART429-S speed commands are not generated.
+
+Until the converter's RS422 frame, label bit order, and packing are
+confirmed, do not treat `A429_FRAME=1` as hardware-ready. Engine, motor,
+servo, and eRob outputs are still not fed by these words.
 
 ## Vehicle hook
 
@@ -262,7 +311,11 @@ That suite hard-codes words that were calculated from the bit table
 (Ng 50% is `0xE2710064`), and it checks negative values, both ends of
 each phase-one range, all four SM values, parity and reserved-bit faults,
 NaN and infinity, command codes, per-label edges, startup and invalid
-samples, a missing-data timeout, a clock wrap, and a late tick.
+samples, a missing-data timeout, a clock wrap, and a late tick. The NT1-M
+tests add a scripted byte pipe and a local TCP server: invalid peer,
+fragmented and coalesced reads, partial writes, reconnect without replay,
+peer silence, a full RX buffer, one late scheduler slot, and the
+difference between logical label `0x1E` and wire example `0x78`.
 
 SITL repeats the same suite as `libraries/AP_ARINC429/tests/test_arinc429.cpp`
 when the board is built with gtest. SITL leaves the feature off, so the
