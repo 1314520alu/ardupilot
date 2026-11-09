@@ -261,6 +261,8 @@ typedef struct {
     uint32_t tx_queued_us;
     uint32_t up_since_us;
     uint8_t session_stable;
+    uint8_t send_inflight;
+    uint8_t conn_bytes_sent;
     uint32_t (*now_us_fn)(void *ctx);
     void *now_us_ctx;
     uint8_t tx[A429_TCP_TX_CAP];

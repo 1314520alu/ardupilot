@@ -226,12 +226,13 @@ same to every phase-one label even when its timeout is 0: `fresh` becomes
 0, while `last_valid`, `last_valid_eu`, and `valid_us` stay. Reconnect
 does not copy that history back into a fresh sample. `A429_ENABLE` 0
 clears freshness in that same update and does not schedule a slot.
-`get_fresh_eu` and `get_fresh_disc` also return false as soon as the TCP
-epoch changes, including before the next `update()` stores that fact.
-The raw `fresh` flag itself is cleared when `update()` runs. A worker
-disconnect and a getter on another thread are therefore not the same
-instant, and reading the slot directly can still see the old flag until
-that update.
+`get_fresh_eu` and `get_fresh_disc` are for the vehicle thread that calls
+`update()`. They return false when that thread can see a newer TCP epoch
+than the one `update()` last applied. The raw `fresh` flag is cleared
+when `update()` runs, which is later than the worker's socket close.
+These getters are not a lock and are not safe to call from arbitrary
+threads. The TCP worker is the only thread that opens, sends, receives,
+or closes the socket, and it does those outside the state lock.
 
 ## NT1-M TCP client
 
@@ -360,10 +361,14 @@ valid odd parity bit stays valid and an invalid one stays invalid. Receive
 applies the same swap and does not recompute parity. The manual example
 `0x629218C1` has label byte `C1`, which reverses to `0x83`, octal 203.
 
-Changing `A429_FRAME` or `A429_SDI` drops a half-parsed frame, drops an
-unsent slot, and asks the socket owner to close the connection when a
-prefix was already accepted. It clears `fresh` in that same call and
-re-arms the command-edge detectors, so the next valid sample only latches.
+Changing `A429_FRAME`, `A429_SDI`, the peer, or `A429_ENABLE` drops a
+half-parsed frame and an unsent slot, and clears `fresh` in that same
+call. The command-edge detectors are re-armed, so the next valid sample
+only latches. The socket is closed by its owner thread, not by the
+caller, when this connection has accepted any transmit byte or a
+`send` is still in flight. A new profile is not written onto that
+socket. `send` that finishes after the epoch has moved does not update
+the new session and does not close a socket opened later.
 `A429_ENABLE` still defaults to 0. Neither frame value sends
 `CD 00 00 55 55`, `CD 03 00 55 55`, or `CD 07 00 55 55`. Those three
 commands have a standalone encoder for tests. The scheduler does not call it.

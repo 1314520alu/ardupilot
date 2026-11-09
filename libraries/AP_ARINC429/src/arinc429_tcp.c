@@ -92,9 +92,12 @@ void a429_tcp_abandon_hold(a429_tcp_t *tcp)
         return;
     }
     tcp_lock(tcp);
-    if (tcp->tx_off > 0u && tcp->tx_off < tcp->tx_len) {
-        /* A prefix of the previous profile is already in the socket.
-         * The owner thread closes it. This call does not. */
+    /* tx_off is only the committed prefix. A send() still outside this
+     * lock may already have copied bytes into the socket, and a finished
+     * slot leaves tx_off at 0 while those bytes remain. Either one taints
+     * the connection for a new profile. */
+    if (tcp->send_inflight || tcp->conn_bytes_sent ||
+        (tcp->tx_off > 0u && tcp->tx_off < tcp->tx_len)) {
         tcp->force_close = 1;
     }
     tcp_drop_tx(tcp);
@@ -144,6 +147,7 @@ static void tcp_fail(a429_tcp_t *tcp, uint32_t now_us, int established)
         tcp->connect_fail++;
     }
     tcp->session_stable = 0;
+    tcp->conn_bytes_sent = 0;
     tcp->next_attempt_us = now_us + tcp->backoff_us;
     if (tcp->backoff_us > (A429_TCP_BACKOFF_MAX_US / 2u)) {
         tcp->backoff_us = A429_TCP_BACKOFF_MAX_US;
@@ -204,6 +208,7 @@ void a429_tcp_poll(a429_tcp_t *tcp, uint32_t now_us)
         tcp_drop_rx(tcp);
         tcp->state = A429_TCP_OFF;
         tcp->force_close = 0;
+        tcp->conn_bytes_sent = 0;
         tcp->epoch++;
         state = A429_TCP_OFF;
         epoch = tcp->epoch;
@@ -252,7 +257,48 @@ void a429_tcp_poll(a429_tcp_t *tcp, uint32_t now_us)
             tx_off = 0;
         }
         if (tx_off < tx_len && tcp->stream.send != 0) {
-            ns = tcp->stream.send(tcp->stream.ctx, tx_copy + tx_off, (uint16_t)(tx_len - tx_off));
+            uint8_t armed = 0;
+            tcp_lock(tcp);
+            if (tcp->epoch == epoch && tcp->state == A429_TCP_UP &&
+                !tcp->force_close && tcp->tx_off < tcp->tx_len) {
+                tcp->send_inflight = 1;
+                armed = 1;
+            }
+            tcp_unlock(tcp);
+            if (armed) {
+                ns = tcp->stream.send(tcp->stream.ctx, tx_copy + tx_off, (uint16_t)(tx_len - tx_off));
+                tcp_lock(tcp);
+                tcp->send_inflight = 0;
+                if (tcp->epoch != epoch || tcp->state != A429_TCP_UP || tcp->force_close) {
+                    /* The copy may already be in this socket. Do not apply it
+                     * to a newer generation, and do not keep this socket. */
+                    if (ns > 0) {
+                        tcp->conn_bytes_sent = 1;
+                        tcp->force_close = 1;
+                    }
+                    tcp_unlock(tcp);
+                    return;
+                }
+                if (ns > 0) {
+                    uint8_t step = (uint8_t)ns;
+                    if ((uint16_t)tx_off + step > tx_len) {
+                        step = (uint8_t)(tx_len - tx_off);
+                    }
+                    tcp->tx_off = (uint8_t)(tcp->tx_off + step);
+                    tcp->tx_bytes += step;
+                    tcp->conn_bytes_sent = 1;
+                    if (step < (uint8_t)(tx_len - tx_off)) {
+                        tcp->partial_sends++;
+                    }
+                    if (tcp->tx_off >= tcp->tx_len) {
+                        tcp_drop_tx(tcp);
+                        tcp->session_stable = 1;
+                    }
+                    tx_off = tcp->tx_off;
+                    tx_len = tcp->tx_len;
+                }
+                tcp_unlock(tcp);
+            }
         }
         want = rx_space;
         if (want > sizeof(rbuf)) {
@@ -276,21 +322,6 @@ void a429_tcp_poll(a429_tcp_t *tcp, uint32_t now_us)
             tcp_fail(tcp, now_us, 1);
             tcp_unlock(tcp);
             return;
-        }
-        if (ns > 0) {
-            uint8_t step = (uint8_t)ns;
-            if ((uint16_t)tx_off + step > tx_len) {
-                step = (uint8_t)(tx_len - tx_off);
-            }
-            tcp->tx_off = (uint8_t)(tcp->tx_off + step);
-            tcp->tx_bytes += step;
-            if (step < (uint8_t)(tx_len - tx_off)) {
-                tcp->partial_sends++;
-            }
-            if (tcp->tx_off >= tcp->tx_len) {
-                tcp_drop_tx(tcp);
-                tcp->session_stable = 1;
-            }
         }
         if (nr < 0) {
             tcp_fail(tcp, now_us, 1);
@@ -319,6 +350,8 @@ void a429_tcp_poll(a429_tcp_t *tcp, uint32_t now_us)
     {
         int opened;
         uint32_t opened_us = now_us;
+        void (*close_fn)(void *) = tcp->stream.close;
+        void *close_ctx = tcp->stream.ctx;
         opened = tcp->stream.open(tcp->stream.ctx, ip, port);
         if (now_fn != 0) {
             /* After open returns, outside the state lock. A blocking
@@ -326,8 +359,13 @@ void a429_tcp_poll(a429_tcp_t *tcp, uint32_t now_us)
             opened_us = now_fn(now_ctx);
         }
         tcp_lock(tcp);
-        if (tcp->epoch != epoch || !peer_ok(tcp)) {
+        if (tcp->epoch != epoch || !peer_ok(tcp) || tcp->force_close) {
             tcp_unlock(tcp);
+            /* This open belongs to the generation we snapshotted. Closing
+             * it cannot see a socket opened by a later poll. */
+            if (opened == 0 && close_fn != 0) {
+                close_fn(close_ctx);
+            }
             return;
         }
         if (opened == 0) {
@@ -336,6 +374,8 @@ void a429_tcp_poll(a429_tcp_t *tcp, uint32_t now_us)
             tcp->state = A429_TCP_UP;
             tcp->connect_ok++;
             tcp->session_stable = 0;
+            tcp->conn_bytes_sent = 0;
+            tcp->send_inflight = 0;
             tcp->up_since_us = opened_us;
             tcp->epoch++;
         } else if (opened > 0) {
@@ -353,7 +393,8 @@ int a429_tcp_submit(a429_tcp_t *tcp, const uint8_t *bytes, uint8_t n, uint32_t n
         return 0;
     }
     tcp_lock(tcp);
-    if (tcp->state != A429_TCP_UP || tcp->tx_off < tcp->tx_len) {
+    if (tcp->force_close || tcp->send_inflight || tcp->state != A429_TCP_UP ||
+        tcp->tx_off < tcp->tx_len) {
         tcp->tx_dropped++;
         tcp_unlock(tcp);
         return 0;

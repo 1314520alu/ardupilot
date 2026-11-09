@@ -47,7 +47,16 @@ typedef struct {
     int recv_max;
     int recv_calls;
     int open_calls;
+    int close_calls;
+    int conn_id;
+    uint8_t sent_conn[256];
 } script_io_t;
+
+static a429_core_t *g_hook_core;
+static void (*g_during_send)(void);
+static void (*g_during_recv)(void);
+static int g_during_send_armed;
+static int g_during_recv_armed;
 
 static script_io_t g_io;
 static uint32_t g_clock;
@@ -75,6 +84,7 @@ static int script_open(void *ctx, uint32_t ip, uint16_t port)
         return 1;
     }
     io->connected = 1;
+    io->conn_id++;
     return 0;
 }
 
@@ -85,6 +95,10 @@ static int script_send(void *ctx, const uint8_t *bytes, uint16_t n)
     uint16_t allow;
     if (!io->connected) {
         return -1;
+    }
+    if (g_during_send_armed && g_during_send != 0) {
+        g_during_send_armed = 0;
+        g_during_send();
     }
     if (io->block_send) {
         return 0;
@@ -102,6 +116,7 @@ static int script_send(void *ctx, const uint8_t *bytes, uint16_t n)
         allow = (uint16_t)io->send_max;
     }
     for (i = 0; i < allow && io->sent_n < (int)sizeof(io->sent); i++) {
+        io->sent_conn[io->sent_n] = (uint8_t)io->conn_id;
         io->sent[io->sent_n++] = bytes[i];
     }
     return (int)allow;
@@ -114,6 +129,10 @@ static int script_recv(void *ctx, uint8_t *bytes, uint16_t n)
     int take;
     int i;
     io->recv_calls++;
+    if (g_during_recv_armed && g_during_recv != 0) {
+        g_during_recv_armed = 0;
+        g_during_recv();
+    }
     if (!io->connected) {
         return -1;
     }
@@ -138,12 +157,17 @@ static void script_close(void *ctx)
 {
     script_io_t *io = (script_io_t *)ctx;
     io->connected = 0;
+    io->close_calls++;
 }
 
 static void script_reset(a429_tcp_t *tcp)
 {
     a429_stream_t stream;
     memset(&g_io, 0, sizeof(g_io));
+    g_during_send = 0;
+    g_during_recv = 0;
+    g_during_send_armed = 0;
+    g_during_recv_armed = 0;
     g_io.send_max = 1;
     g_io.recv_max = 1;
     a429_tcp_init(tcp);
@@ -900,6 +924,211 @@ static void test_unstable_backoff(void)
     nt_expect(tcp.state == A429_TCP_BACKOFF, "200 ms is too soon after an unstable drop");
 }
 
+static void hook_to_rs422(void)
+{
+    a429_core_set_frame(g_hook_core, A429_FRAME_RS422_429_1C);
+}
+
+static void hook_sdi(void)
+{
+    a429_core_set_sdi(g_hook_core, 1);
+}
+
+static void hook_disable(void)
+{
+    a429_tcp_configure(&g_hook_core->tcp, 0, 0, 0);
+    a429_core_set_frame(g_hook_core, A429_FRAME_NONE);
+    a429_link_session_lost(&g_hook_core->link);
+}
+
+static int frame_on_conn(uint8_t label, int conn, int *at)
+{
+    int i;
+    for (i = 0; i + 4 < g_io.sent_n; i++) {
+        if (g_io.sent[i] == 0xC0u && g_io.sent[i + 1] == label &&
+            g_io.sent_conn[i] == conn && g_io.sent_conn[i + 1] == conn &&
+            g_io.sent_conn[i + 2] == conn && g_io.sent_conn[i + 3] == conn &&
+            g_io.sent_conn[i + 4] == conn) {
+            if (at != 0) {
+                *at = i;
+            }
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void pump_nr(a429_core_t *core, uint32_t *now, int steps)
+{
+    int i;
+    for (i = 0; i < steps; i++) {
+        *now += 12500u;
+        a429_core_update(core, *now);
+    }
+}
+
+static void arm_nr_session(a429_core_t *core, uint32_t *now)
+{
+    a429_core_init(core);
+    script_reset(&core->tcp);
+    g_hook_core = core;
+    a429_core_set_frame(core, A429_FRAME_UART429S_C0);
+    a429_tcp_configure(&core->tcp, 1, 0x0A000001u, 8887);
+    a429_sim_set_nr(&core->link, 100.0f);
+    g_io.send_max = 5;
+    *now = 0;
+    a429_core_update(core, *now);
+}
+
+static void test_inflight_profile_switch(void)
+{
+    a429_core_t core;
+    uint32_t nr = 0;
+    uint32_t ng = 0;
+    uint8_t logical_b;
+    uint8_t wire_b;
+    uint8_t wire[5];
+    uint8_t legacy[5];
+    uint8_t n = 0;
+    uint32_t now;
+    int old_conn;
+    int new_conn;
+    int i;
+    int old_n;
+    float eu = -1.0f;
+
+    nt_expect(a429_encode_bnr(0311, 0, A429_SM_NORMAL, 100.0f, &nr) == 1, "Nr for in-flight switch");
+    logical_b = (uint8_t)nr;
+    wire_b = a429_label_bit_reverse(logical_b);
+    nt_expect(logical_b == 0xC9u && wire_b == 0x93u, "Nr label is logical C9 and wire 93");
+
+    arm_nr_session(&core, &now);
+    g_during_send = hook_to_rs422;
+    g_during_send_armed = 1;
+    pump_nr(&core, &now, 6);
+    old_conn = 0;
+    new_conn = 0;
+    for (i = 0; i + 1 < g_io.sent_n; i++) {
+        if (g_io.sent[i] == 0xC0u && g_io.sent[i + 1] == logical_b) {
+            old_conn = g_io.sent_conn[i];
+        }
+        if (g_io.sent[i] == 0xC0u && g_io.sent[i + 1] == wire_b && g_io.sent_conn[i] != old_conn) {
+            new_conn = g_io.sent_conn[i];
+        }
+    }
+    nt_expect(old_conn != 0 && frame_on_conn(logical_b, old_conn, 0), "the in-flight send still delivers logical C9");
+    nt_expect(new_conn != 0 && new_conn != old_conn && frame_on_conn(wire_b, new_conn, 0),
+              "wire 93 is a later connection, not the socket that took C9");
+    nt_expect(g_io.close_calls >= 1, "the owner closes the tainted socket");
+
+    arm_nr_session(&core, &now);
+    g_io.send_max = 2;
+    g_during_send = hook_to_rs422;
+    g_during_send_armed = 1;
+    pump_nr(&core, &now, 2);
+    g_io.send_max = 5;
+    pump_nr(&core, &now, 6);
+    old_n = 0;
+    old_conn = 0;
+    for (i = 0; i < g_io.sent_n; i++) {
+        if (g_io.sent_conn[i] != 0 && old_conn == 0) {
+            old_conn = g_io.sent_conn[i];
+        }
+        if (g_io.sent_conn[i] == old_conn) {
+            old_n++;
+        }
+    }
+    nt_expect(old_conn != 0 && old_n == 2 && g_io.sent[0] == 0xC0u && g_io.sent[1] == logical_b,
+              "only the partial old prefix reaches the tainted socket");
+    new_conn = 0;
+    for (i = 0; i + 1 < g_io.sent_n; i++) {
+        if (g_io.sent[i] == 0xC0u && g_io.sent[i + 1] == wire_b && g_io.sent_conn[i] != old_conn) {
+            new_conn = g_io.sent_conn[i];
+        }
+    }
+    nt_expect(new_conn != 0 && frame_on_conn(wire_b, new_conn, 0),
+              "the partial prefix is not completed with a new C0 on that socket");
+
+    arm_nr_session(&core, &now);
+    g_io.block_send = 1;
+    g_during_send = hook_to_rs422;
+    g_during_send_armed = 1;
+    pump_nr(&core, &now, 3);
+    nt_expect(g_io.sent_n == 0, "would-block during the switch copies no old byte");
+    g_io.block_send = 0;
+    g_io.send_max = 5;
+    pump_nr(&core, &now, 6);
+    nt_expect(frame_on_conn(wire_b, g_io.conn_id, 0) && !frame_on_conn(logical_b, 1, 0),
+              "after a would-block switch the next frame is wire 93 on the live connection");
+
+    arm_nr_session(&core, &now);
+    g_io.fail_send = 1;
+    g_during_send = hook_to_rs422;
+    g_during_send_armed = 1;
+    pump_nr(&core, &now, 3);
+    nt_expect(g_io.sent_n == 0, "a send error during the switch copies no old byte");
+    g_io.fail_send = 0;
+    g_io.send_max = 5;
+    pump_nr(&core, &now, 8);
+    nt_expect(g_io.close_calls >= 1 && frame_on_conn(wire_b, g_io.conn_id, 0),
+              "after a send error the next wire frame is on a connection the stale callback left open");
+
+    arm_nr_session(&core, &now);
+    g_during_send = hook_sdi;
+    g_during_send_armed = 1;
+    pump_nr(&core, &now, 8);
+    old_conn = 0;
+    new_conn = 0;
+    for (i = 0; i + 1 < g_io.sent_n; i++) {
+        if (g_io.sent[i] == 0xC0u && old_conn == 0) {
+            old_conn = g_io.sent_conn[i];
+        } else if (g_io.sent[i] == 0xC0u && g_io.sent_conn[i] != old_conn) {
+            new_conn = g_io.sent_conn[i];
+        }
+    }
+    nt_expect(old_conn != 0 && new_conn != 0 && g_io.close_calls >= 1,
+              "an SDI change during send closes that connection before the next frame");
+
+    arm_nr_session(&core, &now);
+    g_during_send = hook_disable;
+    g_during_send_armed = 1;
+    pump_nr(&core, &now, 3);
+    a429_tcp_configure(&core.tcp, 1, 0x0A000001u, 8887);
+    a429_core_set_frame(&core, A429_FRAME_RS422_429_1C);
+    g_io.send_max = 5;
+    pump_nr(&core, &now, 8);
+    nt_expect(frame_on_conn(wire_b, g_io.conn_id, 0) && g_io.close_calls >= 1,
+              "enable-off during send does not leave the next profile on that socket");
+
+    nt_expect(a429_encode_bnr(0144, 0, A429_SM_NORMAL, 50.0f, &ng) == 1, "Ng for in-flight recv");
+    nt_expect(a429_frame_encode(A429_FRAME_UART429S_C0, &ng, 1, legacy, 5, &n) == 1, "logical Ng frame");
+    nt_expect(a429_frame_encode(A429_FRAME_RS422_429_1C, &ng, 1, wire, 5, &n) == 1, "wire Ng frame");
+    a429_core_init(&core);
+    script_reset(&core.tcp);
+    g_hook_core = &core;
+    a429_core_set_frame(&core, A429_FRAME_UART429S_C0);
+    a429_tcp_configure(&core.tcp, 1, 0x0A000001u, 8887);
+    now = 0;
+    a429_core_update(&core, now);
+    g_io.recv_max = 5;
+    memcpy(g_io.inbox, legacy, 5);
+    g_io.inbox_n = 5;
+    g_io.inbox_r = 0;
+    g_during_recv = hook_to_rs422;
+    g_during_recv_armed = 1;
+    now += 1000u;
+    a429_core_update(&core, now);
+    nt_expect(core.link.rx[0].fresh == 0u && core.frame_dec.primed == 0u,
+              "bytes read on the old side of a profile switch are not decoded");
+    memcpy(g_io.inbox, wire, 5);
+    g_io.inbox_n = 5;
+    g_io.inbox_r = 0;
+    now += 1000u;
+    a429_core_update(&core, now);
+    nt_expect(a429_core_fresh_eu(&core, 0, &eu) == 1 && core.link.rx[0].view.raw == ng,
+              "a frame after the switch is kept when it belongs to the current generation");
+}
+
 static int buffer_has_cd(const uint8_t *bytes, int n)
 {
     int i;
@@ -1246,6 +1475,7 @@ int a429_nt1m_tests(void)
     test_disconnect_clears_fresh();
     test_backoff_needs_a_completed_frame();
     test_rs422_session();
+    test_inflight_profile_switch();
 #if !defined(_WIN32)
     test_mock_server();
 #endif
