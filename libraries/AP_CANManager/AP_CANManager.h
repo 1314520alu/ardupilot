@@ -33,6 +33,7 @@
 #endif
 
 #include "AP_CAN.h"
+#include <AP_eRobCANOpen/AP_eRobCANOpen_config.h>
 
 class CANSensor;
 
@@ -162,6 +163,9 @@ private:
         AP_Int8 _driver_type_11bit;
         AP_CANDriver* _uavcan;
         AP_CANDriver* _piccolocan;
+#if AP_EROB_CANOPEN_ENABLED
+        AP_CANDriver* _erob;
+#endif
     };
 
     CANIface_Params _interfaces[HAL_NUM_CAN_IFACES];
