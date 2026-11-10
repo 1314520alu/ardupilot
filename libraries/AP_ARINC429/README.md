@@ -1,9 +1,11 @@
 # CS35 ARINC429 in ArduPilot
 
 Flight-controller side of appendix B from the CS35 engine electrical ICD.
-The codec builds and inspects 32-bit logical words. It does not command an
-engine, a servo, or a motor. A TCP client can carry bytes to an EBYTE
-NT1-M. Those bytes are not ARINC words until framing is opted in.
+The codec builds and inspects 32-bit logical words. It does not move a
+servo, a motor, or an eRob swash. When `A429_ENG_CH` selects an RC
+channel it fills labels 340, 342 and 344 with the engine mode. A TCP
+client can carry bytes to an EBYTE NT1-M. Those bytes are not ARINC
+words until framing is opted in.
 
 This branch is cut from `0ac57cc5` (`AP_eRobCANOpen: restore CSP slew and
 back off fault re-enable`, pull request 3). eRob CANopen on CAN2 is
@@ -17,7 +19,7 @@ unchanged. `AP_EROB_CANOPEN_ENABLED` stays set on ZeroOneX6.
 | 12.5 ms FC transmit schedule | Host-tested. `AP_ARINC429::update()` polls it with `AP_HAL::micros()`. |
 | Per-label freshness timeout | Host-tested. Default is off. A non-normal SM or a parity error clears the getter immediately. 24 ms is the ECU's nominal refresh, not the timeout. |
 | Command-word levels and rising-edge detector | Host-tested. Levels are not edges. |
-| Simulation inject / simulation transmit snapshot | In the library. Nothing in the vehicle fills a snapshot from a flight mode. |
+| Simulation inject / simulation transmit snapshot | In the library. `A429_ENG_CH` 0 leaves it alone. A non-zero channel overwrites only labels 340, 342 and 344. |
 | NT1-M TCP client byte pipe | Implemented on the existing `AP_Networking` lwIP stack. Host-tested against a scripted pipe and a local mock TCP server. Not a physical NT1-M. |
 | UART429-S `C0` framing | Provisional and off by default (`A429_FRAME=1`). Sends the codec logical word. Does not bit-reverse the label and does not send a `CD` rate command. |
 | RS422-429-1C wire profile | `A429_FRAME=2`. Page 3 `C0` plus four little-endian bytes. Page 4 reverses only the label byte. Host-tested. Not a test of the NT1-M or of the internal TTL board. |
@@ -32,7 +34,15 @@ reboot to see the other parameters.
 
 ## Board
 
-The helicopter target is the waf board `ZeroOneX6`.
+`ZeroOneX9` is the helicopter image that carries both this codec and the
+NT1-M TCP client. `Tools/AP_Bootloader/board_types.txt` assigns
+`AP_HW_ZeroOne_X9` the value **5601**. The hwdef keeps the RMII `ETH1`
+pins and sets `AP_ARINC429_ENABLED` and `AP_EROB_CANOPEN_ENABLED`. eRob is
+compiled in and is not selected until `CAN_P2_DRIVER` moves off the shared
+DroneCAN driver, matching ZeroOne X6. `A429_ENABLE` and `A429_FRAME` still
+default to 0.
+
+The earlier helicopter target is the waf board `ZeroOneX6`.
 
 * `APJ_BOARD_ID` is `AP_HW_ZeroOne_X6`.
 * `Tools/AP_Bootloader/board_types.txt` assigns that name the value **5600**
@@ -43,10 +53,10 @@ The helicopter target is the waf board `ZeroOneX6`.
 * ZeroOneX6-ODID includes this hwdef, so it inherits the same compile flag.
   It is not a separate protocol target.
 
-The X6 has one Ethernet port. A future PROFINET gateway needs that same
-port. This library does not take a network interface, a socket, or a
-ChibiOS MAC driver. A later carrier has to share the port. It must be
-added as another `a429_transport_t`, not by editing the word codec.
+The X6 and the X9 each have one Ethernet port. A future PROFINET gateway
+needs that same port. The NT1-M client uses the existing `AP_Networking`
+stack and does not take a second MAC. The X9 `ETH1` pins stay in the hwdef
+so that stack can run.
 
 ## Word layout
 
@@ -98,7 +108,7 @@ Receive, tracked:
 | 176 | State | discrete | raw int16 | bit names not in the supplied images |
 | 177 | Warn2 | discrete | raw int16 | bit names not in the supplied images |
 
-Transmit, built only from a simulation snapshot:
+Transmit. CLP and Nr are built only from a simulation snapshot. The three command words are that snapshot, or the engine-mode owner when `A429_ENG_CH` is 1..16:
 
 | Octal | Name | Kind | Resolution | Range in the appendix |
 | --- | --- | --- | --- | --- |
@@ -175,8 +185,13 @@ is not a command. An invalid sample (bad parity, bad SM, bad SDI, reserved
 bits) does not move that detector and does not report an edge.
 
 Transmit copies the supplied levels into the word. It does not turn a
-snapshot into a one-frame pulse, and the vehicle never supplies a level
-from a flight mode. Calling `sim_set_pcmd()` is a simulation input.
+snapshot into a one-frame pulse. Calling `sim_set_pcmd()` is a simulation
+input. With `A429_ENG_CH` at 0 the vehicle does not replace that input.
+With `A429_ENG_CH` at 1..16, `AP_ARINC429::update()` writes the same level
+into 340, 342 and 344 on every enabled pass. Cold-crank, false-start and
+channel-switch stay 0, because those bits are rising-edge commands and
+must not be held at 1. Rotor brake stays 0. The on-ground bit is 1 when
+`AP_Notify::flags.flying` is false.
 
 ### Table B.16 (label 331, not implemented)
 
@@ -378,19 +393,58 @@ parity, or stop bits. Pages 2 and 3 describe the DB9, the 6–28 V supply,
 and a common ground with no isolation. None of that applies to the NT1-M
 Ethernet side. The vendor's statement that the network product uses the
 RS422 message format is still not a test of the board behind this NT1-M.
-Do not treat `A429_FRAME=1` as hardware-ready. Engine, motor, servo, and
-eRob outputs are still not fed by these words.
+Do not treat `A429_FRAME=1` as hardware-ready. Labels 340, 342 and 344
+are the only words the vehicle fills. They are not copied into motor,
+servo, or eRob outputs, and the scheduler does not send a `CD` rate command.
+
+## Engine mode
+
+`A429_ENG_CH` defaults to 0. Zero does not touch labels 340, 342 or 344,
+so a simulation snapshot survives every update. Values 1..16 select an RC
+channel. PWM above 1800 requests engine run. Low, middle, an invalid
+sample, or RC failsafe requests stop (`001`). There is no separate start
+label: idle is what makes the ECU sequence the starter and ignition.
+
+Motor interlock is aux function `MOTOR_INTERLOCK` (option 32), read with
+`find_channel_for_option`. It is not the engine switch. Arming is
+`AP::arming().is_armed()` and does not choose stop versus idle.
+
+| Engine run | Armed | Interlock high | Words 340, 342, 344 |
+| --- | --- | --- | --- |
+| no | either | either | stop `001` |
+| yes | no | either | idle `011`, kept sending |
+| yes | yes | no | idle `011`, kept sending |
+| yes | yes | yes | flight `100` on that update |
+
+Flight does not wait for Nr. Idle power cannot accelerate the rotor.
+Releasing interlock or disarming returns to idle and clears a runup latch.
+
+The runup abort is off unless `A429_NR_REF`, `A429_NR_CRIT` and
+`A429_RUNUP` are all non-zero and `AP_RPM` returns a finite sample.
+Nr percent is `rpm * 100 / A429_NR_REF`. `A429_NR_INST` selects the sensor;
+0 is RPM1. If Nr stays below `A429_NR_CRIT` for `A429_RUNUP` seconds after
+flight is commanded, the three words latch back to idle until interlock is
+released or the aircraft is disarmed. No sample does not abort. A dip
+after the threshold was reached does not abort. The timer is unsigned
+`now - start`.
+
+`A429_ENABLE` 0 or `A429_ENG_CH` 0 stops overwriting the snapshot. The three
+command words are cleared only if this logic had taken them over. Clearing
+them does not clear CLP or Nr.
 
 ## Vehicle hook
 
 `AP_Vehicle` owns one `AP_ARINC429` when `AP_ARINC429_ENABLED` is 1.
 
-* Parameter group `A429_`, index 34. Existing indices are untouched.
+* Parameter group `A429_`, index 34. Existing indices through `A429_FRAME`
+  (group index 15) are untouched. New indices are 16 `ENG_CH`, 17 `NR_INST`,
+  18 `NR_REF`, 19 `NR_CRIT`, and 20 `RUNUP`.
 * `setup()` calls `init()`.
 * The scheduler calls `update()` at 400 Hz.
-* `update()` does not write motors, servos, EFI, or eRob targets.
+* `update()` fills 340, 342 and 344 only while `A429_ENABLE` is 1 and
+  `A429_ENG_CH` is 1..16. It does not write motors, servos, EFI, or eRob.
 
-The compile flag is in `libraries/AP_HAL_ChibiOS/hwdef/ZeroOneX6/hwdef.dat`.
+The compile flag is set on the ZeroOne X6 and ZeroOne X9 hwdefs.
 Other boards keep `AP_ARINC429_ENABLED` at 0, so their images do not gain
 the codec. `Tools/scripts/build_options.py` lists the flag for the custom
 build server, default off.
@@ -422,12 +476,21 @@ SITL repeats the same suite as `libraries/AP_ARINC429/tests/test_arinc429.cpp`
 when the board is built with gtest. SITL leaves the feature off, so the
 test compiles the codec itself and does not duplicate the firmware objects.
 
-Helicopter image, not flashed:
+Helicopter image for the 01 Aero X9, not flashed:
+
+```sh
+./waf configure --board ZeroOneX9
+./waf heli
+```
+
+The apj `board_id` field is the check for 5601. The generated hwdef keeps
+`AP_ARINC429_ENABLED` and `AP_EROB_CANOPEN_ENABLED` at 1, and the `ETH1`
+pins stay. The X6 image is still:
 
 ```sh
 ./waf configure --board ZeroOneX6
 ./waf heli
 ```
 
-The apj `board_id` field is the check for 5600. eRob remains
-`AP_EROB_CANOPEN_ENABLED 1` in the same hwdef.
+Its apj `board_id` field is 5600. eRob remains
+`AP_EROB_CANOPEN_ENABLED 1` in that hwdef too.

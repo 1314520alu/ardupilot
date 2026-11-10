@@ -21,9 +21,9 @@
 
 /*
  * CS35 ARINC429 codec on the flight-controller side.
- * Received words are monitoring data. Transmit words are built only from
- * an explicit simulation snapshot. Nothing in this class commands an engine,
- * a servo, or a motor, and it does not open the Ethernet port.
+ * Received words are monitoring data. Labels 340/342/344 are filled from
+ * the pilot engine switch when A429_ENG_CH is 1..16. Those words do not
+ * move a motor, a servo, or eRob, and this class does not claim Ethernet.
  */
 class AP_ARINC429
 {
@@ -59,6 +59,7 @@ public:
 
 private:
     void apply_params(void);
+    void command_engine_mode(void);
 #if AP_NETWORKING_ENABLED
     void tcp_worker(void);
     static int tcp_stream_open(void *ctx, uint32_t ipv4_host, uint16_t port);
@@ -89,8 +90,14 @@ private:
     AP_Int32 _rem_port;
     AP_Int32 _loc_port;
     AP_Int8 _frame;
+    AP_Int8 _eng_ch;
+    AP_Int8 _nr_inst;
+    AP_Float _nr_ref;
+    AP_Float _nr_crit;
+    AP_Float _runup;
 
     a429_core_t _core;
+    a429_mode_state_t _mode_state;
     bool _inited;
 
     static AP_ARINC429 *_singleton;

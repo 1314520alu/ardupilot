@@ -44,9 +44,19 @@ int a429_phase1_rx_index(uint16_t label_oct);
 int a429_pcmd_index(uint16_t label_oct);
 
 void a429_sim_clear(a429_link_t *link);
+void a429_sim_clear_pcmd(a429_link_t *link);
 void a429_sim_set_clp(a429_link_t *link, float volts);
 void a429_sim_set_nr(a429_link_t *link, float pct);
 int a429_sim_set_pcmd(a429_link_t *link, uint8_t index, const a429_pcmd_levels_t *levels);
+
+/*
+ * One engine-mode step. Returns 1 and fills levels when this logic owns
+ * labels 340/342/344. Returns -1 when ownership is released and those three
+ * words must be cleared. Returns 0 when the simulation snapshot must be
+ * left alone, including the default eng_ch of 0 before any takeover.
+ * Cold-crank, false-start, channel-switch, and rotor-brake are written 0.
+ */
+int a429_mode_step(a429_mode_state_t *st, const a429_mode_in_t *in, a429_pcmd_levels_t *levels);
 uint8_t a429_link_build_tx(a429_link_t *link, uint32_t *words, uint8_t max_n);
 
 uint8_t a429_label_bit_reverse(uint8_t logical_label);

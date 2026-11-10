@@ -234,6 +234,18 @@ void a429_sim_clear(a429_link_t *link)
     memset(&link->sim, 0, sizeof(link->sim));
 }
 
+void a429_sim_clear_pcmd(a429_link_t *link)
+{
+    uint8_t i;
+    if (link == 0) {
+        return;
+    }
+    for (i = 0; i < A429_PCMD_N; i++) {
+        link->sim.pcmd_set[i] = 0;
+        memset(&link->sim.pcmd[i], 0, sizeof(link->sim.pcmd[i]));
+    }
+}
+
 void a429_sim_set_clp(a429_link_t *link, float volts)
 {
     if (link == 0) {

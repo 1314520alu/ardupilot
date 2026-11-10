@@ -15,9 +15,18 @@
 #include "AP_ARINC429.h"
 
 #include <AP_HAL/AP_HAL.h>
+#include <AP_Arming/AP_Arming.h>
+#include <AP_Math/AP_Math.h>
+#include <AP_Notify/AP_Notify.h>
+#include <AP_RPM/AP_RPM_config.h>
+#include <RC_Channel/RC_Channel.h>
 #include <cstdio>
 #include <cstring>
 #include <errno.h>
+
+#if AP_RPM_ENABLED
+#include <AP_RPM/AP_RPM.h>
+#endif
 
 #if AP_NETWORKING_ENABLED
 #include <AP_Networking/AP_Networking.h>
@@ -30,7 +39,7 @@ AP_ARINC429 *AP_ARINC429::_singleton;
 const AP_Param::GroupInfo AP_ARINC429::var_info[] = {
     // @Param: ENABLE
     // @DisplayName: CS35 ARINC429 enable
-    // @Description: Enable the CS35 ARINC429 codec. This does not command the engine and does not claim Ethernet. Received words are monitoring data only.
+    // @Description: Enable the CS35 ARINC429 codec. Received words are monitoring data. Labels 340, 342 and 344 are filled only when A429_ENG_CH selects an RC channel. This does not move motors, servos, or eRob, and it does not claim Ethernet.
     // @Values: 0:Disabled,1:Enabled
     // @User: Advanced
     AP_GROUPINFO_FLAGS("ENABLE", 0, AP_ARINC429, _enable, 0, AP_PARAM_FLAG_ENABLE),
@@ -146,6 +155,47 @@ const AP_Param::GroupInfo AP_ARINC429::var_info[] = {
     // @Values: 0:None,1:UART429-S_C0_provisional,2:RS422-429-1C
     // @User: Advanced
     AP_GROUPINFO("FRAME", 15, AP_ARINC429, _frame, 0),
+
+    // @Param: ENG_CH
+    // @DisplayName: Engine run RC channel
+    // @Description: RC channel that requests engine run. 0 leaves labels 340, 342 and 344 on the simulation snapshot. 1 to 16 select a channel. PWM above 1800 requests run. Low, middle, an invalid sample, or RC failsafe requests stop. There is no separate start label: idle makes the ECU sequence the starter and ignition. Motor interlock is aux function 32, not this channel. This does not move motors, servos, or eRob.
+    // @Range: 0 16
+    // @User: Advanced
+    AP_GROUPINFO("ENG_CH", 16, AP_ARINC429, _eng_ch, 0),
+
+    // @Param: NR_INST
+    // @DisplayName: Rotor RPM sensor instance
+    // @Description: AP_RPM instance for the optional runup check. 0 is the first sensor (RPM1) and 1 is RPM2. A missing sample does not by itself abort flight. The check runs only when NR_REF, NR_CRIT and RUNUP are all non-zero.
+    // @Range: 0 7
+    // @User: Advanced
+    AP_GROUPINFO("NR_INST", 17, AP_ARINC429, _nr_inst, 0),
+
+    // @Param: NR_REF
+    // @DisplayName: Rotor rpm at 100 percent Nr
+    // @Description: Rotor rpm that is 100 percent Nr. Nr percent is measured rpm times 100 divided by this value. 0 disables the runup check. Flight is still commanded before Nr reaches NR_CRIT.
+    // @Units: rpm
+    // @Range: 0 100000
+    // @Increment: 1
+    // @User: Advanced
+    AP_GROUPINFO("NR_REF", 18, AP_ARINC429, _nr_ref, 0),
+
+    // @Param: NR_CRIT
+    // @DisplayName: Runup Nr threshold
+    // @Description: Nr percent that ends the runup watch. 0 disables the runup check. Reaching this value latches success, so a later dip does not return the command to idle.
+    // @Units: %
+    // @Range: 0 150
+    // @Increment: 1
+    // @User: Advanced
+    AP_GROUPINFO("NR_CRIT", 19, AP_ARINC429, _nr_crit, 0),
+
+    // @Param: RUNUP
+    // @DisplayName: Runup time limit
+    // @Description: Seconds Nr may stay below NR_CRIT after flight is commanded. 0 disables the runup check. If the time elapses while a valid RPM sample is still below NR_CRIT, labels 340, 342 and 344 return to idle until motor interlock is released or the aircraft is disarmed. No RPM sample does not abort. NR_REF, NR_CRIT and RUNUP must all be non-zero.
+    // @Units: s
+    // @Range: 0 120
+    // @Increment: 0.1
+    // @User: Advanced
+    AP_GROUPINFO("RUNUP", 20, AP_ARINC429, _runup, 0),
 
     AP_GROUPEND
 };
@@ -381,21 +431,105 @@ void AP_ARINC429::init(void)
     _inited = true;
 }
 
+void AP_ARINC429::command_engine_mode(void)
+{
+    a429_mode_in_t in;
+    a429_pcmd_levels_t levels;
+    int step;
+    int16_t ch;
+
+    memset(&in, 0, sizeof(in));
+    in.enable = _enable.get() == 0 ? 0u : 1u;
+    ch = _eng_ch.get();
+    if (ch < 0 || ch > 255) {
+        ch = 0;
+    }
+    in.eng_ch = (uint8_t)ch;
+    if (in.enable && in.eng_ch >= 1u && in.eng_ch <= A429_ENG_CH_MAX) {
+        const bool failsafe = rc().in_rc_failsafe();
+        const bool rc_ok = rc().has_valid_input() && !failsafe;
+        RC_Channel *chan = rc().channel((uint8_t)(in.eng_ch - 1u));
+        RC_Channel *ilock = rc().find_channel_for_option(RC_Channel::AUX_FUNC::MOTOR_INTERLOCK);
+        int16_t pwm = 0;
+
+        in.rc_failsafe = failsafe ? 1u : 0u;
+        if (chan != nullptr) {
+            in.rc_present = 1u;
+            pwm = chan->get_radio_in();
+            if (pwm > 0) {
+                in.rc_pwm = (uint16_t)pwm;
+            }
+            if (rc_ok &&
+                pwm > (int16_t)RC_Channel::RC_MIN_LIMIT_PWM &&
+                pwm < (int16_t)RC_Channel::RC_MAX_LIMIT_PWM) {
+                in.rc_valid = 1u;
+            }
+        }
+        if (ilock == nullptr) {
+            in.interlock_released = 1u;
+        } else if (rc_ok) {
+            if (ilock->get_aux_switch_pos() == RC_Channel::AuxSwitchPos::HIGH) {
+                in.interlock_high = 1u;
+            } else {
+                in.interlock_released = 1u;
+            }
+        }
+        in.armed = AP::arming().is_armed() ? 1u : 0u;
+        in.on_ground = AP_Notify::flags.flying ? 0u : 1u;
+#if AP_RPM_ENABLED
+        {
+            AP_RPM *sensor = AP::rpm();
+            float rpm = 0.0f;
+            int8_t inst = _nr_inst.get();
+            if (sensor != nullptr && inst >= 0 && sensor->get_rpm((uint8_t)inst, rpm)) {
+                in.nr_sample = 1u;
+                in.nr_rpm = rpm;
+            }
+        }
+#endif
+        in.nr_ref = _nr_ref.get();
+        in.nr_crit_pct = _nr_crit.get();
+        if (is_positive(_runup.get())) {
+            float runup_s = _runup.get();
+            if (runup_s > 4000000.0f) {
+                runup_s = 4000000.0f;
+            }
+            in.runup_ms = (uint32_t)(runup_s * 1000.0f);
+        }
+        in.now_ms = AP_HAL::millis();
+    }
+
+    step = a429_mode_step(&_mode_state, &in, &levels);
+    if (step > 0) {
+        uint8_t i;
+        for (i = 0; i < A429_PCMD_N; i++) {
+            a429_sim_set_pcmd(&_core.link, i, &levels);
+        }
+    } else if (step < 0) {
+        a429_sim_clear_pcmd(&_core.link);
+    }
+}
+
 void AP_ARINC429::update(void)
 {
     if (!_inited) {
         return;
     }
     if (_enable.get() == 0) {
+        /* Drop a previous takeover. Default ENG_CH 0 never owned the words,
+         * so this does not wipe a simulation snapshot. */
+        command_engine_mode();
         a429_tcp_configure(&_core.tcp, 0, 0, 0);
         a429_core_set_frame(&_core, A429_FRAME_NONE);
         a429_link_session_lost(&_core.link);
         return;
     }
     apply_params();
+    command_engine_mode();
     /*
-     * Scheduling and byte-pipe maintenance. Words are not copied into
-     * motors, servos, EFI, or eRob. Unconfigured framing sends no bytes.
+     * Scheduling and byte-pipe maintenance. The three command words are
+     * not copied into motors, servos, EFI, or eRob. Unconfigured framing
+     * sends no bytes, and no CD rate command is generated.
      */
     a429_core_update(&_core, AP_HAL::micros());
 }
@@ -475,5 +609,6 @@ AP_ARINC429 *arinc429()
 #include "src/arinc429_frame.c"
 #include "src/arinc429_tcp.c"
 #include "src/arinc429_transport.c"
+#include "src/arinc429_mode.c"
 
 #endif  // AP_ARINC429_ENABLED

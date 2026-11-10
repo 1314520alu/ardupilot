@@ -660,6 +660,302 @@ static void test_rs422_label_wire(void)
     expect_true(a429_rs422_rate_encode(9u, rate, 5, &n) == 0, "an unknown rate encodes nothing");
 }
 
+static void apply_engine(a429_link_t *link, a429_mode_state_t *st, const a429_mode_in_t *in)
+{
+    a429_pcmd_levels_t levels;
+    int rc = a429_mode_step(st, in, &levels);
+    uint8_t i;
+    if (rc > 0) {
+        for (i = 0; i < A429_PCMD_N; i++) {
+            a429_sim_set_pcmd(link, i, &levels);
+        }
+    } else if (rc < 0) {
+        a429_sim_clear_pcmd(link);
+    }
+}
+
+static void build_tx(a429_link_t *link)
+{
+    uint32_t words[8];
+    a429_link_build_tx(link, words, 8);
+}
+
+static int levels_match(uint32_t word, uint8_t label, uint8_t mode, uint8_t on_ground)
+{
+    a429_pcmd_levels_t got;
+    a429_pcmd_decode((uint16_t)((word >> 13) & 0xFFFFu), &got);
+    if ((word & 0xFFu) != label || a429_parity_ok(word) != 1) {
+        return 0;
+    }
+    if (got.mode != mode || got.on_ground != on_ground) {
+        return 0;
+    }
+    if (got.cold_run || got.false_start || got.rotor_brake || got.channel_switch ||
+        got.power_assurance || got.overspeed_a || got.overspeed_b) {
+        return 0;
+    }
+    return 1;
+}
+
+static void expect_three(const a429_link_t *link, uint8_t mode, uint8_t on_ground, const char *msg)
+{
+    static const uint8_t labels[A429_PCMD_N] = {0340, 0342, 0344};
+    uint8_t i;
+    expect_true(link->last_tx_count == A429_PCMD_N, msg);
+    for (i = 0; i < A429_PCMD_N; i++) {
+        expect_true(levels_match(link->last_tx[i], labels[i], mode, on_ground) == 1, msg);
+    }
+}
+
+static a429_mode_in_t engine_run_in(uint32_t now_ms)
+{
+    a429_mode_in_t in;
+    memset(&in, 0, sizeof(in));
+    in.enable = 1;
+    in.eng_ch = 8;
+    in.rc_present = 1;
+    in.rc_valid = 1;
+    in.rc_pwm = 1801;
+    in.interlock_high = 1;
+    in.armed = 1;
+    in.on_ground = 1;
+    in.now_ms = now_ms;
+    return in;
+}
+
+static void test_engine_mode(void)
+{
+    a429_link_t link;
+    a429_mode_state_t st;
+    a429_mode_in_t in;
+    a429_pcmd_levels_t levels;
+    a429_pcmd_levels_t snap;
+    union {
+        uint32_t u;
+        float f;
+    } nanbits;
+
+    nanbits.u = 0x7fc00000u;
+    memset(&st, 0, sizeof(st));
+    memset(&in, 0, sizeof(in));
+    expect_true(a429_mode_step(0, &in, &levels) == 0, "null state does not decide");
+    expect_true(a429_mode_step(&st, 0, &levels) == 0, "null input does not decide");
+
+    a429_link_init(&link);
+    memset(&snap, 0, sizeof(snap));
+    snap.mode = A429_MODE_FLIGHT;
+    snap.rotor_brake = 1;
+    a429_sim_set_pcmd(&link, 0, &snap);
+    a429_sim_set_clp(&link, 2.5f);
+    memset(&in, 0, sizeof(in));
+    in.enable = 1;
+    expect_true(a429_mode_step(&st, &in, &levels) == 0, "ENG_CH 0 does not take the snapshot");
+    build_tx(&link);
+    expect_true(link.last_tx_count == 2u, "CLP and the sim command remain");
+    expect_true((link.last_tx[0] & 0xFFu) == 0310, "CLP is still first");
+    expect_true(levels_match(link.last_tx[1], 0340, A429_MODE_FLIGHT, 0) == 0, "brake is not a vehicle word");
+    expect_true(((link.last_tx[1] >> 13) & 0xFFFFu) != 0u, "sim data was not cleared");
+    expect_true(link.sim.pcmd[0].rotor_brake == 1, "sim brake level remains");
+    expect_true(a429_mode_step(&st, &in, &levels) == 0, "a second idle step still does not wipe");
+
+    in = engine_run_in(1000u);
+    in.nr_sample = 0;
+    in.nr_rpm = 0.0f;
+    in.nr_ref = 1000.0f;
+    in.nr_crit_pct = 90.0f;
+    in.runup_ms = 5000u;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_true(link.last_tx_count == 4u && (link.last_tx[0] & 0xFFu) == 0310, "CLP stays ahead of the command words");
+    expect_true(levels_match(link.last_tx[1], 0340, A429_MODE_FLIGHT, 1) == 1, "flight is immediate and does not wait for Nr");
+    link.sim.clp_set = 0;
+
+    in.rc_pwm = 1800;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_STOP, 1, "PWM 1800 is not engine run");
+
+    in = engine_run_in(1100u);
+    in.rc_pwm = 1200;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_STOP, 1, "middle or low requests stop");
+
+    in = engine_run_in(1200u);
+    in.rc_valid = 0;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_STOP, 1, "invalid RC requests stop");
+
+    in = engine_run_in(1300u);
+    in.rc_failsafe = 1;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_STOP, 1, "RC failsafe requests stop");
+
+    in = engine_run_in(1400u);
+    in.rc_present = 0;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_STOP, 1, "a missing channel requests stop");
+
+    in = engine_run_in(1500u);
+    in.armed = 0;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_IDLE, 1, "disarmed run is idle, not stop");
+
+    in = engine_run_in(1600u);
+    in.interlock_high = 0;
+    in.interlock_released = 1;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_IDLE, 1, "interlock off keeps idle");
+
+    in = engine_run_in(0u);
+    in.on_ground = 0;
+    in.nr_ref = 0.0f;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_FLIGHT, 0, "air clears the on-ground bit and still flies");
+
+    memset(&st, 0, sizeof(st));
+    in = engine_run_in(0u);
+    in.nr_ref = 1000.0f;
+    in.nr_crit_pct = 50.0f;
+    in.runup_ms = 5000u;
+    in.nr_sample = 1;
+    in.nr_rpm = 100.0f;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_FLIGHT, 1, "low Nr does not delay the first flight word");
+    in.now_ms = 4999u;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_FLIGHT, 1, "Nr still below inside the runup window");
+    in.now_ms = 5000u;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_IDLE, 1, "runup timeout latches idle");
+    in.now_ms = 9000u;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_IDLE, 1, "the latch holds while interlock stays high");
+    in.rc_pwm = 1000;
+    in.interlock_high = 1;
+    in.interlock_released = 0;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_STOP, 1, "engine stop does not by itself clear the latch");
+    in.rc_pwm = 1801;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_IDLE, 1, "engine run again stays idle until interlock cycles");
+    in.interlock_high = 0;
+    in.interlock_released = 1;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_IDLE, 1, "releasing interlock clears the latch and stays idle");
+    in.interlock_high = 1;
+    in.interlock_released = 0;
+    in.now_ms = 20000u;
+    in.nr_rpm = 0.0f;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_FLIGHT, 1, "opening interlock commands flight again immediately");
+    in.now_ms = 24999u;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_FLIGHT, 1, "the new runup window starts at the new command");
+
+    memset(&st, 0, sizeof(st));
+    in = engine_run_in(100u);
+    in.nr_ref = 1000.0f;
+    in.nr_crit_pct = 50.0f;
+    in.runup_ms = 5000u;
+    in.nr_sample = 1;
+    in.nr_rpm = 500.0f;
+    apply_engine(&link, &st, &in);
+    in.now_ms = 200u;
+    in.nr_rpm = 0.0f;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_FLIGHT, 1, "a dip after the threshold does not abort");
+    in.now_ms = 50000u;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_FLIGHT, 1, "the later dip is still flight after the window");
+
+    memset(&st, 0, sizeof(st));
+    in = engine_run_in(0xFFFFF830u);
+    in.nr_ref = 400.0f;
+    in.nr_crit_pct = 80.0f;
+    in.runup_ms = 5000u;
+    in.nr_sample = 0;
+    apply_engine(&link, &st, &in);
+    in.now_ms = 0xFFFFF830u + 20000u;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_FLIGHT, 1, "no Nr sample does not abort");
+    in.nr_sample = 1;
+    in.nr_rpm = nanbits.f;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_FLIGHT, 1, "a non-finite sample does not abort");
+    in.nr_rpm = 10.0f;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_IDLE, 1, "a late below-threshold sample aborts after the window");
+
+    memset(&st, 0, sizeof(st));
+    in = engine_run_in(0xFFFFF830u);
+    in.nr_ref = 1000.0f;
+    in.nr_crit_pct = 90.0f;
+    in.runup_ms = 5000u;
+    in.nr_sample = 1;
+    in.nr_rpm = 10.0f;
+    apply_engine(&link, &st, &in);
+    in.now_ms = 0xFFFFF830u + 4999u;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_FLIGHT, 1, "unsigned age just inside the window wraps cleanly");
+    in.now_ms = 0xFFFFF830u + 5000u;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_IDLE, 1, "unsigned age at the limit aborts across the wrap");
+
+    in.armed = 0;
+    in.interlock_high = 1;
+    in.interlock_released = 0;
+    in.rc_pwm = 1900;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_IDLE, 1, "disarming clears the latch and returns to idle");
+    in.armed = 1;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_FLIGHT, 1, "rearming with interlock high flies again");
+
+    in.enable = 0;
+    expect_true(a429_mode_step(&st, &in, &levels) == -1, "ENABLE 0 releases a previous takeover");
+    a429_sim_set_clp(&link, 2.5f);
+    a429_sim_clear_pcmd(&link);
+    build_tx(&link);
+    expect_true(link.last_tx_count == 1u && (link.last_tx[0] & 0xFFu) == 0310, "clearing commands keeps CLP");
+    expect_true(a429_mode_step(&st, &in, &levels) == 0, "ENABLE 0 does not clear again");
+
+    memset(&st, 0, sizeof(st));
+    a429_link_init(&link);
+    a429_sim_set_pcmd(&link, 1, &snap);
+    a429_sim_set_nr(&link, 100.0f);
+    in.enable = 0;
+    in.eng_ch = 0;
+    expect_true(a429_mode_step(&st, &in, &levels) == 0, "default inputs do not own the words");
+    build_tx(&link);
+    expect_true(link.last_tx_count == 2u, "Nr and the sim command are untouched");
+    expect_true((link.last_tx[1] & 0xFFu) == 0342, "PCMD2 is still the simulation word");
+}
+
 int a429_host_tests(void);
 
 int a429_host_tests(void)
@@ -675,6 +971,7 @@ int a429_host_tests(void)
     test_disc_sm_matrix();
     test_invalid_sm_clears_fresh();
     test_rs422_label_wire();
+    test_engine_mode();
     if (g_fails == 0) {
         printf("RESULT: all passed\n");
     } else {

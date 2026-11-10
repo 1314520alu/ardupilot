@@ -15,6 +15,7 @@ extern "C" {
 #include "../src/arinc429_frame.c"
 #include "../src/arinc429_tcp.c"
 #include "../src/arinc429_transport.c"
+#include "../src/arinc429_mode.c"
 }
 #include "../host/test_nt1m.c"
 

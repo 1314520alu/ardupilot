@@ -19,6 +19,10 @@
 #define A429_PCMD_N 3
 #define A429_TX_MAX 5
 
+/* AuxSwitchPos HIGH is PWM above this. 1800 itself is middle. */
+#define A429_ENG_PWM_HIGH 1800u
+#define A429_ENG_CH_MAX 16u
+
 /* Appendix B SM, D31..D30. */
 #define A429_SM_FAIL 0u
 #define A429_SM_NCD 1u
@@ -294,3 +298,35 @@ typedef struct {
     uint32_t tx_unframed;
     uint32_t tcp_epoch_seen;
 } a429_core_t;
+
+/*
+ * Pilot engine-mode inputs. The vehicle fills this. The decision function
+ * does not read RC, arming, RPM, or notify itself, so the host tests can.
+ * eng_ch 0, or enable 0, does not own labels 340/342/344.
+ */
+typedef struct {
+    uint8_t enable;
+    uint8_t eng_ch;
+    uint8_t rc_present;
+    uint8_t rc_valid;
+    uint8_t rc_failsafe;
+    uint16_t rc_pwm;
+    uint8_t interlock_high;
+    uint8_t interlock_released;
+    uint8_t armed;
+    uint8_t on_ground;
+    uint8_t nr_sample;
+    float nr_rpm;
+    float nr_ref;
+    float nr_crit_pct;
+    uint32_t runup_ms;
+    uint32_t now_ms;
+} a429_mode_in_t;
+
+typedef struct {
+    uint8_t owned;
+    uint8_t abort_latch;
+    uint8_t flight_timing;
+    uint8_t nr_reached;
+    uint32_t flight_since_ms;
+} a429_mode_state_t;
