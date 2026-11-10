@@ -28,6 +28,14 @@ FLASH_SIZE_KB 2048
 # supports upto 8MBits/s
 CANFD_SUPPORTED 8
 
+# eRob CAN master (CAN_Dx_PROTOCOL=15). Not selected until CAN_P2_DRIVER
+# moves off the shared DroneCAN driver. See defaults.parm.
+define AP_EROB_CANOPEN_ENABLED 1
+
+# CS35 ARINC429 codec. A429_ENABLE and A429_FRAME still default to 0.
+# The ETH1 RMII block stays so AP_Networking can run the NT1-M TCP client.
+define AP_ARINC429_ENABLED 1
+
 env OPTIMIZE -O2
 
 # order of UARTs (and USB)
@@ -288,7 +296,7 @@ BARO BMP581 I2C:0:0x47
 BARO SPL06 I2C:2:0x77
 
 # compass
-define HAL_PROBE_EXTERNAL_I2C_COMPASSES
+define AP_COMPASS_PROBING_ENABLED 1
 
 # builtin compass on ZeroOne X9
 COMPASS RM3100 I2C:0:0x20 false ROTATION_NONE
