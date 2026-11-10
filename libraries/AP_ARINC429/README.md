@@ -2,7 +2,8 @@
 
 Flight-controller side of appendix B from the CS35 engine electrical ICD.
 The codec builds and inspects 32-bit logical words. It does not move a
-servo, a motor, or an eRob swash. When `A429_ENG_CH` selects an RC
+servo, a motor, or an eRob swash. When enabled, label 311 carries
+measured rotor speed from `AP_RPM`. When `A429_ENG_CH` selects an RC
 channel it fills labels 340, 342 and 344 with the engine mode. A TCP
 client can carry bytes to an EBYTE NT1-M. Those bytes are not ARINC
 words until framing is opted in.
@@ -19,7 +20,7 @@ unchanged. `AP_EROB_CANOPEN_ENABLED` stays set on ZeroOneX6.
 | 12.5 ms FC transmit schedule | Host-tested. `AP_ARINC429::update()` polls it with `AP_HAL::micros()`. |
 | Per-label freshness timeout | Host-tested. Default is off. A non-normal SM or a parity error clears the getter immediately. 24 ms is the ECU's nominal refresh, not the timeout. |
 | Command-word levels and rising-edge detector | Host-tested. Levels are not edges. |
-| Simulation inject / simulation transmit snapshot | In the library. `A429_ENG_CH` 0 leaves it alone. A non-zero channel overwrites only labels 340, 342 and 344. |
+| Simulation inject / simulation transmit snapshot | In the library. `A429_ENG_CH` 0 leaves 310, 340, 342 and 344 alone. A non-zero channel overwrites only 340, 342 and 344. Enabled `update()` writes or clears 311 from measured Nr. |
 | NT1-M TCP client byte pipe | Implemented on the existing `AP_Networking` lwIP stack. Host-tested against a scripted pipe and a local mock TCP server. Not a physical NT1-M. |
 | UART429-S `C0` framing | Provisional and off by default (`A429_FRAME=1`). Sends the codec logical word. Does not bit-reverse the label and does not send a `CD` rate command. |
 | RS422-429-1C wire profile | `A429_FRAME=2`. Page 3 `C0` plus four little-endian bytes. Page 4 reverses only the label byte. Host-tested. Not a test of the NT1-M or of the internal TTL board. |
@@ -108,7 +109,12 @@ Receive, tracked:
 | 176 | State | discrete | raw int16 | bit names not in the supplied images |
 | 177 | Warn2 | discrete | raw int16 | bit names not in the supplied images |
 
-Transmit. CLP and Nr are built only from a simulation snapshot. The three command words are that snapshot, or the engine-mode owner when `A429_ENG_CH` is 1..16:
+Transmit. CLP is built only from a simulation snapshot. Nr (311) is the
+measured rotor percent when `update()` has a finite `AP_RPM` sample and a
+positive `A429_NR_REF`. Otherwise that update clears 311. Host tests can
+still place a 311 snapshot with `a429_sim_set_nr` until that publish
+runs. The three command words are the snapshot, or the engine-mode owner
+when `A429_ENG_CH` is 1..16:
 
 | Octal | Name | Kind | Resolution | Range in the appendix |
 | --- | --- | --- | --- | --- |
@@ -393,9 +399,10 @@ parity, or stop bits. Pages 2 and 3 describe the DB9, the 6–28 V supply,
 and a common ground with no isolation. None of that applies to the NT1-M
 Ethernet side. The vendor's statement that the network product uses the
 RS422 message format is still not a test of the board behind this NT1-M.
-Do not treat `A429_FRAME=1` as hardware-ready. Labels 340, 342 and 344
-are the only words the vehicle fills. They are not copied into motor,
-servo, or eRob outputs, and the scheduler does not send a `CD` rate command.
+Do not treat `A429_FRAME=1` as hardware-ready. Label 311 is measured Nr.
+Labels 340, 342 and 344 are the engine-mode words. They are not copied
+into motor, servo, or eRob outputs, and the scheduler does not send a
+`CD` rate command. Label 310 is not filled by the vehicle.
 
 ## Engine mode
 
@@ -428,9 +435,29 @@ released or the aircraft is disarmed. No sample does not abort. A dip
 after the threshold was reached does not abort. The timer is unsigned
 `now - start`.
 
-`A429_ENABLE` 0 or `A429_ENG_CH` 0 stops overwriting the snapshot. The three
-command words are cleared only if this logic had taken them over. Clearing
-them does not clear CLP or Nr.
+Label 311 uses that same percent. `A429_NR_INST` is the `AP_RPM` instance
+whose measured rate is published (0 is RPM1). That rate is the Hall
+sample when the selected driver is the pin/Hall backend. It is not an
+RSC setpoint and not a commanded target. The word is the existing BNR
+encode: resolution 0.01 percent, SM normal, odd parity, SDI from
+`A429_SDI`.
+
+`update()` publishes 311 only while the sample is finite and
+`A429_NR_REF` is greater than 0. A missing sample, a non-finite rpm, or a
+reference that is 0, negative, or not finite clears 311. The previous
+percent is not held, and no rpm is invented so the label would read 100
+percent. A percent that does not fit the signed 0.01 BNR field is cleared
+too. `AP_RPM::get_rpm` already withholds an unhealthy sensor, so there is
+no second Nr timeout. A stopped rotor (0 rpm) is a real sample and is
+sent as 0.00 percent. Clearing 311 does not change label 310 or the
+stop, idle, and flight words.
+
+`A429_ENABLE` 0 or `A429_ENG_CH` 0 stops the engine-mode owner from
+overwriting the command snapshot. The three command words are cleared
+only if this logic had taken them over. That release does not clear CLP
+or Nr. Label 311 is not part of that snapshot rule: while `A429_ENABLE`
+is 1, `update()` writes or clears 311 from the measured sample on every
+pass, including when `A429_ENG_CH` is 0.
 
 ## Vehicle hook
 
@@ -441,8 +468,10 @@ them does not clear CLP or Nr.
   18 `NR_REF`, 19 `NR_CRIT`, and 20 `RUNUP`.
 * `setup()` calls `init()`.
 * The scheduler calls `update()` at 400 Hz.
-* `update()` fills 340, 342 and 344 only while `A429_ENABLE` is 1 and
-  `A429_ENG_CH` is 1..16. It does not write motors, servos, EFI, or eRob.
+* `update()` fills 311 from the selected `AP_RPM` instance on every
+  enabled pass, including when `A429_ENG_CH` is 0. It fills 340, 342 and
+  344 only while `A429_ENABLE` is 1 and `A429_ENG_CH` is 1..16. It does
+  not write motors, servos, EFI, or eRob, and it does not fill label 310.
 
 The compile flag is set on the ZeroOne X6 and ZeroOne X9 hwdefs.
 Other boards keep `AP_ARINC429_ENABLED` at 0, so their images do not gain
@@ -461,9 +490,11 @@ That suite hard-codes words that were calculated from the bit table
 (Ng 50% is `0xE2710064`), and it checks negative values, both ends of
 each phase-one range, all four SM values, parity and reserved-bit faults,
 NaN and infinity, command codes, per-label edges, startup and invalid
-samples, a missing-data timeout, a clock wrap, and a late tick. Invalid
-SM values and a parity error clear freshness while leaving the last
-normal sample in `last_valid`. The NT1-M tests add a scripted byte pipe
+samples, a missing-data timeout, a clock wrap, and a late tick. Measured
+Nr checks label 311 at 0.01 percent from `rpm * 100 / A429_NR_REF`, odd
+parity, and clears the word when the sample is missing or `A429_NR_REF`
+is 0. Invalid SM values and a parity error clear freshness while leaving
+the last normal sample in `last_valid`. The NT1-M tests add a scripted byte pipe
 and a local TCP server: invalid peer, a zero octet inside a real address,
 fragmented and coalesced reads, partial writes, reconnect without
 cross-connection assembly, a 50 ms would-block, a partial frame that

@@ -21,9 +21,11 @@
 
 /*
  * CS35 ARINC429 codec on the flight-controller side.
- * Received words are monitoring data. Labels 340/342/344 are filled from
- * the pilot engine switch when A429_ENG_CH is 1..16. Those words do not
- * move a motor, a servo, or eRob, and this class does not claim Ethernet.
+ * Received words are monitoring data. Label 311 is measured rotor speed
+ * from AP_RPM when A429_NR_REF is a positive scale. Labels 340/342/344
+ * are filled from the pilot engine switch when A429_ENG_CH is 1..16.
+ * Those words do not move a motor, a servo, or eRob, and this class does
+ * not claim Ethernet. Label 310 is not filled here.
  */
 class AP_ARINC429
 {
@@ -60,6 +62,8 @@ public:
 private:
     void apply_params(void);
     void command_engine_mode(void);
+    void publish_measured_nr(void);
+    bool read_measured_nr(float &rpm) const;
 #if AP_NETWORKING_ENABLED
     void tcp_worker(void);
     static int tcp_stream_open(void *ctx, uint32_t ipv4_host, uint16_t port);

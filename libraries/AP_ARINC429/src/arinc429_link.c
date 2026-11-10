@@ -264,6 +264,25 @@ void a429_sim_set_nr(a429_link_t *link, float pct)
     link->sim.nr_pct = pct;
 }
 
+void a429_link_set_measured_nr(a429_link_t *link, int sample, float rpm, float nr_ref)
+{
+    float pct;
+    uint32_t w;
+
+    if (link == 0) {
+        return;
+    }
+    /* Missing sample or unusable scale: omit 311. Do not hold the last
+     * percent, and do not invent a reference rpm that would read as 100%. */
+    if (!a429_nr_percent(sample, rpm, nr_ref, &pct) ||
+        !a429_encode_bnr(0311, link->expected_sdi, A429_SM_NORMAL, pct, &w)) {
+        link->sim.nr_set = 0;
+        link->sim.nr_pct = 0.0f;
+        return;
+    }
+    a429_sim_set_nr(link, pct);
+}
+
 int a429_sim_set_pcmd(a429_link_t *link, uint8_t index, const a429_pcmd_levels_t *levels)
 {
     if (link == 0 || levels == 0 || index >= A429_PCMD_N) {
@@ -294,6 +313,8 @@ uint8_t a429_link_build_tx(a429_link_t *link, uint32_t *words, uint8_t max_n)
             link->tx_rejected++;
         }
     }
+    /* 311 is measured Nr when the vehicle published a percent. Host tests
+     * use the same slot through a429_sim_set_nr. */
     if (link->sim.nr_set) {
         if (a429_encode_bnr(0311, link->expected_sdi, A429_SM_NORMAL, link->sim.nr_pct, &w) && n < max_n) {
             words[n++] = w;

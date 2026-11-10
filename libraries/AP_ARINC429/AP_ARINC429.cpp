@@ -165,14 +165,14 @@ const AP_Param::GroupInfo AP_ARINC429::var_info[] = {
 
     // @Param: NR_INST
     // @DisplayName: Rotor RPM sensor instance
-    // @Description: AP_RPM instance for the optional runup check. 0 is the first sensor (RPM1) and 1 is RPM2. A missing sample does not by itself abort flight. The check runs only when NR_REF, NR_CRIT and RUNUP are all non-zero.
+    // @Description: AP_RPM instance for measured rotor speed on label 311 and for the optional runup check. 0 is the first sensor (RPM1) and 1 is RPM2. Label 311 is sent only while this sensor returns a finite rpm and NR_REF is greater than 0. A missing sample clears 311 and does not by itself abort flight. The runup check runs only when NR_REF, NR_CRIT and RUNUP are all non-zero.
     // @Range: 0 7
     // @User: Advanced
     AP_GROUPINFO("NR_INST", 17, AP_ARINC429, _nr_inst, 0),
 
     // @Param: NR_REF
     // @DisplayName: Rotor rpm at 100 percent Nr
-    // @Description: Rotor rpm that is 100 percent Nr. Nr percent is measured rpm times 100 divided by this value. 0 disables the runup check. Flight is still commanded before Nr reaches NR_CRIT.
+    // @Description: Rotor rpm that is 100 percent Nr. Label 311 percent is measured rpm times 100 divided by this value, at 0.01 percent resolution. 0 sends no label 311 and disables the runup check. No default rpm is substituted for 0. Flight is still commanded before Nr reaches NR_CRIT.
     // @Units: rpm
     // @Range: 0 100000
     // @Increment: 1
@@ -431,6 +431,31 @@ void AP_ARINC429::init(void)
     _inited = true;
 }
 
+bool AP_ARINC429::read_measured_nr(float &rpm) const
+{
+#if AP_RPM_ENABLED
+    AP_RPM *sensor = AP::rpm();
+    int8_t inst = _nr_inst.get();
+    rpm = 0.0f;
+    if (sensor != nullptr && inst >= 0 && sensor->get_rpm((uint8_t)inst, rpm)) {
+        return true;
+    }
+#else
+    (void)_nr_inst;
+    rpm = 0.0f;
+#endif
+    return false;
+}
+
+void AP_ARINC429::publish_measured_nr(void)
+{
+    float rpm = 0.0f;
+    const bool sample = read_measured_nr(rpm);
+    /* Clears 311 when the Hall/AP_RPM sample is missing or NR_REF is not
+     * a positive scale. Does not change the stop/idle/flight words. */
+    a429_link_set_measured_nr(&_core.link, sample ? 1 : 0, rpm, _nr_ref.get());
+}
+
 void AP_ARINC429::command_engine_mode(void)
 {
     a429_mode_in_t in;
@@ -476,17 +501,13 @@ void AP_ARINC429::command_engine_mode(void)
         }
         in.armed = AP::arming().is_armed() ? 1u : 0u;
         in.on_ground = AP_Notify::flags.flying ? 0u : 1u;
-#if AP_RPM_ENABLED
         {
-            AP_RPM *sensor = AP::rpm();
             float rpm = 0.0f;
-            int8_t inst = _nr_inst.get();
-            if (sensor != nullptr && inst >= 0 && sensor->get_rpm((uint8_t)inst, rpm)) {
+            if (read_measured_nr(rpm)) {
                 in.nr_sample = 1u;
                 in.nr_rpm = rpm;
             }
         }
-#endif
         in.nr_ref = _nr_ref.get();
         in.nr_crit_pct = _nr_crit.get();
         if (is_positive(_runup.get())) {
@@ -526,10 +547,12 @@ void AP_ARINC429::update(void)
     }
     apply_params();
     command_engine_mode();
+    publish_measured_nr();
     /*
-     * Scheduling and byte-pipe maintenance. The three command words are
-     * not copied into motors, servos, EFI, or eRob. Unconfigured framing
-     * sends no bytes, and no CD rate command is generated.
+     * Scheduling and byte-pipe maintenance. Label 311 is measured Nr.
+     * The three command words are not copied into motors, servos, EFI,
+     * or eRob. Unconfigured framing sends no bytes, and no CD rate
+     * command is generated. Label 310 is left on the simulation snapshot.
      */
     a429_core_update(&_core, AP_HAL::micros());
 }
@@ -555,6 +578,8 @@ void AP_ARINC429::sim_set_nr_pct(float pct)
     if (!_inited) {
         return;
     }
+    /* Direct snapshot. The next enabled update() replaces it from AP_RPM,
+     * or clears label 311 when the sample or NR_REF is unusable. */
     a429_sim_set_nr(&_core.link, pct);
 }
 

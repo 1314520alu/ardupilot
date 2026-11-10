@@ -17,6 +17,21 @@ static int a429_float_positive(float v)
     return a429_float_finite(v) && v > 0.0f;
 }
 
+int a429_nr_percent(int sample, float rpm, float nr_ref, float *pct)
+{
+    float value;
+
+    if (pct == 0 || sample == 0 || !a429_float_finite(rpm) || !a429_float_positive(nr_ref)) {
+        return 0;
+    }
+    value = rpm * 100.0f / nr_ref;
+    if (!a429_float_finite(value)) {
+        return 0;
+    }
+    *pct = value;
+    return 1;
+}
+
 static void a429_mode_clear_run(a429_mode_state_t *st)
 {
     st->abort_latch = 0;
@@ -30,6 +45,7 @@ int a429_mode_step(a429_mode_state_t *st, const a429_mode_in_t *in, a429_pcmd_le
     uint8_t engine_run;
     uint8_t want_flight;
     uint8_t mode;
+    float pct;
 
     if (st == 0 || in == 0) {
         return 0;
@@ -74,12 +90,12 @@ int a429_mode_step(a429_mode_state_t *st, const a429_mode_in_t *in, a429_pcmd_le
             st->nr_reached = 0;
         }
         /* The first flight word is sent on this step. Nr is not required
-         * before that word. The timer is unsigned time since the command. */
-        if (a429_float_positive(in->nr_ref) && a429_float_positive(in->nr_crit_pct) &&
-            in->runup_ms != 0u && in->nr_sample && a429_float_finite(in->nr_rpm) &&
-            st->nr_reached == 0) {
-            float pct = in->nr_rpm * 100.0f / in->nr_ref;
-            if (a429_float_finite(pct) && pct >= in->nr_crit_pct) {
+         * before that word. The timer is unsigned time since the command.
+         * The percent is the same value label 311 publishes. */
+        if (a429_float_positive(in->nr_crit_pct) &&
+            in->runup_ms != 0u && st->nr_reached == 0 &&
+            a429_nr_percent(in->nr_sample, in->nr_rpm, in->nr_ref, &pct)) {
+            if (pct >= in->nr_crit_pct) {
                 st->nr_reached = 1;
             } else if ((uint32_t)(in->now_ms - st->flight_since_ms) >= in->runup_ms) {
                 st->abort_latch = 1;
