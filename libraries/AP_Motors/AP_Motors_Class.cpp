@@ -255,6 +255,16 @@ bool AP_Motors::is_digital_pwm_type() const
     return false;
 }
 
+bool AP_Motors::get_heli_collective(float &norm) const
+{
+    const float collective = _throttle_filter.get();
+    if (_mav_type != MAV_TYPE_HELICOPTER || !isfinite(collective)) {
+        return false;
+    }
+    norm = collective;
+    return true;
+}
+
 // return string corresponding to frame_class
 const char* AP_Motors::get_frame_string() const
 {
