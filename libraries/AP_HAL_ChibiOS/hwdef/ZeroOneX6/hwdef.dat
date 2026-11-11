@@ -32,7 +32,7 @@ CANFD_SUPPORTED 8
 # moves off the shared DroneCAN driver. See defaults.parm.
 define AP_EROB_CANOPEN_ENABLED 1
 
-# CS35 ARINC429 codec. A429_ENABLE still defaults to 0. The carrier is
+# CS35 ARINC429 codec. A429_ENABLE defaults to 1 and A429_FRAME defaults to 2. The carrier is
 # unimplemented and does not claim ETH (shared with a future PROFINET gateway).
 define AP_ARINC429_ENABLED 1
 

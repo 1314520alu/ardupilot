@@ -43,10 +43,10 @@ AP_ARINC429 *AP_ARINC429::_singleton;
 const AP_Param::GroupInfo AP_ARINC429::var_info[] = {
     // @Param: ENABLE
     // @DisplayName: CS35 ARINC429 enable
-    // @Description: Enable the CS35 ARINC429 codec. Received words are monitoring data. Label 310 carries the helicopter collective as a voltage. Labels 340, 342 and 344 are filled only when A429_ENG_CH selects an RC channel. This does not move motors, servos, or eRob, and it does not claim Ethernet.
+    // @Description: Enable the CS35 ARINC429 codec. Default is enabled. Received words are monitoring data. Label 310 carries the helicopter collective as a voltage. Labels 340, 342 and 344 are filled only when A429_ENG_CH selects an RC channel. This does not move motors, servos, or eRob, and it does not claim Ethernet.
     // @Values: 0:Disabled,1:Enabled
     // @User: Advanced
-    AP_GROUPINFO_FLAGS("ENABLE", 0, AP_ARINC429, _enable, 0, AP_PARAM_FLAG_ENABLE),
+    AP_GROUPINFO_FLAGS("ENABLE", 0, AP_ARINC429, _enable, 1, AP_PARAM_FLAG_ENABLE),
 
     // @Param: SDI
     // @DisplayName: CS35 ARINC429 expected SDI
@@ -154,11 +154,11 @@ const AP_Param::GroupInfo AP_ARINC429::var_info[] = {
     AP_GROUPINFO("LOC_PORT", 14, AP_ARINC429, _loc_port, 0),
 
     // @Param: FRAME
-    // @DisplayName: Provisional byte framing
-    // @Description: 0 leaves the TCP bytes uninterpreted. 1 is the provisional UART429-S profile and still sends the codec logical word with the label integer not bit-reversed. 2 is the RS422-429-1C profile from the 2026-01-18 manual pages 3 and 4: the same C0 frame, with only the label byte bit-reversed. Neither value sends a CD rate command or enables transmission by itself. The NT1-M path is not hardware-validated.
+    // @DisplayName: ARINC429 byte framing
+    // @Description: Default 2 is the RS422-429-1C profile: C0 plus four little-endian bytes, with only the label byte bit-reversed. 0 leaves the TCP bytes uninterpreted. 1 is the provisional UART429-S profile and still sends the codec logical word with the label integer not bit-reversed. No value sends a CD rate command or opens the socket by itself. The NT1-M path is not hardware-validated.
     // @Values: 0:None,1:UART429-S_C0_provisional,2:RS422-429-1C
     // @User: Advanced
-    AP_GROUPINFO("FRAME", 15, AP_ARINC429, _frame, 0),
+    AP_GROUPINFO("FRAME", 15, AP_ARINC429, _frame, 2),
 
     // @Param: ENG_CH
     // @DisplayName: Engine run RC channel

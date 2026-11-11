@@ -4,3 +4,7 @@ CAN_P2_DRIVER 1
 BATT_MONITOR 8
 
 GPS1_TYPE 9
+
+# Ethernet on, DHCP off, so ChibiOS applies the library static address.
+NET_ENABLE 1
+NET_DHCP 0
