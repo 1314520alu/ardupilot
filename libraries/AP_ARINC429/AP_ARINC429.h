@@ -21,9 +21,12 @@
 
 /*
  * CS35 ARINC429 codec on the flight-controller side.
- * Received words are monitoring data. Labels 340/342/344 are filled from
- * the pilot engine switch when A429_ENG_CH is 1..16. Those words do not
- * move a motor, a servo, or eRob, and this class does not claim Ethernet.
+ * Received words are monitoring data. Label 310 is the helicopter
+ * collective output converted to volts. Label 311 is measured rotor speed
+ * from AP_RPM when A429_NR_REF is a positive scale. Labels 340/342/344
+ * are filled from the pilot engine switch when A429_ENG_CH is 1..16.
+ * Those words do not move a motor, a servo, or eRob, and this class does
+ * not claim Ethernet.
  */
 class AP_ARINC429
 {
@@ -60,6 +63,10 @@ public:
 private:
     void apply_params(void);
     void command_engine_mode(void);
+    void publish_measured_nr(void);
+    void publish_collective(void);
+    bool read_measured_nr(float &rpm) const;
+    bool read_collective_pct(float &pct) const;
 #if AP_NETWORKING_ENABLED
     void tcp_worker(void);
     static int tcp_stream_open(void *ctx, uint32_t ipv4_host, uint16_t port);
@@ -95,6 +102,8 @@ private:
     AP_Float _nr_ref;
     AP_Float _nr_crit;
     AP_Float _runup;
+    AP_Float _clp_v0;
+    AP_Float _clp_v100;
 
     a429_core_t _core;
     a429_mode_state_t _mode_state;

@@ -956,6 +956,296 @@ static void test_engine_mode(void)
     expect_true((link.last_tx[1] & 0xFFu) == 0342, "PCMD2 is still the simulation word");
 }
 
+static int nr_word_is(uint32_t word, uint8_t sdi, uint16_t data)
+{
+    return word == oracle_word(0311, sdi, data, A429_SM_NORMAL) &&
+           a429_parity_ok(word) == 1 && (bit_count(word) & 1) == 1;
+}
+
+static void test_measured_nr(void)
+{
+    a429_link_t link;
+    a429_mode_state_t st;
+    a429_mode_in_t in;
+    a429_pcmd_levels_t levels;
+    a429_word_view_t view;
+    float pct;
+    uint32_t clp;
+    uint32_t pcmd;
+    uint32_t rejected;
+    union {
+        uint32_t u;
+        float f;
+    } nanbits;
+    union {
+        uint32_t u;
+        float f;
+    } infbits;
+
+    nanbits.u = 0x7fc00000u;
+    infbits.u = 0x7f800000u;
+    pct = -1.0f;
+    expect_true(a429_nr_percent(1, 500.0f, 1000.0f, &pct) == 1 && pct == 50.0f,
+                "Nr percent is rpm * 100 / NR_REF");
+    expect_true(a429_nr_percent(1, 1.0f, 8.0f, &pct) == 1 && pct == 12.5f,
+                "12.50 percent is an exact 0.01 step");
+    expect_true(a429_nr_percent(1, 0.0f, 1000.0f, &pct) == 1 && pct == 0.0f,
+                "a stopped rotor is 0 percent");
+    expect_true(a429_nr_percent(0, 500.0f, 1000.0f, &pct) == 0, "no sample is not a percent");
+    expect_true(a429_nr_percent(1, 500.0f, 0.0f, &pct) == 0, "NR_REF 0 is not 100 percent");
+    expect_true(a429_nr_percent(1, 500.0f, -10.0f, &pct) == 0, "a negative reference is not a scale");
+    expect_true(a429_nr_percent(1, nanbits.f, 1000.0f, &pct) == 0, "NaN rpm is not a sample");
+    expect_true(a429_nr_percent(1, infbits.f, 1000.0f, &pct) == 0, "infinite rpm is not a sample");
+    expect_true(a429_nr_percent(1, 500.0f, nanbits.f, &pct) == 0, "NaN reference is not a scale");
+    expect_true(a429_nr_percent(1, 1.0e30f, 1.0e-30f, &pct) == 0, "a non-finite percent is not sent");
+    expect_true(a429_nr_percent(1, 500.0f, 1000.0f, 0) == 0, "null percent output is rejected");
+    a429_link_set_measured_nr(0, 1, 500.0f, 1000.0f);
+
+    a429_link_init(&link);
+    a429_link_set_measured_nr(&link, 1, 500.0f, 1000.0f);
+    build_tx(&link);
+    expect_true(link.last_tx_count == 1u, "only label 311 is added");
+    expect_true(nr_word_is(link.last_tx[0], 0, 5000) == 1, "500 rpm at ref 1000 is 50.00 percent");
+    a429_inspect(link.last_tx[0], 0, &view);
+    expect_true(view.eu_valid == 1 && view.eu == 50.0f && view.sm == A429_SM_NORMAL,
+                "50.00 percent decodes as a normal BNR value");
+
+    a429_link_set_measured_nr(&link, 1, 1000.0f, 1000.0f);
+    build_tx(&link);
+    expect_true(nr_word_is(link.last_tx[0], 0, 10000) == 1, "100.00 percent is data 10000");
+
+    a429_link_set_measured_nr(&link, 1, 0.0f, 1000.0f);
+    build_tx(&link);
+    expect_true(nr_word_is(link.last_tx[0], 0, 0) == 1, "0 rpm is a normal 0.00 percent word");
+
+    a429_link_set_measured_nr(&link, 1, 1.0f, 8.0f);
+    build_tx(&link);
+    expect_true(nr_word_is(link.last_tx[0], 0, 1250) == 1, "12.50 percent uses the 0.01 count");
+
+    a429_link_set_measured_nr(&link, 1, 1.0f, 10000.0f);
+    build_tx(&link);
+    expect_true(nr_word_is(link.last_tx[0], 0, 1) == 1, "0.01 percent is one BNR count");
+    a429_inspect(link.last_tx[0], 0, &view);
+    expect_true(view.eu_valid == 1 && view.eu == 0.01f, "the count decodes as 0.01 percent");
+
+    a429_link_set_sdi(&link, 2);
+    a429_link_set_measured_nr(&link, 1, 500.0f, 1000.0f);
+    build_tx(&link);
+    expect_true(nr_word_is(link.last_tx[0], 2, 5000) == 1, "311 uses the link SDI");
+
+    a429_link_init(&link);
+    rejected = link.tx_rejected;
+    a429_link_set_measured_nr(&link, 1, 100000.0f, 1.0f);
+    build_tx(&link);
+    expect_true(link.sim.nr_set == 0 && link.last_tx_count == 0u && link.tx_rejected == rejected,
+                "a percent that does not fit the BNR field is omitted");
+
+    a429_sim_set_nr(&link, 100.0f);
+    a429_link_set_measured_nr(&link, 1, 250.0f, 500.0f);
+    build_tx(&link);
+    expect_true(nr_word_is(link.last_tx[0], 0, 5000) == 1, "measured Nr replaces a snapshot percent");
+    a429_link_set_measured_nr(&link, 0, 250.0f, 500.0f);
+    build_tx(&link);
+    expect_true(link.sim.nr_set == 0 && link.sim.nr_pct == 0.0f && link.last_tx_count == 0u,
+                "a missing sample clears 311 and does not hold the last percent");
+    a429_sim_set_nr(&link, 100.0f);
+    a429_link_set_measured_nr(&link, 1, 250.0f, 0.0f);
+    build_tx(&link);
+    expect_true(link.sim.nr_set == 0 && link.last_tx_count == 0u,
+                "NR_REF 0 clears 311 instead of sending a made-up 100 percent");
+    a429_link_set_measured_nr(&link, 1, nanbits.f, 1000.0f);
+    expect_true(link.sim.nr_set == 0, "NaN rpm clears 311");
+    a429_link_set_measured_nr(&link, 1, 250.0f, -1.0f);
+    expect_true(link.sim.nr_set == 0, "a negative NR_REF clears 311");
+
+    a429_link_init(&link);
+    expect_true(a429_encode_bnr(0310, 0, A429_SM_NORMAL, 2.5f, &clp) == 1, "CLP oracle");
+    a429_sim_set_clp(&link, 2.5f);
+    memset(&levels, 0, sizeof(levels));
+    levels.mode = A429_MODE_IDLE;
+    expect_true(a429_sim_set_pcmd(&link, 0, &levels) == 1, "command snapshot");
+    expect_true(a429_encode_pcmd(0340, 0, A429_SM_NORMAL, &levels, &pcmd) == 1, "idle command oracle");
+    a429_link_set_measured_nr(&link, 1, 250.0f, 500.0f);
+    build_tx(&link);
+    expect_true(link.last_tx_count == 3u, "CLP, Nr, then the command word");
+    expect_true(link.last_tx[0] == clp, "label 310 is not rewritten");
+    expect_true(nr_word_is(link.last_tx[1], 0, 5000) == 1, "Nr sits between CLP and the command");
+    expect_true(link.last_tx[2] == pcmd, "stop/idle/flight bits are not rewritten");
+    a429_link_set_measured_nr(&link, 0, 0.0f, 0.0f);
+    build_tx(&link);
+    expect_true(link.last_tx_count == 2u && link.last_tx[0] == clp && link.last_tx[1] == pcmd,
+                "clearing 311 leaves 310 and the command word");
+
+    a429_link_init(&link);
+    memset(&st, 0, sizeof(st));
+    in = engine_run_in(0u);
+    in.nr_sample = 1;
+    in.nr_rpm = 500.0f;
+    in.nr_ref = 1000.0f;
+    in.nr_crit_pct = 50.0f;
+    in.runup_ms = 1000u;
+    apply_engine(&link, &st, &in);
+    a429_link_set_measured_nr(&link, in.nr_sample, in.nr_rpm, in.nr_ref);
+    in.now_ms = 10000u;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_true(link.last_tx_count == 4u, "311 plus the three command words");
+    expect_true(nr_word_is(link.last_tx[0], 0, 5000) == 1, "the command path and 311 share 50.00 percent");
+    expect_true(levels_match(link.last_tx[1], 0340, A429_MODE_FLIGHT, 1) == 1,
+                "reaching Nr does not change the flight command");
+
+    a429_link_init(&link);
+    memset(&st, 0, sizeof(st));
+    in = engine_run_in(0u);
+    in.nr_sample = 1;
+    in.nr_rpm = 100.0f;
+    in.nr_ref = 1000.0f;
+    in.nr_crit_pct = 50.0f;
+    in.runup_ms = 5000u;
+    apply_engine(&link, &st, &in);
+    a429_link_set_measured_nr(&link, in.nr_sample, in.nr_rpm, in.nr_ref);
+    build_tx(&link);
+    expect_true(nr_word_is(link.last_tx[0], 0, 1000) == 1, "10.00 percent is sent while Nr is still low");
+    expect_true(levels_match(link.last_tx[1], 0340, A429_MODE_FLIGHT, 1) == 1,
+                "a low measured Nr does not delay flight");
+}
+
+static int clp_word_is(uint32_t word, uint8_t sdi, uint16_t data)
+{
+    return word == oracle_word(0310, sdi, data, A429_SM_NORMAL) &&
+           a429_parity_ok(word) == 1 && (bit_count(word) & 1) == 1;
+}
+
+static void test_collective_clp(void)
+{
+    a429_link_t link;
+    a429_word_view_t view;
+    a429_pcmd_levels_t levels;
+    float volts;
+    uint32_t nr;
+    uint32_t pcmd;
+    uint32_t rejected;
+    union {
+        uint32_t u;
+        float f;
+    } nanbits;
+    union {
+        uint32_t u;
+        float f;
+    } infbits;
+
+    nanbits.u = 0x7fc00000u;
+    infbits.u = 0x7f800000u;
+    volts = -1.0f;
+    expect_true(a429_clp_volts(1, 0.0f, 1.0f, 9.0f, &volts) == 1 && volts == 1.0f,
+                "0 percent collective is 1.00 V");
+    expect_true(a429_clp_volts(1, 100.0f, 1.0f, 9.0f, &volts) == 1 && volts == 9.0f,
+                "100 percent collective is 9.00 V");
+    expect_true(a429_clp_volts(1, 50.0f, 1.0f, 9.0f, &volts) == 1 && volts == 5.0f,
+                "50 percent collective is 5.00 V");
+    expect_true(a429_clp_volts(1, 25.0f, 1.0f, 9.0f, &volts) == 1 && volts == 3.0f,
+                "25 percent is 1 + 8 * 0.25");
+    expect_true(a429_clp_volts(1, -10.0f, 1.0f, 9.0f, &volts) == 1 && volts == 1.0f,
+                "collective below 0 percent clamps to 1.00 V");
+    expect_true(a429_clp_volts(1, 150.0f, 1.0f, 9.0f, &volts) == 1 && volts == 9.0f,
+                "collective above 100 percent clamps to 9.00 V");
+    expect_true(a429_clp_volts(1, 25.0f, 2.0f, 6.0f, &volts) == 1 && volts == 3.0f,
+                "endpoints scale the same linear map");
+    expect_true(a429_clp_volts(0, 50.0f, 1.0f, 9.0f, &volts) == 0,
+                "a missing collective is not a voltage");
+    expect_true(a429_clp_volts(1, nanbits.f, 1.0f, 9.0f, &volts) == 0,
+                "NaN collective is omitted");
+    expect_true(a429_clp_volts(1, infbits.f, 1.0f, 9.0f, &volts) == 0,
+                "infinite collective is omitted");
+    infbits.u = 0xff800000u;
+    expect_true(a429_clp_volts(1, infbits.f, 1.0f, 9.0f, &volts) == 0,
+                "negative infinite collective is omitted");
+    expect_true(a429_clp_volts(1, 50.0f, nanbits.f, 9.0f, &volts) == 0,
+                "a NaN 0 percent endpoint is omitted");
+    expect_true(a429_clp_volts(1, 50.0f, 1.0f, nanbits.f, &volts) == 0,
+                "a NaN 100 percent endpoint is omitted");
+    expect_true(a429_clp_volts(1, 50.0f, 1.0f, 9.0f, 0) == 0,
+                "null voltage output is rejected");
+    a429_link_set_collective(0, 1, 50.0f, 1.0f, 9.0f);
+
+    a429_link_init(&link);
+    a429_link_set_collective(&link, 1, 0.0f, 1.0f, 9.0f);
+    build_tx(&link);
+    expect_true(link.last_tx_count == 1u, "only label 310 is added");
+    expect_true(clp_word_is(link.last_tx[0], 0, 100) == 1, "0 percent is data 100, 1.00 V");
+    a429_inspect(link.last_tx[0], 0, &view);
+    expect_true(view.eu_valid == 1 && view.eu == 1.0f && view.sm == A429_SM_NORMAL &&
+                view.reserved_ok == 1,
+                "1.00 V decodes as a normal BNR voltage");
+
+    a429_link_set_collective(&link, 1, 100.0f, 1.0f, 9.0f);
+    build_tx(&link);
+    expect_true(clp_word_is(link.last_tx[0], 0, 900) == 1, "100 percent is data 900, 9.00 V");
+    a429_inspect(link.last_tx[0], 0, &view);
+    expect_true(view.eu_valid == 1 && view.eu == 9.0f, "9.00 V decodes from the 0.01 count");
+
+    a429_link_set_collective(&link, 1, 50.0f, 1.0f, 9.0f);
+    build_tx(&link);
+    expect_true(clp_word_is(link.last_tx[0], 0, 500) == 1, "50 percent is data 500, 5.00 V");
+    a429_inspect(link.last_tx[0], 0, &view);
+    expect_true(view.eu_valid == 1 && view.eu == 5.0f, "5.00 V is the mid-range voltage");
+
+    a429_link_set_collective(&link, 1, -25.0f, 1.0f, 9.0f);
+    build_tx(&link);
+    expect_true(clp_word_is(link.last_tx[0], 0, 100) == 1, "a negative percent is sent as 1.00 V");
+    a429_link_set_collective(&link, 1, 180.0f, 1.0f, 9.0f);
+    build_tx(&link);
+    expect_true(clp_word_is(link.last_tx[0], 0, 900) == 1, "percent above 100 is sent as 9.00 V");
+
+    a429_link_set_sdi(&link, 2);
+    a429_link_set_collective(&link, 1, 50.0f, 1.0f, 9.0f);
+    build_tx(&link);
+    expect_true(clp_word_is(link.last_tx[0], 2, 500) == 1, "310 uses the link SDI");
+
+    a429_link_init(&link);
+    rejected = link.tx_rejected;
+    a429_link_set_collective(&link, 1, 50.0f, 40000.0f, 40000.0f);
+    build_tx(&link);
+    expect_true(link.sim.clp_set == 0 && link.last_tx_count == 0u && link.tx_rejected == rejected,
+                "a voltage that does not fit the BNR field is omitted");
+
+    a429_sim_set_clp(&link, 2.5f);
+    a429_link_set_collective(&link, 1, 50.0f, 1.0f, 9.0f);
+    build_tx(&link);
+    expect_true(clp_word_is(link.last_tx[0], 0, 500) == 1, "measured collective replaces a snapshot voltage");
+    a429_link_set_collective(&link, 0, 50.0f, 1.0f, 9.0f);
+    build_tx(&link);
+    expect_true(link.sim.clp_set == 0 && link.sim.clp_v == 0.0f && link.last_tx_count == 0u,
+                "a missing collective clears 310 and does not hold the last voltage");
+    a429_sim_set_clp(&link, 2.5f);
+    a429_link_set_collective(&link, 1, nanbits.f, 1.0f, 9.0f);
+    build_tx(&link);
+    expect_true(link.sim.clp_set == 0 && link.last_tx_count == 0u,
+                "NaN collective clears 310 instead of repeating 2.50 V");
+    a429_sim_set_clp(&link, 2.5f);
+    a429_link_set_collective(&link, 1, 50.0f, infbits.f, 9.0f);
+    expect_true(link.sim.clp_set == 0, "a non-finite endpoint clears 310");
+
+    a429_link_init(&link);
+    expect_true(a429_encode_bnr(0311, 0, A429_SM_NORMAL, 50.0f, &nr) == 1, "Nr oracle");
+    memset(&levels, 0, sizeof(levels));
+    levels.mode = A429_MODE_FLIGHT;
+    levels.on_ground = 1;
+    expect_true(a429_encode_pcmd(0340, 0, A429_SM_NORMAL, &levels, &pcmd) == 1, "flight command oracle");
+    expect_true(a429_sim_set_pcmd(&link, 0, &levels) == 1, "command snapshot");
+    a429_link_set_measured_nr(&link, 1, 500.0f, 1000.0f);
+    a429_link_set_collective(&link, 1, 50.0f, 1.0f, 9.0f);
+    build_tx(&link);
+    expect_true(link.last_tx_count == 3u, "CLP, Nr, then the command word");
+    expect_true(clp_word_is(link.last_tx[0], 0, 500) == 1, "label 310 is the collective voltage");
+    expect_true(link.last_tx[1] == nr, "label 311 is not rewritten");
+    expect_true(link.last_tx[2] == pcmd, "stop/idle/flight bits are not rewritten");
+    a429_link_set_collective(&link, 0, 0.0f, 0.0f, 0.0f);
+    build_tx(&link);
+    expect_true(link.last_tx_count == 2u && link.last_tx[0] == nr && link.last_tx[1] == pcmd,
+                "clearing 310 leaves 311 and the command word");
+}
+
 int a429_host_tests(void);
 
 int a429_host_tests(void)
@@ -972,6 +1262,8 @@ int a429_host_tests(void)
     test_invalid_sm_clears_fresh();
     test_rs422_label_wire();
     test_engine_mode();
+    test_measured_nr();
+    test_collective_clp();
     if (g_fails == 0) {
         printf("RESULT: all passed\n");
     } else {
