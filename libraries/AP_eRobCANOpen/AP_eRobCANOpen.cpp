@@ -54,15 +54,15 @@ const AP_Param::GroupInfo AP_eRobCANOpen::var_info[] = {
 
     // @Param: MIN
     // @DisplayName: eRob CAN position min
-    // @Description: Offset in plus from CTR when the servo output is at SERVOx_MIN. The CSP target written to 0x607A is CTR plus this mapped value. All axes share this offset and CTR. Default 0 with CTR 0 keeps an absolute map.
+    // @Description: Offset in plus from CTR when the servo output is at SERVOx_MIN. The CSP target written to 0x607A is CTR plus this mapped value. All axes share this offset and CTR. Default -43691 is 30 degrees below CTR at RES 524288.
     // @User: Advanced
-    AP_GROUPINFO("MIN", 4, AP_eRobCANOpen, _pos_min, 0),
+    AP_GROUPINFO("MIN", 4, AP_eRobCANOpen, _pos_min, -43691),
 
     // @Param: MAX
     // @DisplayName: eRob CAN position max
-    // @Description: Offset in plus from CTR when the servo output is at SERVOx_MAX. The CSP target written to 0x607A is CTR plus this mapped value. The PWM midpoint maps to CTR + (MIN+MAX)/2. All axes share this offset and CTR. Per-axis travel is not separate yet.
+    // @Description: Offset in plus from CTR when the servo output is at SERVOx_MAX. The CSP target written to 0x607A is CTR plus this mapped value. The PWM midpoint maps to CTR + (MIN+MAX)/2. All axes share this offset and CTR. Default 43691 is 30 degrees above CTR at RES 524288. Per-axis travel is not separate yet.
     // @User: Advanced
-    AP_GROUPINFO("MAX", 5, AP_eRobCANOpen, _pos_max, 524288),
+    AP_GROUPINFO("MAX", 5, AP_eRobCANOpen, _pos_max, 43691),
 
     // @Param: GEAR
     // @DisplayName: eRob CAN gear ratio
@@ -82,18 +82,18 @@ const AP_Param::GroupInfo AP_eRobCANOpen::var_info[] = {
 
     // @Param: CTR
     // @DisplayName: eRob CAN output center
-    // @Description: Absolute output-encoder counts at the reference center, shared by every axis. 0x607A is CTR plus the MIN/MAX offset mapped from servo PWM. Default 0 leaves targets absolute, as before. The PWM midpoint maps to CTR + (MIN+MAX)/2. Degrees are (0x6064 - CTR) * 360 / RES. A 19-bit single-turn center is 262144. No reboot.
+    // @Description: Absolute output-encoder counts at the reference center, shared by every axis. 0x607A is CTR plus the MIN/MAX offset mapped from servo PWM. Default 262144 is half of RES 524288, the 19-bit single-turn center. The PWM midpoint maps to CTR + (MIN+MAX)/2. Degrees are (0x6064 - CTR) * 360 / RES. No reboot.
     // @Increment: 1
     // @User: Standard
-    AP_GROUPINFO("CTR", 25, AP_eRobCANOpen, _pos_ctr, 0),
+    AP_GROUPINFO("CTR", 25, AP_eRobCANOpen, _pos_ctr, 262144),
 
     // @Param: SV1
     // @DisplayName: eRob CAN slot 1 servo
-    // @Description: Servo output number for slot 1, so SERVO this number drives ID1. 0 leaves the slot unused. If any SVn is non-zero, slots replace NODE and BM. If every SVn is 0, NODE plus BM is used. MIN, MAX, GEAR, RES and CTR stay shared. A duplicate servo, a value outside 1..32, or a servo with ID 0 is skipped.
+    // @Description: Servo output number for slot 1, so SERVO this number drives ID1. Default 1. 0 leaves the slot unused. If any SVn is non-zero, slots replace NODE and BM. If every SVn is 0, NODE plus BM is used. MIN, MAX, GEAR, RES and CTR stay shared. A duplicate servo, a value outside 1..32, or a servo with ID 0 is skipped.
     // @Range: 0 32
     // @User: Standard
     // @RebootRequired: True
-    AP_GROUPINFO("SV1", 8, AP_eRobCANOpen, _slot_sv[0], 0),
+    AP_GROUPINFO("SV1", 8, AP_eRobCANOpen, _slot_sv[0], 1),
 
     // @Param: SV2
     // @DisplayName: eRob CAN slot 2 servo
@@ -101,7 +101,7 @@ const AP_Param::GroupInfo AP_eRobCANOpen::var_info[] = {
     // @Range: 0 32
     // @User: Standard
     // @RebootRequired: True
-    AP_GROUPINFO("SV2", 9, AP_eRobCANOpen, _slot_sv[1], 0),
+    AP_GROUPINFO("SV2", 9, AP_eRobCANOpen, _slot_sv[1], 2),
 
     // @Param: SV3
     // @DisplayName: eRob CAN slot 3 servo
@@ -109,7 +109,7 @@ const AP_Param::GroupInfo AP_eRobCANOpen::var_info[] = {
     // @Range: 0 32
     // @User: Standard
     // @RebootRequired: True
-    AP_GROUPINFO("SV3", 10, AP_eRobCANOpen, _slot_sv[2], 0),
+    AP_GROUPINFO("SV3", 10, AP_eRobCANOpen, _slot_sv[2], 3),
 
     // @Param: SV4
     // @DisplayName: eRob CAN slot 4 servo
@@ -117,7 +117,7 @@ const AP_Param::GroupInfo AP_eRobCANOpen::var_info[] = {
     // @Range: 0 32
     // @User: Standard
     // @RebootRequired: True
-    AP_GROUPINFO("SV4", 11, AP_eRobCANOpen, _slot_sv[3], 0),
+    AP_GROUPINFO("SV4", 11, AP_eRobCANOpen, _slot_sv[3], 4),
 
     // @Param: SV5
     // @DisplayName: eRob CAN slot 5 servo
@@ -153,11 +153,11 @@ const AP_Param::GroupInfo AP_eRobCANOpen::var_info[] = {
 
     // @Param: ID1
     // @DisplayName: eRob CAN slot 1 Node-ID
-    // @Description: CANopen Node-ID driven by the servo in SV1. 1..127. The servo's ID is hard-set on the drive. This driver does not write object 0x100B. SV1 set with ID 0 is skipped. Ignored when SV1 is 0.
+    // @Description: CANopen Node-ID driven by the servo in SV1. Default 1. 1..127. The servo's ID is hard-set on the drive. This driver does not write object 0x100B. SV1 set with ID 0 is skipped. Ignored when SV1 is 0.
     // @Range: 0 127
     // @User: Standard
     // @RebootRequired: True
-    AP_GROUPINFO("ID1", 16, AP_eRobCANOpen, _slot_id[0], 0),
+    AP_GROUPINFO("ID1", 16, AP_eRobCANOpen, _slot_id[0], 1),
 
     // @Param: ID2
     // @DisplayName: eRob CAN slot 2 Node-ID
@@ -165,7 +165,7 @@ const AP_Param::GroupInfo AP_eRobCANOpen::var_info[] = {
     // @Range: 0 127
     // @User: Standard
     // @RebootRequired: True
-    AP_GROUPINFO("ID2", 17, AP_eRobCANOpen, _slot_id[1], 0),
+    AP_GROUPINFO("ID2", 17, AP_eRobCANOpen, _slot_id[1], 2),
 
     // @Param: ID3
     // @DisplayName: eRob CAN slot 3 Node-ID
@@ -173,7 +173,7 @@ const AP_Param::GroupInfo AP_eRobCANOpen::var_info[] = {
     // @Range: 0 127
     // @User: Standard
     // @RebootRequired: True
-    AP_GROUPINFO("ID3", 18, AP_eRobCANOpen, _slot_id[2], 0),
+    AP_GROUPINFO("ID3", 18, AP_eRobCANOpen, _slot_id[2], 3),
 
     // @Param: ID4
     // @DisplayName: eRob CAN slot 4 Node-ID
@@ -181,7 +181,7 @@ const AP_Param::GroupInfo AP_eRobCANOpen::var_info[] = {
     // @Range: 0 127
     // @User: Standard
     // @RebootRequired: True
-    AP_GROUPINFO("ID4", 19, AP_eRobCANOpen, _slot_id[3], 0),
+    AP_GROUPINFO("ID4", 19, AP_eRobCANOpen, _slot_id[3], 4),
 
     // @Param: ID5
     // @DisplayName: eRob CAN slot 5 Node-ID
@@ -224,25 +224,25 @@ const AP_Param::GroupInfo AP_eRobCANOpen::var_info[] = {
     // @Range: 0 500
     // @Increment: 1
     // @User: Standard
-    AP_GROUPINFO("RATE", 34, AP_eRobCANOpen, _rate_deg_s, 20),
+    AP_GROUPINFO("RATE", 34, AP_eRobCANOpen, _rate_deg_s, 100),
 
     // @Param: ACC
     // @DisplayName: eRob CAN slew accel
-    // @Description: Acceleration of the CSP command ramp toward RATE. 0 keeps the old constant-speed RATE step (no accel curve). Customer default ~1000 reaches 100 deg/s in about 0.1 s.
+    // @Description: Acceleration of the CSP command ramp toward RATE. 0 keeps the old constant-speed RATE step (no accel curve). Default 500 reaches 100 deg/s in about 0.2 s.
     // @Units: deg/s/s
     // @Range: 0 10000
     // @Increment: 10
     // @User: Standard
-    AP_GROUPINFO("ACC", 35, AP_eRobCANOpen, _acc_deg_s2, 1000),
+    AP_GROUPINFO("ACC", 35, AP_eRobCANOpen, _acc_deg_s2, 500),
 
     // @Param: DEC
     // @DisplayName: eRob CAN slew decel
-    // @Description: Deceleration of the CSP command ramp into the target. 0 uses ACC. Softens stop shock on the swashplate.
+    // @Description: Deceleration of the CSP command ramp into the target. Default 500. 0 uses ACC. Softens stop shock on the swashplate.
     // @Units: deg/s/s
     // @Range: 0 10000
     // @Increment: 10
     // @User: Standard
-    AP_GROUPINFO("DEC", 36, AP_eRobCANOpen, _dec_deg_s2, 1000),
+    AP_GROUPINFO("DEC", 36, AP_eRobCANOpen, _dec_deg_s2, 500),
 
     AP_GROUPEND
 };

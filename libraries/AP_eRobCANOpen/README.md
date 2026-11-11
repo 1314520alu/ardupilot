@@ -59,7 +59,7 @@ hwdef 把 `PH15` 拉高，USB 走 FS。CAN2（PB12 / PB13）和 USB HS 不能同
 ./waf heli
 ```
 
-产物 `build/ZeroOneX6/bin/arducopter-heli.apj`。那块板的 `defaults.parm` 里两路都在驱动 1 上，协议仍是 DroneCAN，直到把 CAN2 拆到驱动 2、协议 15。
+产物 `build/ZeroOneX6/bin/arducopter-heli.apj`。这块板的 `defaults.parm` 在首次启动和参数重置时把 CAN2 设成驱动 2、协议 15，eRob 默认值与编译进 `AP_eRobCANOpen` 的一致：槽 1..4 是 SERVO1..4 / Node-ID 1..4，`CTR` 262144，`MIN`/`MAX` ±43691，`RATE` 100，`ACC`/`DEC` 500。`BRD_SAFETY_DEFLT` 在这块板上是 0。已经写进 EEPROM 的参数，只刷固件不会被覆盖。CUAV-X7 的 `defaults.parm` 仍只打开 CAN1 DroneCAN。
 
 ## CAN1 / CAN2
 
@@ -72,7 +72,7 @@ hwdef 把 `PH15` 拉高，USB 走 FS。CAN2（PB12 / PB13）和 USB HS 不能同
 
 `ZeroOneX6` 备选口线是 CAN1 = PD0 / PD1，CAN2 = PB12 / PB13。驱动同样只绑 HAL 接口 1。
 
-要选 eRob CAN，按 ArduPilot 的三层参数打开 CAN2，CAN1 保持不动：
+CUAV-X7 要手开 CAN2。ZeroOne X6 的板级默认已经打开。下面是 `SVn` 全 0 时的旧位掩码例子，不是当前编译默认：
 
 ```text
 CAN_P1_DRIVER    1
@@ -100,7 +100,7 @@ CAN_D2_EROB_RES  524288
 
 `15` 是 `AP_CAN::Protocol::eRobCAN`，参数列表显示为 `eRob CAN`。一个 `CAN_Dx_PROTOCOL` 独占那个虚拟驱动：1 是 DroneCAN，15 是这组舵机。驱动只接受 HAL 接口 1（CAN2）。这不是通用 CANopen 工具，默认只做 CiA402 CSP。
 
-eRob 按舵机用。`CAN_D2_EROB_BM` 的位和 `CAN_Dx_UC_SRV_BM` 一样：bit 0 是 SERVO1。全名放不下 `SRV_BM`（`CAN_D2_EROB_SRV_BM` 有 18 个字符，上限 16），所以参数名是 `BM`。最多 8 轴。`SRV_Channels::push()` 把 PWM 线性映到 `MIN`..`MAX`（相对 `CTR` 的偏移），再加上共用的 `CTR` 写入 `0x607A`。`CTR` 默认 0，目标仍是映射值本身。一圈输出端是 `RES` 个计数。掩码为 0 且槽也全空时不跟舵机输出。第一轴负责发 SYNC，其余轴只收这个 SYNC。同一接口上的其它帧被丢掉。CAN1 保持 `CAN_D1_PROTOCOL 1`。使能后 500 ms 内主站仍保持实际位置，然后沿直线斜坡回到中位 `CTR+(MIN+MAX)/2`，到了中位才跟踪舵机目标。直线距离大于 `CTR+MIN`..`CTR+MAX` 再加 5° 时保持当前 `0x6064` 并告警，不绕单圈的 0/524287。`RATE` 为 0 时这一步仍按 30 °/s 斜坡，之后才一步跟上舵机。每轴单独的行程还没做。输出角度不乘减速比；电机转速才用 `GEAR`。
+eRob 按舵机用。`CAN_D2_EROB_BM` 的位和 `CAN_Dx_UC_SRV_BM` 一样：bit 0 是 SERVO1。全名放不下 `SRV_BM`（`CAN_D2_EROB_SRV_BM` 有 18 个字符，上限 16），所以参数名是 `BM`。最多 8 轴。`SRV_Channels::push()` 把 PWM 线性映到 `MIN`..`MAX`（相对 `CTR` 的偏移），再加上共用的 `CTR` 写入 `0x607A`。编译默认是 `CTR` 262144、`MIN`/`MAX` ±43691，槽 1..4 为 SERVO1..4 对 Node-ID 1..4，`BM` 为 0 因而不参与映射。一圈输出端是 `RES` 个计数。`SVn` 全是 0 时才退回 `NODE` + `BM`。第一轴负责发 SYNC，其余轴只收这个 SYNC。同一接口上的其它帧被丢掉。CAN1 的全局默认仍是 DroneCAN；只有 ZeroOne X6 的板级默认把 CAN2 打开成 eRob。使能后 500 ms 内主站仍保持实际位置，然后沿直线斜坡回到中位 `CTR+(MIN+MAX)/2`，到了中位才跟踪舵机目标。直线距离大于 `CTR+MIN`..`CTR+MAX` 再加 5° 时保持当前 `0x6064` 并告警，不绕单圈的 0/524287。`RATE` 默认 100 °/s，`ACC`/`DEC` 默认 500。`RATE` 为 0 时第一次回中位仍按 30 °/s 斜坡，之后才一步跟上舵机。每轴单独的行程还没做。输出角度不乘减速比；电机转速才用 `GEAR`。
 
 地面站实时名字是 `ERn_` 加短标签，`n` 是槽号，和 `CAN_D2_EROB_SVn` / `IDn` 的 n 相同，不是 SERVO 输出号。日志 `ERB1` / `ERB3` 的 `Sv` 仍是 SERVO 号。槽 `SV1=5`、`ID1=11` 时，节点 11 的数据出现在 `ER1_*`，`Sv` 为 5。`SV1`..`SV8` 全是 0、改走 `NODE` + `BM` 时，`n` 按置位从低到高从 1 数。
 
@@ -150,7 +150,7 @@ CAN_D2_EROB_RES  524288
 | SERVO3 | Motor3，斜盘 | 35 | `SV3=3` |
 | SERVO4 | Motor4，尾舵 | 36 | `SV4=4` |
 
-60° 行程、中位两侧各 30°。`MIN` / `MAX` 是相对中心的偏移，不是绝对编码器计数。PWM 的最小端映到 `CTR + MIN`，最大端映到 `CTR + MAX`。PWM 中点（对称安装时的 `SERVOx` 中位）映到 `CTR + (MIN+MAX)/2`。`CTR` 默认 0，这时行为和以前一样，目标就是映射值本身。各轴共用这一个 `CTR`。型号参数见下一节。下面的 ID 只是例子。
+60° 行程、中位两侧各 30°。`MIN` / `MAX` 是相对中心的偏移，不是绝对编码器计数。PWM 的最小端映到 `CTR + MIN`，最大端映到 `CTR + MAX`。PWM 中点（对称安装时的 `SERVOx` 中位）映到 `CTR + (MIN+MAX)/2`。`CTR` 默认 262144。各轴共用这一个 `CTR`。型号参数见下一节。下面的 ID 只是例子。
 
 ```text
 SERVO1_FUNCTION  33
@@ -346,7 +346,7 @@ libraries/AP_eRobCANOpen/
 make -C libraries/AP_eRobCANOpen check
 ```
 
-通过时打印一行 `OK CAN2 iface 1 @ 1000000 bps, SYNC 4000 us, ...`，进程退出码为 0。桩会应答手册 §5.5.1 的 SDO，并检查 NMT、`0x1006 = 4000`、PDO 映射、CiA402 使能和 500 ms 位置保持。
+通过时打印一行 `OK CAN2 iface 1 @ 1000000 bps, SYNC 4000 us, ...`，进程退出码为 0。桩会应答手册 §5.5.1 的 SDO，并检查 NMT、`0x1006 = 4000`、PDO 映射、CiA402 使能和 500 ms 位置保持。同一条 `check` 还核对 ZeroOne X6 的板级默认和 `AP_GROUPINFO` 里的 eRob 默认值。
 
 `src/*.c` 不在 waf 的顶层扫描里。`AP_eRobCANOpen.cpp` 在宏打开时把它们包含进去，避免和 host 的 Makefile 各编一份再链到同一个程序。宏为 0 时这个 cpp 是空的翻译单元。
 
@@ -371,7 +371,7 @@ CAN_D2_EROB_MAX  43691
 SERVO1_FUNCTION  0
 ```
 
-`RES` 524288 时 ±30°（一共 60°）是 ±43691 plus。`MIN` / `MAX` 是相对 `CTR` 的偏移。PWM 中点映到 `CTR`。`CTR` 填分析仪或 `ER1_POS` 在希望的中位读到的 `0x6064`，不要默认填 262144，除非读数就是 262144。`CTR` 不用重启。`SV1` / `ID1` / 协议 / 驱动号要重启。
+`RES` 524288 时 ±30°（一共 60°）是 ±43691 plus。`MIN` / `MAX` 是相对 `CTR` 的偏移。PWM 中点映到 `CTR`。编译默认和 ZeroOne X6 板级默认的 `CTR` 是 262144。若机械中位的 `0x6064` 不是这个数，再改 `CTR`。`CTR` 不用重启。`SV1` / `ID1` / 协议 / 驱动号要重启。
 
 地面站应出现 `eRob: SERVO1 id 1 OK`，随后 `eRob CAN: servo node 1 enabled`。`ER1_POS` 是原始 plus，`ER1_EN` 为 1 表示已使能。中位对上之后再把 `SERVO1_FUNCTION` 改成要测的通道。四轴 DY1000 仍是斜盘 SERVO1..3 功能 33..35、尾舵 SERVO4 功能 36，Node-ID 按舵机上已经写死的号填 `ID1`..`ID4`，不要假设连续的 1..4。四轴的地面站前缀是 `ER1_`..`ER4_`。
 
