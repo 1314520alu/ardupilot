@@ -51,6 +51,15 @@ static void on_tpdo(void *user, uint8_t pdo_num, const uint8_t *data, uint8_t dl
         s->fb.pos_actual = s->pos_actual;
         s->fb.valid |= EROB_FB_TPDO1;
         s->feedback_valid = true;
+        s->pos_seen = true;
+        if (s->actual_stale) {
+            /* First sample after the node returns. Do not reuse the old count. */
+            s->actual_stale = false;
+            s->hold_pos = s->pos_actual;
+            s->ramp_pos = s->pos_actual;
+            s->cmd_vel_plus_s = 0;
+            s->home_latched = false;
+        }
         s->last_tpdo_ms = can_bus_millis(s->co->bus);
         return;
     }
@@ -220,6 +229,9 @@ int erob_configure_pdo_csp(erob_servo_t *s)
     s->pos_actual = pos;
     s->target_pos = pos;
     s->hold_pos = pos;
+    s->ramp_pos = pos;
+    s->cmd_vel_plus_s = 0;
+    s->pos_seen = true;
     if (co_sdo_write(m, 0x607A, 0x00, &pos, 4) != 0) {
         return fail(s, -1);
     }
@@ -238,6 +250,10 @@ int erob_set_mode(erob_servo_t *s, uint8_t mode)
 static int send_cw_pos(erob_servo_t *s, uint16_t cw, int32_t pos)
 {
     uint8_t buf[6];
+    /* RPDO1 carries 0x607A. Do not emit it until 0x6064 has been read. */
+    if (!s->pos_seen) {
+        return -1;
+    }
     buf[0] = (uint8_t)(cw & 0xff);
     buf[1] = (uint8_t)(cw >> 8);
     buf[2] = (uint8_t)((uint32_t)pos);
@@ -260,10 +276,22 @@ int erob_enable(erob_servo_t *s)
         s->pos_actual = pos;
         s->target_pos = pos;
         s->hold_pos = pos;
+        s->ramp_pos = pos;
+        s->cmd_vel_plus_s = 0;
+        s->pos_seen = true;
+    }
+    if (!s->pos_seen) {
+        return -1;
     }
     s->enable_step = 1;
     s->enable_ts_ms = now;
     s->state = EROB_ST_ENABLE_SEQ;
+    if (s->home_window) {
+        /* Every fresh enable returns to mid before the mixer target. */
+        s->need_home = true;
+        s->home_latched = false;
+        s->home_holding = false;
+    }
     return send_cw_pos(s, EROB_CW_FAULT_RESET, s->hold_pos);
 }
 
@@ -409,6 +437,15 @@ static void service_recover(erob_servo_t *s, uint32_t now)
     uint16_t sw = s->statusword;
     int fault = (sw & EROB_SW_FAULT_BIT) != 0;
 
+    if (s->need_nmt_start) {
+        (void)co_nmt(s->co, CO_NMT_START, s->co->node_id);
+        s->need_nmt_start = false;
+    }
+    /* The count from before the dropout is not a safe 0x607A. */
+    if (s->actual_stale) {
+        return;
+    }
+
     s->hold_pos = s->pos_actual;
 
     if (fault) {
@@ -432,11 +469,6 @@ static void service_recover(erob_servo_t *s, uint32_t now)
             s->rec_step = REC_RESET_HIGH;
         }
         return;
-    }
-
-    if (s->need_nmt_start) {
-        (void)co_nmt(s->co, CO_NMT_START, s->co->node_id);
-        s->need_nmt_start = false;
     }
 
     if (s->rec_step == REC_RESET_LOW || s->rec_step == REC_RESET_HIGH ||
@@ -537,9 +569,10 @@ static int32_t ramp_toward(erob_servo_t *s, uint32_t now)
  * Continuous CSP command slew while Operation enabled.
  * RATE caps speed. ACC/DEC shape a trapezoid (deg/s^2). ACC=0 keeps the
  * legacy constant-RATE step. DEC=0 uses ACC. dt is capped so a stalled poll
- * cannot jump.
+ * cannot jump. goal is an absolute count; the step is the signed difference
+ * and does not wrap at 0/524287.
  */
-static int32_t slew_toward(erob_servo_t *s, uint32_t now)
+static int32_t slew_toward(erob_servo_t *s, uint32_t now, int32_t goal, int32_t rate_deg_s)
 {
     int32_t res = s->counts_per_rev > 0 ? s->counts_per_rev : EROB_PLUS_PER_REV;
     uint32_t dt = now - s->ramp_last_ms;
@@ -561,7 +594,7 @@ static int32_t slew_toward(erob_servo_t *s, uint32_t now)
     if (dt > 50u) {
         dt = 50u;
     }
-    err = (int64_t)s->target_pos - (int64_t)s->ramp_pos;
+    err = (int64_t)goal - (int64_t)s->ramp_pos;
     mag = err < 0 ? -err : err;
     if (mag == 0) {
         s->cmd_vel_plus_s = 0;
@@ -588,25 +621,25 @@ static int32_t slew_toward(erob_servo_t *s, uint32_t now)
 
     /* Legacy path: constant RATE, no accel curve. */
     if (a_acc <= 0 && a_dec <= 0) {
-        int64_t step = (int64_t)res * (int64_t)s->rate_deg_s * (int64_t)dt / 360 / 1000;
+        int64_t step = (int64_t)res * (int64_t)rate_deg_s * (int64_t)dt / 360 / 1000;
         if (step < 1) {
             step = 1;
         }
         if (mag <= step) {
-            s->ramp_pos = s->target_pos;
+            s->ramp_pos = goal;
             s->cmd_vel_plus_s = 0;
         } else if (err > 0) {
             s->ramp_pos = sat_i32((int64_t)s->ramp_pos + step);
-            s->cmd_vel_plus_s = (int32_t)((int64_t)res * (int64_t)s->rate_deg_s / 360);
+            s->cmd_vel_plus_s = (int32_t)((int64_t)res * (int64_t)rate_deg_s / 360);
         } else {
             s->ramp_pos = sat_i32((int64_t)s->ramp_pos - step);
-            s->cmd_vel_plus_s = -(int32_t)((int64_t)res * (int64_t)s->rate_deg_s / 360);
+            s->cmd_vel_plus_s = -(int32_t)((int64_t)res * (int64_t)rate_deg_s / 360);
         }
         s->ramp_last_ms = now;
         return s->ramp_pos;
     }
 
-    vmax = (int32_t)((int64_t)res * (int64_t)s->rate_deg_s / 360);
+    vmax = (int32_t)((int64_t)res * (int64_t)rate_deg_s / 360);
     if (vmax < 1) {
         vmax = 1;
     }
@@ -661,7 +694,7 @@ static int32_t slew_toward(erob_servo_t *s, uint32_t now)
         dpos = v > 0 ? 1 : -1;
     }
     if ((err > 0 && dpos >= err) || (err < 0 && dpos <= err)) {
-        s->ramp_pos = s->target_pos;
+        s->ramp_pos = goal;
         s->cmd_vel_plus_s = 0;
     } else {
         s->ramp_pos = sat_i32((int64_t)s->ramp_pos + dpos);
@@ -669,6 +702,23 @@ static int32_t slew_toward(erob_servo_t *s, uint32_t now)
     }
     s->ramp_last_ms = now;
     return s->ramp_pos;
+}
+
+/* Straight-line |actual-mid| is longer than the travel window plus 5 deg. */
+static int home_too_far(const erob_servo_t *s, int32_t actual)
+{
+    int64_t span = (int64_t)s->home_hi - (int64_t)s->home_lo;
+    int64_t dist = (int64_t)actual - (int64_t)s->home_mid;
+    int32_t res = s->counts_per_rev > 0 ? s->counts_per_rev : EROB_PLUS_PER_REV;
+    int64_t margin = ((int64_t)res * (int64_t)EROB_PREARM_MARGIN_DEG) / 360;
+
+    if (span < 0) {
+        span = -span;
+    }
+    if (dist < 0) {
+        dist = -dist;
+    }
+    return dist > span + margin;
 }
 
 void erob_set_counts_per_rev(erob_servo_t *s, int32_t counts)
@@ -719,11 +769,21 @@ void erob_poll_motion(erob_servo_t *s)
         if (node_silent(s, now)) {
             s->state = EROB_ST_SILENT;
             s->ramp_active = false;
+            s->actual_stale = true;
+            if (s->home_window) {
+                /* Power loss. The next enable returns to mid, not the last stick. */
+                s->need_home = true;
+                s->home_latched = false;
+                s->home_holding = false;
+            }
             return;
         }
     }
 
     if (s->state == EROB_ST_ENABLE_SEQ) {
+        if (s->actual_stale || !s->pos_seen) {
+            return;
+        }
         if ((sw & EROB_SW_FAULT_BIT) != 0) {
             arm_recover(s, now, 1);
         } else if ((now - s->enable_ts_ms) >= 50) {
@@ -775,10 +835,53 @@ void erob_poll_motion(erob_servo_t *s)
             return;
         }
         note_healthy(s, now);
+        if (s->need_home) {
+            int32_t rate;
+            /*
+             * First motion after enable or a power cycle. Hold the measured
+             * position, then slew to mid on the signed line. The mixer target
+             * is followed only after that.
+             */
+            s->ramp_active = false;
+            if (!s->pos_seen) {
+                return;
+            }
+            if (home_too_far(s, s->pos_actual)) {
+                if (!s->home_holding) {
+                    s->home_holding = true;
+                    s->home_hold_warn = true;
+                }
+                s->ramp_pos = s->pos_actual;
+                s->cmd_vel_plus_s = 0;
+                s->ramp_last_ms = now;
+                s->home_latched = false;
+                (void)send_cw_pos(s, EROB_CW_ENABLE_OP, s->pos_actual);
+                return;
+            }
+            s->home_holding = false;
+            if ((now - s->enable_done_ms) < EROB_POST_ENABLE_HOLDOFF_MS ||
+                !s->home_latched) {
+                s->ramp_pos = s->pos_actual;
+                s->cmd_vel_plus_s = 0;
+                s->ramp_last_ms = now;
+                s->home_latched = true;
+                (void)send_cw_pos(s, EROB_CW_ENABLE_OP, s->pos_actual);
+                return;
+            }
+            rate = s->rate_deg_s > 0 ? s->rate_deg_s : EROB_HOME_FALLBACK_DEG_PER_S;
+            cmd = slew_toward(s, now, s->home_mid, rate);
+            if (s->ramp_pos == s->home_mid) {
+                s->need_home = false;
+                s->cmd_vel_plus_s = 0;
+                s->ramp_active = false;
+            }
+            (void)send_cw_pos(s, EROB_CW_ENABLE_OP, cmd);
+            return;
+        }
         if (s->rate_deg_s > 0) {
             /* Continuous software slew while enabled; replaces step/hold/recovery hurry. */
             s->ramp_active = false;
-            cmd = slew_toward(s, now);
+            cmd = slew_toward(s, now, s->target_pos, s->rate_deg_s);
         } else if (s->ramp_active) {
             cmd = ramp_toward(s, now);
         } else if ((now - s->enable_done_ms) < EROB_POST_ENABLE_HOLDOFF_MS) {
@@ -951,6 +1054,39 @@ static int32_t sat_i32(int64_t v)
 int32_t erob_target_plus(int32_t mapped, int32_t center)
 {
     return sat_i32((int64_t)center + (int64_t)mapped);
+}
+
+void erob_set_home_window(erob_servo_t *s, int32_t mid,
+                          int32_t travel_min, int32_t travel_max)
+{
+    if (s == NULL) {
+        return;
+    }
+    s->home_mid = mid;
+    if (travel_min <= travel_max) {
+        s->home_lo = travel_min;
+        s->home_hi = travel_max;
+    } else {
+        s->home_lo = travel_max;
+        s->home_hi = travel_min;
+    }
+    s->home_window = true;
+}
+
+bool erob_take_home_hold(erob_servo_t *s)
+{
+    bool warn;
+    if (s == NULL) {
+        return false;
+    }
+    warn = s->home_hold_warn;
+    s->home_hold_warn = false;
+    return warn;
+}
+
+int32_t erob_mid_plus(int32_t pos_min, int32_t pos_max, int32_t center)
+{
+    return sat_i32((int64_t)center + ((int64_t)pos_min + (int64_t)pos_max) / 2);
 }
 
 int32_t erob_plus_rel_center(int32_t absolute, int32_t center)

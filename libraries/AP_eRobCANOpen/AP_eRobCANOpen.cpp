@@ -219,7 +219,7 @@ const AP_Param::GroupInfo AP_eRobCANOpen::var_info[] = {
 
     // @Param: RATE
     // @DisplayName: eRob CAN slew rate
-    // @Description: Max output-shaft slew for CSP targets. Applies while Operation enabled. 0 disables the software ramp (step to target). Bench with a small PSU use 10-30; design cruise ~100.
+    // @Description: Max output-shaft slew for CSP targets. Applies while Operation enabled, and to the first return to mid. 0 steps to the mixer target only after that return; the return itself still slews, at 30 deg/s when this is 0. Bench with a small PSU use 10-30; design cruise ~100.
     // @Units: deg/s
     // @Range: 0 500
     // @Increment: 1
@@ -481,6 +481,15 @@ void AP_eRobCANOpen::probe_nodes()
     }
 }
 
+void AP_eRobCANOpen::apply_home_window(erob_servo_t *servo)
+{
+    const int32_t ctr = _pos_ctr.get();
+    erob_set_home_window(servo,
+                         erob_mid_plus(_pos_min.get(), _pos_max.get(), ctr),
+                         erob_target_plus(_pos_min.get(), ctr),
+                         erob_target_plus(_pos_max.get(), ctr));
+}
+
 bool AP_eRobCANOpen::try_configure(uint8_t index, uint32_t now_ms)
 {
     Axis &axis = _axis[index];
@@ -499,6 +508,7 @@ bool AP_eRobCANOpen::try_configure(uint8_t index, uint32_t now_ms)
         if (index != 0) {
             co_master_set_sync(&axis.master, false, 0);
         }
+        apply_home_window(&axis.servo);
         (void)erob_enable(&axis.servo);
     } else {
         GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "eRob CAN: node %u configure failed",
@@ -635,6 +645,7 @@ void AP_eRobCANOpen::poll_axes()
         erob_set_rate_deg_s(&_axis[i].servo, _rate_deg_s.get());
         erob_set_acc_deg_s2(&_axis[i].servo, _acc_deg_s2.get());
         erob_set_dec_deg_s2(&_axis[i].servo, _dec_deg_s2.get());
+        apply_home_window(&_axis[i].servo);
         // Text first, then the fault-reset edge inside poll_motion.
         warn_statusword_fault(i, now_ms);
         warn_node_silent(i, now_ms);
@@ -642,6 +653,10 @@ void AP_eRobCANOpen::poll_axes()
         erob_poll_diag(&_axis[i].servo);
         if (erob_take_recovered(&_axis[i].servo)) {
             GCS_SEND_TEXT(MAV_SEVERITY_INFO, "eRob: SERVO%u id %u recovered",
+                          unsigned(_axis[i].channel + 1), unsigned(_axis[i].node));
+        }
+        if (erob_take_home_hold(&_axis[i].servo)) {
+            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "eRob: SERVO%u id %u hold, mid path too far",
                           unsigned(_axis[i].channel + 1), unsigned(_axis[i].node));
         }
         if (!_axis[i].reported && erob_get_state(&_axis[i].servo) == EROB_ST_ENABLED) {

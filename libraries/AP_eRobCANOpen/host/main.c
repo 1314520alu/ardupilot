@@ -170,6 +170,367 @@ static void check_prearm(void)
                 "no TPDO1 is no response");
 }
 
+static int find_sdo_cmd(uint8_t node, uint8_t cs, uint16_t index)
+{
+    uint16_t i;
+    for (i = 0; i < can_bus_stub_tx_count(); i++) {
+        const can_frame_t *fr = can_bus_stub_tx(i);
+        uint16_t got;
+        if (fr->is_ext || fr->id != (uint32_t)(0x600u + node) || fr->dlc < 4) {
+            continue;
+        }
+        if (fr->data[0] != cs) {
+            continue;
+        }
+        got = (uint16_t)(fr->data[1] | (fr->data[2] << 8));
+        if (got == index) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static int32_t rpdo_pos(const can_frame_t *fr)
+{
+    return (int32_t)((uint32_t)fr->data[2] | ((uint32_t)fr->data[3] << 8) |
+                     ((uint32_t)fr->data[4] << 16) | ((uint32_t)fr->data[5] << 24));
+}
+
+#define HOME_SEQ_MAX 480
+
+struct home_case {
+    const char *name;
+    int32_t actual;
+    int32_t mid;
+    int32_t lo;
+    int32_t hi;
+    int32_t rate;
+    int32_t pwm_during;
+    int32_t pwm_after;
+    int hold;
+};
+
+static void check_home_case(const struct home_case *c)
+{
+    can_bus_t *bus;
+    canopen_master_t master;
+    erob_servo_t servo;
+    const uint8_t node = (uint8_t)EROB_DEFAULT_NODE_ID;
+    int32_t seq[HOME_SEQ_MAX];
+    int n = 0;
+    int i;
+    int read_at;
+    int write_at;
+    int32_t lo;
+    int32_t hi;
+    int32_t use_rate;
+    int32_t step;
+    int32_t first_move = 0;
+    int moved = 0;
+    int segment_bad = 0;
+    int guard;
+    uint16_t cursor;
+
+    bus = can_bus_stub_get();
+    can_bus_stub_set_position(c->actual);
+    co_master_init(&master, bus, node);
+    erob_init(&servo, &master);
+    erob_set_counts_per_rev(&servo, EROB_PLUS_PER_REV);
+    /* Rate comes up before 0x6064 is known, which used to park the ramp at 0. */
+    erob_set_rate_deg_s(&servo, 0);
+    erob_set_rate_deg_s(&servo, c->rate);
+    erob_set_acc_deg_s2(&servo, 0);
+    erob_set_dec_deg_s2(&servo, 0);
+    erob_set_home_window(&servo, c->mid, c->lo, c->hi);
+
+    expect_true(erob_configure_pdo_csp(&servo) == 0, c->name);
+    read_at = find_sdo_cmd(node, 0x40, 0x6064);
+    write_at = find_sdo_cmd(node, 0x23, 0x607A);
+    expect_true(read_at >= 0 && write_at > read_at, "0x6064 is read before 0x607A is written");
+    expect_true(find_sdo_u32(node, 0x607A, 0x00, (uint32_t)c->actual) >= 0,
+                "configure 0x607A equals actual");
+
+    can_bus_stub_tx_reset();
+    /* Stick/mixer command is already present and is not on the way to mid. */
+    erob_set_target_pos(&servo, c->pwm_during);
+    expect_true(erob_enable(&servo) == 0, c->name);
+    cursor = 0;
+    for (guard = 0; guard < 160; guard++) {
+        while (cursor < can_bus_stub_tx_count()) {
+            const can_frame_t *fr = can_bus_stub_tx(cursor);
+            cursor++;
+            if (fr->is_ext || fr->id != (uint32_t)(0x200u + node) || fr->dlc < 6) {
+                continue;
+            }
+            if (n < HOME_SEQ_MAX) {
+                seq[n++] = rpdo_pos(fr);
+            }
+        }
+        if (c->hold) {
+            if (guard > 40 && erob_get_state(&servo) == EROB_ST_ENABLED) {
+                break;
+            }
+        } else if (n > 0 && seq[n - 1] == c->mid &&
+                   erob_get_state(&servo) == EROB_ST_ENABLED) {
+            break;
+        }
+        /* push_servos() keeps rewriting the CSP target while the servo comes up. */
+        erob_set_target_pos(&servo, c->pwm_during);
+        can_bus_stub_advance(50);
+        erob_poll(&servo);
+    }
+    expect_true(!can_bus_stub_overflow(), "home trace did not overflow the stub log");
+    expect_true(n > 0 && n < HOME_SEQ_MAX, c->name);
+    expect_true(n > 0 && seq[0] == c->actual, "first 0x607A equals actual");
+
+    lo = c->actual < c->mid ? c->actual : c->mid;
+    hi = c->actual < c->mid ? c->mid : c->actual;
+    for (i = 0; i < n; i++) {
+        int inside = seq[i] >= lo && seq[i] <= hi;
+        int ordered = 1;
+        if (i > 0) {
+            if (c->mid >= c->actual) {
+                ordered = seq[i] >= seq[i - 1];
+            } else {
+                ordered = seq[i] <= seq[i - 1];
+            }
+        }
+        if ((!inside || !ordered) && !segment_bad) {
+            fprintf(stderr, "FAIL: %s target %d -> %d leaves the straight path [%d, %d] to %d\n",
+                    c->name, i > 0 ? seq[i - 1] : seq[i], seq[i], lo, hi, c->mid);
+            g_fails++;
+            segment_bad = 1;
+        }
+        if (seq[i] != c->actual && !moved) {
+            first_move = seq[i];
+            moved = 1;
+        }
+    }
+
+    use_rate = c->rate > 0 ? c->rate : EROB_HOME_FALLBACK_DEG_PER_S;
+    step = (int32_t)((int64_t)EROB_PLUS_PER_REV * (int64_t)use_rate * 50 / 360 / 1000);
+    if (step < 1) {
+        step = 1;
+    }
+    if (c->hold) {
+        {
+            uint16_t cw = 0;
+            int32_t pos = 0;
+            expect_true(!moved, "out-of-travel return does not leave actual");
+            expect_true(erob_take_home_hold(&servo), "out-of-travel return warns once");
+            expect_true(!erob_take_home_hold(&servo), "out-of-travel warning does not repeat");
+            erob_set_target_pos(&servo, c->mid + 1000);
+            can_bus_stub_advance(50);
+            erob_poll(&servo);
+            expect_true(last_rpdo(node, &cw, &pos) && pos == c->actual,
+                        "out-of-travel hold does not follow PWM");
+        }
+    } else {
+        int32_t want = c->mid >= c->actual ? c->actual + step : c->actual - step;
+        expect_true(moved && first_move == want, c->name);
+        if (!(moved && first_move == want)) {
+            fprintf(stderr, "FAIL: %s first step %d want %d (moved %d)\n",
+                    c->name, first_move, want, moved);
+        }
+        expect_true(n > 0 && seq[n - 1] == c->mid, "return reaches mid");
+        erob_set_target_pos(&servo, c->pwm_after);
+        can_bus_stub_advance(50);
+        erob_poll(&servo);
+        {
+            uint16_t cw = 0;
+            int32_t pos = 0;
+            expect_true(last_rpdo(node, &cw, &pos), "follow RPDO present");
+            if (c->rate <= 0) {
+                expect_true(pos == c->pwm_after, "after mid, RATE 0 follows the PWM target");
+            } else if (c->pwm_after > c->mid) {
+                expect_true(pos > c->mid && pos <= c->pwm_after,
+                            "after mid, the target follows PWM upward");
+            } else if (c->pwm_after < c->mid) {
+                expect_true(pos < c->mid && pos >= c->pwm_after,
+                            "after mid, the target follows PWM downward");
+            } else {
+                expect_true(pos == c->mid, "after mid, a mid PWM target stays at mid");
+            }
+        }
+    }
+}
+
+static void check_return_to_mid(void)
+{
+    const int32_t ctr = 262144;
+    const int32_t travel = 43691;
+    const int32_t lo = ctr - travel;
+    const int32_t hi = ctr + travel;
+    const int32_t span = hi - lo;
+    const int32_t margin = (int32_t)(((int64_t)EROB_PLUS_PER_REV * EROB_PREARM_MARGIN_DEG) / 360);
+    const int32_t limit = span + margin;
+    struct home_case cases[8];
+    int i;
+    can_bus_t *bus;
+    canopen_master_t master;
+    erob_servo_t servo;
+    const uint8_t node = (uint8_t)EROB_DEFAULT_NODE_ID;
+
+    expect_true(margin == 7281, "home margin matches the 5 deg pre-arm margin");
+    expect_true(erob_mid_plus(-travel, travel, ctr) == ctr, "symmetric mid is CTR");
+    expect_true(erob_mid_plus(-40000, 40000, 300000) == 300000, "mid at 300000");
+    expect_true(erob_mid_plus(0, 0, 300000) == 300000, "zero MIN/MAX mid is CTR");
+
+    memset(cases, 0, sizeof(cases));
+    cases[0] = (struct home_case){
+        "mid 262144 actual below moves up", 200000, ctr, lo, hi, 20, 100000, 300000, 0
+    };
+    cases[1] = (struct home_case){
+        "mid 262144 actual above moves down", 300000, ctr, lo, hi, 20, 400000, 200000, 0
+    };
+    cases[2] = (struct home_case){
+        "mid 300000 actual below moves up", 280000, 300000, 250000, 350000, 20, 100000, 340000, 0
+    };
+    cases[3] = (struct home_case){
+        "mid 300000 actual above moves down", 320000, 300000, 250000, 350000, 20, 400000, 260000, 0
+    };
+    cases[4] = (struct home_case){
+        "RATE 0 still slews to mid", 200000, ctr, lo, hi, 0, ctr, 300000, 0
+    };
+    cases[5] = (struct home_case){
+        "distance inside travel plus margin still moves",
+        ctr - limit, ctr, lo, hi, 20, 100000, ctr + 1000, 0
+    };
+    cases[6] = (struct home_case){
+        "distance past travel plus margin holds",
+        ctr - limit - 1, ctr, lo, hi, 20, ctr, ctr, 1
+    };
+    cases[7] = (struct home_case){
+        "actual right of mid and outside travel holds",
+        400000, ctr, lo, hi, 20, ctr, ctr, 1
+    };
+
+    for (i = 0; i < 8; i++) {
+        check_home_case(&cases[i]);
+    }
+
+    /*
+     * Servo power-cycle after it had already reached mid. The stick stays
+     * off to one side. The next enable must read the new actual and walk
+     * back to mid, not continue toward the stick and not reuse the old count.
+     */
+    {
+        can_bus_t *bus2;
+        canopen_master_t master2;
+        erob_servo_t servo2;
+        int32_t seq[HOME_SEQ_MAX];
+        int n = 0;
+        int guard;
+        uint16_t cursor = 0;
+        const int32_t again = 200000;
+        bus2 = can_bus_stub_get();
+        can_bus_stub_set_position(300000);
+        co_master_init(&master2, bus2, node);
+        erob_init(&servo2, &master2);
+        erob_set_counts_per_rev(&servo2, EROB_PLUS_PER_REV);
+        erob_set_rate_deg_s(&servo2, 20);
+        erob_set_acc_deg_s2(&servo2, 0);
+        erob_set_dec_deg_s2(&servo2, 0);
+        erob_set_home_window(&servo2, ctr, lo, hi);
+        expect_true(erob_configure_pdo_csp(&servo2) == 0, "rehome configure");
+        expect_true(erob_enable(&servo2) == 0, "rehome enable");
+        for (guard = 0; guard < 160 && erob_get_state(&servo2) != EROB_ST_ENABLED; guard++) {
+            can_bus_stub_advance(50);
+            erob_set_target_pos(&servo2, 400000);
+            erob_poll(&servo2);
+        }
+        for (guard = 0; guard < 160; guard++) {
+            uint16_t cw = 0;
+            int32_t pos = 0;
+            can_bus_stub_advance(50);
+            erob_set_target_pos(&servo2, 400000);
+            erob_poll(&servo2);
+            if (last_rpdo(node, &cw, &pos) && pos == ctr) {
+                break;
+            }
+        }
+        {
+            uint16_t cw = 0;
+            int32_t pos = 0;
+            expect_true(last_rpdo(node, &cw, &pos) && pos == ctr, "rehome setup reaches mid");
+        }
+        can_bus_stub_set_position(again);
+        can_bus_stub_set_silent(1);
+        can_bus_stub_advance(EROB_NODE_SILENT_MS);
+        erob_poll(&servo2);
+        expect_true(erob_is_silent(&servo2), "power cycle is silent");
+        can_bus_stub_set_silent(0);
+        can_bus_stub_tx_reset();
+        can_bus_stub_push_heartbeat(0x05);
+        for (guard = 0; guard < 80 && erob_get_state(&servo2) != EROB_ST_ENABLED; guard++) {
+            can_bus_stub_advance(50);
+            erob_set_target_pos(&servo2, 100000);
+            erob_poll(&servo2);
+        }
+        expect_true(erob_get_state(&servo2) == EROB_ST_ENABLED, "power cycle enables again");
+        n = 0;
+        cursor = 0;
+        for (guard = 0; guard < 160; guard++) {
+            while (cursor < can_bus_stub_tx_count()) {
+                const can_frame_t *fr = can_bus_stub_tx(cursor);
+                int32_t pos;
+                cursor++;
+                if (fr->is_ext || fr->id != (uint32_t)(0x200u + node) || fr->dlc < 6) {
+                    continue;
+                }
+                pos = rpdo_pos(fr);
+                if (n < HOME_SEQ_MAX) {
+                    seq[n++] = pos;
+                }
+            }
+            if (n > 0 && seq[n - 1] == ctr) {
+                break;
+            }
+            can_bus_stub_advance(50);
+            erob_set_target_pos(&servo2, 100000);
+            erob_poll(&servo2);
+        }
+        expect_true(n > 0 && seq[0] == again, "power-cycle first 0x607A is the new actual");
+        {
+            int i;
+            int bad = 0;
+            for (i = 0; i < n; i++) {
+                int ordered = i == 0 || seq[i] >= seq[i - 1];
+                int inside = seq[i] >= again && seq[i] <= ctr;
+                if ((!ordered || !inside) && !bad) {
+                    fprintf(stderr, "FAIL: power cycle %d -> %d is not a straight rise to mid\n",
+                            i > 0 ? seq[i - 1] : seq[i], seq[i]);
+                    g_fails++;
+                    bad = 1;
+                }
+            }
+        }
+        expect_true(n > 0 && seq[n - 1] == ctr, "power cycle returns to mid before the stick");
+    }
+
+    /* No 0x607A at all until 0x6064 has been read. */
+    bus = can_bus_stub_get();
+    can_bus_stub_fail_read(0x6064);
+    co_master_init(&master, bus, node);
+    erob_init(&servo, &master);
+    erob_set_home_window(&servo, ctr, lo, hi);
+    expect_true(erob_configure_pdo_csp(&servo) != 0, "configure fails when 0x6064 cannot be read");
+    expect_true(find_sdo_cmd(node, 0x23, 0x607A) < 0, "failed 0x6064 read does not write 0x607A");
+    can_bus_stub_tx_reset();
+    expect_true(erob_enable(&servo) == -1, "enable waits until actual position is known");
+    {
+        uint16_t k;
+        int rpdo = 0;
+        for (k = 0; k < can_bus_stub_tx_count(); k++) {
+            const can_frame_t *fr = can_bus_stub_tx(k);
+            if (!fr->is_ext && fr->id == (uint32_t)(0x200u + node)) {
+                rpdo++;
+            }
+        }
+        expect_true(rpdo == 0, "enable does not send 0x607A before actual is known");
+    }
+}
+
 static void dump_tx(void)
 {
     uint16_t i;
@@ -555,6 +916,8 @@ int main(void)
         expect_true(erob_get_state(&servo) == EROB_ST_FAULT, "persistent fault stays in recovery");
     }
     can_bus_stub_set_fault_on_enable(0);
+
+    check_return_to_mid();
 
     if (g_fails != 0) {
         fprintf(stderr, "%d check(s) failed\n", g_fails);

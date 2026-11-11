@@ -100,7 +100,7 @@ CAN_D2_EROB_RES  524288
 
 `15` 是 `AP_CAN::Protocol::eRobCAN`，参数列表显示为 `eRob CAN`。一个 `CAN_Dx_PROTOCOL` 独占那个虚拟驱动：1 是 DroneCAN，15 是这组舵机。驱动只接受 HAL 接口 1（CAN2）。这不是通用 CANopen 工具，默认只做 CiA402 CSP。
 
-eRob 按舵机用。`CAN_D2_EROB_BM` 的位和 `CAN_Dx_UC_SRV_BM` 一样：bit 0 是 SERVO1。全名放不下 `SRV_BM`（`CAN_D2_EROB_SRV_BM` 有 18 个字符，上限 16），所以参数名是 `BM`。最多 8 轴。`SRV_Channels::push()` 把 PWM 线性映到 `MIN`..`MAX`（相对 `CTR` 的偏移），再加上共用的 `CTR` 写入 `0x607A`。`CTR` 默认 0，目标仍是映射值本身。一圈输出端是 `RES` 个计数。掩码为 0 且槽也全空时不跟舵机输出。第一轴负责发 SYNC，其余轴只收这个 SYNC。同一接口上的其它帧被丢掉。CAN1 保持 `CAN_D1_PROTOCOL 1`。使能后 500 ms 内主站仍保持实际位置，之后才跟踪舵机目标。每轴单独的行程还没做。输出角度不乘减速比；电机转速才用 `GEAR`。
+eRob 按舵机用。`CAN_D2_EROB_BM` 的位和 `CAN_Dx_UC_SRV_BM` 一样：bit 0 是 SERVO1。全名放不下 `SRV_BM`（`CAN_D2_EROB_SRV_BM` 有 18 个字符，上限 16），所以参数名是 `BM`。最多 8 轴。`SRV_Channels::push()` 把 PWM 线性映到 `MIN`..`MAX`（相对 `CTR` 的偏移），再加上共用的 `CTR` 写入 `0x607A`。`CTR` 默认 0，目标仍是映射值本身。一圈输出端是 `RES` 个计数。掩码为 0 且槽也全空时不跟舵机输出。第一轴负责发 SYNC，其余轴只收这个 SYNC。同一接口上的其它帧被丢掉。CAN1 保持 `CAN_D1_PROTOCOL 1`。使能后 500 ms 内主站仍保持实际位置，然后沿直线斜坡回到中位 `CTR+(MIN+MAX)/2`，到了中位才跟踪舵机目标。直线距离大于 `CTR+MIN`..`CTR+MAX` 再加 5° 时保持当前 `0x6064` 并告警，不绕单圈的 0/524287。`RATE` 为 0 时这一步仍按 30 °/s 斜坡，之后才一步跟上舵机。每轴单独的行程还没做。输出角度不乘减速比；电机转速才用 `GEAR`。
 
 地面站实时名字是 `ERn_` 加短标签，`n` 是槽号，和 `CAN_D2_EROB_SVn` / `IDn` 的 n 相同，不是 SERVO 输出号。日志 `ERB1` / `ERB3` 的 `Sv` 仍是 SERVO 号。槽 `SV1=5`、`ID1=11` 时，节点 11 的数据出现在 `ER1_*`，`Sv` 为 5。`SV1`..`SV8` 全是 0、改走 `NODE` + `BM` 时，`n` 按置位从低到高从 1 数。
 
@@ -323,7 +323,7 @@ Mission Planner 的 MAVLink Inspector 里看 `NAMED_VALUE_FLOAT`。这些帧同�
 
 四轴、每轴四个 TxPDO、4 ms 一拍，大约是 4000 个 TxPDO/s，再加上 RxPDO 和 SYNC。1 Mbps 上还放得下。八个槽都接上会更紧。
 
-使能后 500 ms 内仍下发对齐过的实际位置，不发新目标（手册 §5.1.1）。下使能与使能间隔小于 300 ms 时 `erob_disable()` 直接返回失败（手册 §5.1.2）。位置命令单位是 plus。输出角度是 `(0x6064 - CTR) * 360 / RES`，输出转速是 `0x606C * 60 / RES`，都不乘减速比。减速比只用于电机转速。
+使能后 500 ms 内仍下发对齐过的实际位置，不发新目标（手册 §5.1.1）。这段保持结束以后，先沿直线回到中位，再跟踪舵机 PWM。下使能与使能间隔小于 300 ms 时 `erob_disable()` 直接返回失败（手册 §5.1.2）。位置命令单位是 plus。输出角度是 `(0x6064 - CTR) * 360 / RES`，输出转速是 `0x606C * 60 / RES`，都不乘减速比。减速比只用于电机转速。
 
 每个 Node-ID 有自己的 `canopen_master_t`。多轴共用这一路时，只有第一轴 `sync_enabled`，其余关掉，否则总线上会出现多个 SYNC。
 
