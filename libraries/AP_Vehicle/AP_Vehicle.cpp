@@ -87,6 +87,12 @@ const AP_Param::GroupInfo AP_Vehicle::var_info[] = {
     AP_SUBGROUPINFO(efi, "EFI", 9, AP_Vehicle, AP_EFI),
 #endif
 
+#if AP_ARINC429_ENABLED
+    // @Group: A429_
+    // @Path: ../AP_ARINC429/AP_ARINC429.cpp
+    AP_SUBGROUPINFO(arinc429, "A429_", 34, AP_Vehicle, AP_ARINC429),
+#endif
+
 #if AP_AIRSPEED_ENABLED
     // @Group: ARSPD
     // @Path: ../AP_Airspeed/AP_Airspeed.cpp
@@ -514,6 +520,10 @@ void AP_Vehicle::setup()
     efi.init();
 #endif
 
+#if AP_ARINC429_ENABLED
+    arinc429.init();
+#endif
+
 #if AP_TEMPERATURE_SENSOR_ENABLED
     temperature_sensor.init();
 #endif
@@ -704,6 +714,10 @@ const AP_Scheduler::Task AP_Vehicle::scheduler_tasks[] = {
 #endif
 #if HAL_EFI_ENABLED
     SCHED_TASK_CLASS(AP_EFI,       &vehicle.efi,            update,                   50, 200, 250),
+#endif
+#if AP_ARINC429_ENABLED
+    // 400 Hz so the 12.5 ms ARINC429 slot is not limited to the 50 Hz EFI rate.
+    SCHED_TASK_CLASS(AP_ARINC429,  &vehicle.arinc429,       update,                  400,  80, 247),
 #endif
 #if AP_GRIPPER_ENABLED
     SCHED_TASK_CLASS(AP_Gripper,   &vehicle.gripper,        update,                   10,  75, 251),
