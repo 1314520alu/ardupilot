@@ -246,6 +246,45 @@ void a429_sim_clear_pcmd(a429_link_t *link)
     }
 }
 
+static int a429_link_finite(float v)
+{
+    union {
+        float f;
+        uint32_t u;
+    } x;
+    x.f = v;
+    /* Exponent 0xff is IEEE-754 infinity or NaN. */
+    return ((x.u >> 23) & 0xffu) != 0xffu;
+}
+
+int a429_clp_volts(int sample, float collective_pct, float v_at_0, float v_at_100,
+                   float *volts)
+{
+    float pct;
+    float value;
+
+    if (volts == 0 || sample == 0 ||
+        !a429_link_finite(collective_pct) ||
+        !a429_link_finite(v_at_0) ||
+        !a429_link_finite(v_at_100)) {
+        return 0;
+    }
+    /* Clamp before converting. 0 percent is v_at_0 and 100 percent is
+     * v_at_100. With the defaults that is V = 1 + 8 * (percent / 100). */
+    pct = collective_pct;
+    if (pct < 0.0f) {
+        pct = 0.0f;
+    } else if (pct > 100.0f) {
+        pct = 100.0f;
+    }
+    value = v_at_0 + (v_at_100 - v_at_0) * (pct / 100.0f);
+    if (!a429_link_finite(value)) {
+        return 0;
+    }
+    *volts = value;
+    return 1;
+}
+
 void a429_sim_set_clp(a429_link_t *link, float volts)
 {
     if (link == 0) {
@@ -283,6 +322,26 @@ void a429_link_set_measured_nr(a429_link_t *link, int sample, float rpm, float n
     a429_sim_set_nr(link, pct);
 }
 
+void a429_link_set_collective(a429_link_t *link, int sample, float collective_pct,
+                              float v_at_0, float v_at_100)
+{
+    float volts;
+    uint32_t w;
+
+    if (link == 0) {
+        return;
+    }
+    /* Missing or non-finite collective: omit 310. Do not hold the last
+     * voltage, and do not invent a collective to fill the frame. */
+    if (!a429_clp_volts(sample, collective_pct, v_at_0, v_at_100, &volts) ||
+        !a429_encode_bnr(0310, link->expected_sdi, A429_SM_NORMAL, volts, &w)) {
+        link->sim.clp_set = 0;
+        link->sim.clp_v = 0.0f;
+        return;
+    }
+    a429_sim_set_clp(link, volts);
+}
+
 int a429_sim_set_pcmd(a429_link_t *link, uint8_t index, const a429_pcmd_levels_t *levels)
 {
     if (link == 0 || levels == 0 || index >= A429_PCMD_N) {
@@ -306,6 +365,8 @@ uint8_t a429_link_build_tx(a429_link_t *link, uint32_t *words, uint8_t max_n)
     if (words == 0 || max_n == 0) {
         return 0;
     }
+    /* 310 is the collective voltage when the vehicle published one.
+     * Host tests use the same slot through a429_sim_set_clp. */
     if (link->sim.clp_set) {
         if (a429_encode_bnr(0310, link->expected_sdi, A429_SM_NORMAL, link->sim.clp_v, &w) && n < max_n) {
             words[n++] = w;

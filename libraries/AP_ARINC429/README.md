@@ -2,7 +2,8 @@
 
 Flight-controller side of appendix B from the CS35 engine electrical ICD.
 The codec builds and inspects 32-bit logical words. It does not move a
-servo, a motor, or an eRob swash. When enabled, label 311 carries
+servo, a motor, or an eRob swash. When enabled, label 310 carries the
+helicopter collective output as a voltage, and label 311 carries
 measured rotor speed from `AP_RPM`. When `A429_ENG_CH` selects an RC
 channel it fills labels 340, 342 and 344 with the engine mode. A TCP
 client can carry bytes to an EBYTE NT1-M. Those bytes are not ARINC
@@ -20,7 +21,7 @@ unchanged. `AP_EROB_CANOPEN_ENABLED` stays set on ZeroOneX6.
 | 12.5 ms FC transmit schedule | Host-tested. `AP_ARINC429::update()` polls it with `AP_HAL::micros()`. |
 | Per-label freshness timeout | Host-tested. Default is off. A non-normal SM or a parity error clears the getter immediately. 24 ms is the ECU's nominal refresh, not the timeout. |
 | Command-word levels and rising-edge detector | Host-tested. Levels are not edges. |
-| Simulation inject / simulation transmit snapshot | In the library. `A429_ENG_CH` 0 leaves 310, 340, 342 and 344 alone. A non-zero channel overwrites only 340, 342 and 344. Enabled `update()` writes or clears 311 from measured Nr. |
+| Simulation inject / simulation transmit snapshot | In the library. `A429_ENG_CH` 0 leaves 340, 342 and 344 alone. A non-zero channel overwrites only 340, 342 and 344. Enabled `update()` writes or clears 310 from the heli collective and 311 from measured Nr. |
 | NT1-M TCP client byte pipe | Implemented on the existing `AP_Networking` lwIP stack. Host-tested against a scripted pipe and a local mock TCP server. Not a physical NT1-M. |
 | UART429-S `C0` framing | Provisional and off by default (`A429_FRAME=1`). Sends the codec logical word. Does not bit-reverse the label and does not send a `CD` rate command. |
 | RS422-429-1C wire profile | `A429_FRAME=2`. Page 3 `C0` plus four little-endian bytes. Page 4 reverses only the label byte. Host-tested. Not a test of the NT1-M or of the internal TTL board. |
@@ -109,12 +110,14 @@ Receive, tracked:
 | 176 | State | discrete | raw int16 | bit names not in the supplied images |
 | 177 | Warn2 | discrete | raw int16 | bit names not in the supplied images |
 
-Transmit. CLP is built only from a simulation snapshot. Nr (311) is the
-measured rotor percent when `update()` has a finite `AP_RPM` sample and a
-positive `A429_NR_REF`. Otherwise that update clears 311. Host tests can
-still place a 311 snapshot with `a429_sim_set_nr` until that publish
-runs. The three command words are the snapshot, or the engine-mode owner
-when `A429_ENG_CH` is 1..16:
+Transmit. CLP (310) is the helicopter collective output in volts when
+`update()` has a finite sample. Otherwise that update clears 310. Host
+tests can still place a 310 snapshot with `a429_sim_set_clp` until that
+publish runs. Nr (311) is the measured rotor percent when `update()` has
+a finite `AP_RPM` sample and a positive `A429_NR_REF`. Otherwise that
+update clears 311. Host tests can still place a 311 snapshot with
+`a429_sim_set_nr` until that publish runs. The three command words are
+the snapshot, or the engine-mode owner when `A429_ENG_CH` is 1..16:
 
 | Octal | Name | Kind | Resolution | Range in the appendix |
 | --- | --- | --- | --- | --- |
@@ -399,10 +402,11 @@ parity, or stop bits. Pages 2 and 3 describe the DB9, the 6–28 V supply,
 and a common ground with no isolation. None of that applies to the NT1-M
 Ethernet side. The vendor's statement that the network product uses the
 RS422 message format is still not a test of the board behind this NT1-M.
-Do not treat `A429_FRAME=1` as hardware-ready. Label 311 is measured Nr.
-Labels 340, 342 and 344 are the engine-mode words. They are not copied
-into motor, servo, or eRob outputs, and the scheduler does not send a
-`CD` rate command. Label 310 is not filled by the vehicle.
+Do not treat `A429_FRAME=1` as hardware-ready. Label 310 is the
+helicopter collective in volts. Label 311 is measured Nr. Labels 340,
+342 and 344 are the engine-mode words. They are not copied into motor,
+servo, or eRob outputs, and the scheduler does not send a `CD` rate
+command. `A429_FRAME` still defaults to 0, so a due slot sends no bytes.
 
 ## Engine mode
 
@@ -455,23 +459,50 @@ stop, idle, and flight words.
 `A429_ENABLE` 0 or `A429_ENG_CH` 0 stops the engine-mode owner from
 overwriting the command snapshot. The three command words are cleared
 only if this logic had taken them over. That release does not clear CLP
-or Nr. Label 311 is not part of that snapshot rule: while `A429_ENABLE`
-is 1, `update()` writes or clears 311 from the measured sample on every
-pass, including when `A429_ENG_CH` is 0.
+or Nr. Labels 310 and 311 are not part of that snapshot rule: while
+`A429_ENABLE` is 1, `update()` writes or clears both from the current
+sample on every pass, including when `A429_ENG_CH` is 0. A missing
+collective clears 310 and does not change 311 or the command words.
+
+## Collective voltage, label 310
+
+The source is the helicopter collective output: the filtered value
+`AP_Motors` passes into the swash (`get_heli_collective`). It is the
+same filter as `get_throttle()` on a heli, which is logged as `ThO`.
+It is not an RC PWM, and it is not the RSC throttle curve. 0 is minimum
+collective and 1 is maximum collective. A multicopter throttle is not
+used. A missing motors object, a frame that is not a helicopter, or a
+non-finite sample omits 310 for that frame. The previous voltage is not
+held.
+
+`A429_CLP_V0` defaults to 1 V and `A429_CLP_V100` defaults to 9 V.
+Collective outside 0 to 100 percent is clamped, then
+
+```text
+V = CLP_V0 + (CLP_V100 - CLP_V0) * collective_percent / 100
+```
+
+which is `V = 1 + 8 * (collective_percent / 100)` with the defaults.
+The word is that voltage at 0.01 V (BNR denominator 100), SM normal,
+odd parity, SDI from `A429_SDI`. It is not a percent and not blade
+degrees. Label 153 is the ECU echo and is a different word; its
+airframe percent range is not applied here. A voltage that does not fit
+the signed 16-bit field is omitted. The word rides the existing 12.5 ms
+FC-to-ECU slot.
 
 ## Vehicle hook
 
 `AP_Vehicle` owns one `AP_ARINC429` when `AP_ARINC429_ENABLED` is 1.
 
-* Parameter group `A429_`, index 34. Existing indices through `A429_FRAME`
-  (group index 15) are untouched. New indices are 16 `ENG_CH`, 17 `NR_INST`,
-  18 `NR_REF`, 19 `NR_CRIT`, and 20 `RUNUP`.
+* Parameter group `A429_`, index 34. Indices through 20 are `ENG_CH` 16,
+  `NR_INST` 17, `NR_REF` 18, `NR_CRIT` 19, and `RUNUP` 20. Label 310 adds
+  21 `CLP_V0` and 22 `CLP_V100`. Earlier indices are unchanged.
 * `setup()` calls `init()`.
 * The scheduler calls `update()` at 400 Hz.
-* `update()` fills 311 from the selected `AP_RPM` instance on every
-  enabled pass, including when `A429_ENG_CH` is 0. It fills 340, 342 and
-  344 only while `A429_ENABLE` is 1 and `A429_ENG_CH` is 1..16. It does
-  not write motors, servos, EFI, or eRob, and it does not fill label 310.
+* `update()` fills 310 from the heli collective and 311 from the selected
+  `AP_RPM` instance on every enabled pass, including when `A429_ENG_CH`
+  is 0. It fills 340, 342 and 344 only while `A429_ENABLE` is 1 and
+  `A429_ENG_CH` is 1..16. It does not write motors, servos, EFI, or eRob.
 
 The compile flag is set on the ZeroOne X6 and ZeroOne X9 hwdefs.
 Other boards keep `AP_ARINC429_ENABLED` at 0, so their images do not gain
@@ -493,8 +524,12 @@ NaN and infinity, command codes, per-label edges, startup and invalid
 samples, a missing-data timeout, a clock wrap, and a late tick. Measured
 Nr checks label 311 at 0.01 percent from `rpm * 100 / A429_NR_REF`, odd
 parity, and clears the word when the sample is missing or `A429_NR_REF`
-is 0. Invalid SM values and a parity error clear freshness while leaving
-the last normal sample in `last_valid`. The NT1-M tests add a scripted byte pipe
+is 0. Collective checks label 310 at 0.01 V: 0 percent is 1.00 V, 100
+percent is 9.00 V, 50 percent is 5.00 V, values outside 0 to 100 percent
+clamp to those endpoints, and a missing or non-finite collective clears
+the word without holding the previous voltage. Invalid SM values and a
+parity error clear freshness while leaving the last normal sample in
+`last_valid`. The NT1-M tests add a scripted byte pipe
 and a local TCP server: invalid peer, a zero octet inside a real address,
 fragmented and coalesced reads, partial writes, reconnect without
 cross-connection assembly, a 50 ms would-block, a partial frame that

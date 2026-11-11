@@ -19,6 +19,7 @@
 #include <AP_Math/AP_Math.h>
 #include <AP_Notify/AP_Notify.h>
 #include <AP_RPM/AP_RPM_config.h>
+#include <AP_Motors/AP_Motors_config.h>
 #include <RC_Channel/RC_Channel.h>
 #include <cstdio>
 #include <cstring>
@@ -26,6 +27,9 @@
 
 #if AP_RPM_ENABLED
 #include <AP_RPM/AP_RPM.h>
+#endif
+#if AP_MOTORS_ENABLED
+#include <AP_Motors/AP_Motors_Class.h>
 #endif
 
 #if AP_NETWORKING_ENABLED
@@ -39,7 +43,7 @@ AP_ARINC429 *AP_ARINC429::_singleton;
 const AP_Param::GroupInfo AP_ARINC429::var_info[] = {
     // @Param: ENABLE
     // @DisplayName: CS35 ARINC429 enable
-    // @Description: Enable the CS35 ARINC429 codec. Received words are monitoring data. Labels 340, 342 and 344 are filled only when A429_ENG_CH selects an RC channel. This does not move motors, servos, or eRob, and it does not claim Ethernet.
+    // @Description: Enable the CS35 ARINC429 codec. Received words are monitoring data. Label 310 carries the helicopter collective as a voltage. Labels 340, 342 and 344 are filled only when A429_ENG_CH selects an RC channel. This does not move motors, servos, or eRob, and it does not claim Ethernet.
     // @Values: 0:Disabled,1:Enabled
     // @User: Advanced
     AP_GROUPINFO_FLAGS("ENABLE", 0, AP_ARINC429, _enable, 0, AP_PARAM_FLAG_ENABLE),
@@ -196,6 +200,24 @@ const AP_Param::GroupInfo AP_ARINC429::var_info[] = {
     // @Increment: 0.1
     // @User: Advanced
     AP_GROUPINFO("RUNUP", 20, AP_ARINC429, _runup, 0),
+
+    // @Param: CLP_V0
+    // @DisplayName: Label 310 voltage at 0 percent collective
+    // @Description: Voltage on label 310 when the helicopter collective output is 0 percent. 100 percent uses CLP_V100. Collective outside 0 to 100 percent is clamped, then V = CLP_V0 + (CLP_V100 - CLP_V0) * collective_percent / 100. The word is that voltage at 0.01 V, not a percent and not blade degrees. Defaults of 1 V and 9 V give V = 1 + 8 * collective_percent / 100. A missing or non-finite collective, or a non-finite endpoint, omits label 310 for that frame.
+    // @Units: V
+    // @Range: -300 300
+    // @Increment: 0.01
+    // @User: Advanced
+    AP_GROUPINFO("CLP_V0", 21, AP_ARINC429, _clp_v0, 1.0f),
+
+    // @Param: CLP_V100
+    // @DisplayName: Label 310 voltage at 100 percent collective
+    // @Description: Voltage on label 310 when the helicopter collective output is 100 percent. See CLP_V0. Default 9 V.
+    // @Units: V
+    // @Range: -300 300
+    // @Increment: 0.01
+    // @User: Advanced
+    AP_GROUPINFO("CLP_V100", 22, AP_ARINC429, _clp_v100, 9.0f),
 
     AP_GROUPEND
 };
@@ -456,6 +478,31 @@ void AP_ARINC429::publish_measured_nr(void)
     a429_link_set_measured_nr(&_core.link, sample ? 1 : 0, rpm, _nr_ref.get());
 }
 
+bool AP_ARINC429::read_collective_pct(float &pct) const
+{
+#if AP_MOTORS_ENABLED
+    AP_Motors *motors = AP::motors();
+    float norm = 0.0f;
+    if (motors != nullptr && motors->get_heli_collective(norm)) {
+        pct = norm * 100.0f;
+        return true;
+    }
+#else
+    (void)pct;
+#endif
+    return false;
+}
+
+void AP_ARINC429::publish_collective(void)
+{
+    float pct = 0.0f;
+    const bool sample = read_collective_pct(pct);
+    /* Clears 310 when the heli collective is missing or not finite.
+     * Does not change label 311 or the stop/idle/flight words. */
+    a429_link_set_collective(&_core.link, sample ? 1 : 0, pct,
+                             _clp_v0.get(), _clp_v100.get());
+}
+
 void AP_ARINC429::command_engine_mode(void)
 {
     a429_mode_in_t in;
@@ -548,11 +595,13 @@ void AP_ARINC429::update(void)
     apply_params();
     command_engine_mode();
     publish_measured_nr();
+    publish_collective();
     /*
-     * Scheduling and byte-pipe maintenance. Label 311 is measured Nr.
-     * The three command words are not copied into motors, servos, EFI,
-     * or eRob. Unconfigured framing sends no bytes, and no CD rate
-     * command is generated. Label 310 is left on the simulation snapshot.
+     * Scheduling and byte-pipe maintenance. Label 310 is the heli
+     * collective in volts. Label 311 is measured Nr. The three command
+     * words are not copied into motors, servos, EFI, or eRob.
+     * Unconfigured framing sends no bytes, and no CD rate command is
+     * generated.
      */
     a429_core_update(&_core, AP_HAL::micros());
 }
@@ -570,6 +619,8 @@ void AP_ARINC429::sim_set_clp_v(float volts)
     if (!_inited) {
         return;
     }
+    /* Direct snapshot. The next enabled update() replaces it from the
+     * heli collective, or clears label 310 when that sample is unusable. */
     a429_sim_set_clp(&_core.link, volts);
 }
 

@@ -57,6 +57,14 @@ int a429_sim_set_pcmd(a429_link_t *link, uint8_t index, const a429_pcmd_levels_t
 int a429_nr_percent(int sample, float rpm, float nr_ref, float *pct);
 
 /*
+ * Label 310 voltage from a collective percent. Vehicle defaults are
+ * v_at_0 = 1 and v_at_100 = 9, so V = 1 + 8 * (percent / 100). Percent outside
+ * 0..100 is clamped before that conversion. Returns 0 when the sample
+ * is missing or any input is not finite. The result is volts.
+ */
+int a429_clp_volts(int sample, float collective_pct, float v_at_0, float v_at_100, float *volts);
+
+/*
  * Publish label 311 from a measured rpm, or clear it. Does not touch
  * CLP or the command words. A missing sample, a non-finite rpm, or a
  * reference that is not a positive scale clears 311. The previous
@@ -64,6 +72,15 @@ int a429_nr_percent(int sample, float rpm, float nr_ref, float *pct);
  * field is not sent.
  */
 void a429_link_set_measured_nr(a429_link_t *link, int sample, float rpm, float nr_ref);
+
+/*
+ * Publish label 310 from a collective percent, or clear it. Does not
+ * touch Nr or the command words. A missing sample, a non-finite
+ * percent, a non-finite endpoint, or a voltage that does not fit the
+ * 0.01 V BNR field clears 310. The previous voltage is not held.
+ */
+void a429_link_set_collective(a429_link_t *link, int sample, float collective_pct,
+                              float v_at_0, float v_at_100);
 
 /*
  * One engine-mode step. Returns 1 and fills levels when this logic owns

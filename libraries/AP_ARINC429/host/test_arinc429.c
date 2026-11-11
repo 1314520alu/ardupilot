@@ -1110,6 +1110,142 @@ static void test_measured_nr(void)
                 "a low measured Nr does not delay flight");
 }
 
+static int clp_word_is(uint32_t word, uint8_t sdi, uint16_t data)
+{
+    return word == oracle_word(0310, sdi, data, A429_SM_NORMAL) &&
+           a429_parity_ok(word) == 1 && (bit_count(word) & 1) == 1;
+}
+
+static void test_collective_clp(void)
+{
+    a429_link_t link;
+    a429_word_view_t view;
+    a429_pcmd_levels_t levels;
+    float volts;
+    uint32_t nr;
+    uint32_t pcmd;
+    uint32_t rejected;
+    union {
+        uint32_t u;
+        float f;
+    } nanbits;
+    union {
+        uint32_t u;
+        float f;
+    } infbits;
+
+    nanbits.u = 0x7fc00000u;
+    infbits.u = 0x7f800000u;
+    volts = -1.0f;
+    expect_true(a429_clp_volts(1, 0.0f, 1.0f, 9.0f, &volts) == 1 && volts == 1.0f,
+                "0 percent collective is 1.00 V");
+    expect_true(a429_clp_volts(1, 100.0f, 1.0f, 9.0f, &volts) == 1 && volts == 9.0f,
+                "100 percent collective is 9.00 V");
+    expect_true(a429_clp_volts(1, 50.0f, 1.0f, 9.0f, &volts) == 1 && volts == 5.0f,
+                "50 percent collective is 5.00 V");
+    expect_true(a429_clp_volts(1, 25.0f, 1.0f, 9.0f, &volts) == 1 && volts == 3.0f,
+                "25 percent is 1 + 8 * 0.25");
+    expect_true(a429_clp_volts(1, -10.0f, 1.0f, 9.0f, &volts) == 1 && volts == 1.0f,
+                "collective below 0 percent clamps to 1.00 V");
+    expect_true(a429_clp_volts(1, 150.0f, 1.0f, 9.0f, &volts) == 1 && volts == 9.0f,
+                "collective above 100 percent clamps to 9.00 V");
+    expect_true(a429_clp_volts(1, 25.0f, 2.0f, 6.0f, &volts) == 1 && volts == 3.0f,
+                "endpoints scale the same linear map");
+    expect_true(a429_clp_volts(0, 50.0f, 1.0f, 9.0f, &volts) == 0,
+                "a missing collective is not a voltage");
+    expect_true(a429_clp_volts(1, nanbits.f, 1.0f, 9.0f, &volts) == 0,
+                "NaN collective is omitted");
+    expect_true(a429_clp_volts(1, infbits.f, 1.0f, 9.0f, &volts) == 0,
+                "infinite collective is omitted");
+    infbits.u = 0xff800000u;
+    expect_true(a429_clp_volts(1, infbits.f, 1.0f, 9.0f, &volts) == 0,
+                "negative infinite collective is omitted");
+    expect_true(a429_clp_volts(1, 50.0f, nanbits.f, 9.0f, &volts) == 0,
+                "a NaN 0 percent endpoint is omitted");
+    expect_true(a429_clp_volts(1, 50.0f, 1.0f, nanbits.f, &volts) == 0,
+                "a NaN 100 percent endpoint is omitted");
+    expect_true(a429_clp_volts(1, 50.0f, 1.0f, 9.0f, 0) == 0,
+                "null voltage output is rejected");
+    a429_link_set_collective(0, 1, 50.0f, 1.0f, 9.0f);
+
+    a429_link_init(&link);
+    a429_link_set_collective(&link, 1, 0.0f, 1.0f, 9.0f);
+    build_tx(&link);
+    expect_true(link.last_tx_count == 1u, "only label 310 is added");
+    expect_true(clp_word_is(link.last_tx[0], 0, 100) == 1, "0 percent is data 100, 1.00 V");
+    a429_inspect(link.last_tx[0], 0, &view);
+    expect_true(view.eu_valid == 1 && view.eu == 1.0f && view.sm == A429_SM_NORMAL &&
+                view.reserved_ok == 1,
+                "1.00 V decodes as a normal BNR voltage");
+
+    a429_link_set_collective(&link, 1, 100.0f, 1.0f, 9.0f);
+    build_tx(&link);
+    expect_true(clp_word_is(link.last_tx[0], 0, 900) == 1, "100 percent is data 900, 9.00 V");
+    a429_inspect(link.last_tx[0], 0, &view);
+    expect_true(view.eu_valid == 1 && view.eu == 9.0f, "9.00 V decodes from the 0.01 count");
+
+    a429_link_set_collective(&link, 1, 50.0f, 1.0f, 9.0f);
+    build_tx(&link);
+    expect_true(clp_word_is(link.last_tx[0], 0, 500) == 1, "50 percent is data 500, 5.00 V");
+    a429_inspect(link.last_tx[0], 0, &view);
+    expect_true(view.eu_valid == 1 && view.eu == 5.0f, "5.00 V is the mid-range voltage");
+
+    a429_link_set_collective(&link, 1, -25.0f, 1.0f, 9.0f);
+    build_tx(&link);
+    expect_true(clp_word_is(link.last_tx[0], 0, 100) == 1, "a negative percent is sent as 1.00 V");
+    a429_link_set_collective(&link, 1, 180.0f, 1.0f, 9.0f);
+    build_tx(&link);
+    expect_true(clp_word_is(link.last_tx[0], 0, 900) == 1, "percent above 100 is sent as 9.00 V");
+
+    a429_link_set_sdi(&link, 2);
+    a429_link_set_collective(&link, 1, 50.0f, 1.0f, 9.0f);
+    build_tx(&link);
+    expect_true(clp_word_is(link.last_tx[0], 2, 500) == 1, "310 uses the link SDI");
+
+    a429_link_init(&link);
+    rejected = link.tx_rejected;
+    a429_link_set_collective(&link, 1, 50.0f, 40000.0f, 40000.0f);
+    build_tx(&link);
+    expect_true(link.sim.clp_set == 0 && link.last_tx_count == 0u && link.tx_rejected == rejected,
+                "a voltage that does not fit the BNR field is omitted");
+
+    a429_sim_set_clp(&link, 2.5f);
+    a429_link_set_collective(&link, 1, 50.0f, 1.0f, 9.0f);
+    build_tx(&link);
+    expect_true(clp_word_is(link.last_tx[0], 0, 500) == 1, "measured collective replaces a snapshot voltage");
+    a429_link_set_collective(&link, 0, 50.0f, 1.0f, 9.0f);
+    build_tx(&link);
+    expect_true(link.sim.clp_set == 0 && link.sim.clp_v == 0.0f && link.last_tx_count == 0u,
+                "a missing collective clears 310 and does not hold the last voltage");
+    a429_sim_set_clp(&link, 2.5f);
+    a429_link_set_collective(&link, 1, nanbits.f, 1.0f, 9.0f);
+    build_tx(&link);
+    expect_true(link.sim.clp_set == 0 && link.last_tx_count == 0u,
+                "NaN collective clears 310 instead of repeating 2.50 V");
+    a429_sim_set_clp(&link, 2.5f);
+    a429_link_set_collective(&link, 1, 50.0f, infbits.f, 9.0f);
+    expect_true(link.sim.clp_set == 0, "a non-finite endpoint clears 310");
+
+    a429_link_init(&link);
+    expect_true(a429_encode_bnr(0311, 0, A429_SM_NORMAL, 50.0f, &nr) == 1, "Nr oracle");
+    memset(&levels, 0, sizeof(levels));
+    levels.mode = A429_MODE_FLIGHT;
+    levels.on_ground = 1;
+    expect_true(a429_encode_pcmd(0340, 0, A429_SM_NORMAL, &levels, &pcmd) == 1, "flight command oracle");
+    expect_true(a429_sim_set_pcmd(&link, 0, &levels) == 1, "command snapshot");
+    a429_link_set_measured_nr(&link, 1, 500.0f, 1000.0f);
+    a429_link_set_collective(&link, 1, 50.0f, 1.0f, 9.0f);
+    build_tx(&link);
+    expect_true(link.last_tx_count == 3u, "CLP, Nr, then the command word");
+    expect_true(clp_word_is(link.last_tx[0], 0, 500) == 1, "label 310 is the collective voltage");
+    expect_true(link.last_tx[1] == nr, "label 311 is not rewritten");
+    expect_true(link.last_tx[2] == pcmd, "stop/idle/flight bits are not rewritten");
+    a429_link_set_collective(&link, 0, 0.0f, 0.0f, 0.0f);
+    build_tx(&link);
+    expect_true(link.last_tx_count == 2u && link.last_tx[0] == nr && link.last_tx[1] == pcmd,
+                "clearing 310 leaves 311 and the command word");
+}
+
 int a429_host_tests(void);
 
 int a429_host_tests(void)
@@ -1127,6 +1263,7 @@ int a429_host_tests(void)
     test_rs422_label_wire();
     test_engine_mode();
     test_measured_nr();
+    test_collective_clp();
     if (g_fails == 0) {
         printf("RESULT: all passed\n");
     } else {
