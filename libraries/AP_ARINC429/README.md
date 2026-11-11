@@ -6,8 +6,10 @@ servo, a motor, or an eRob swash. When enabled, label 310 carries the
 helicopter collective output as a voltage, and label 311 carries
 measured rotor speed from `AP_RPM`. When `A429_ENG_CH` selects an RC
 channel it fills labels 340, 342 and 344 with the engine mode. A TCP
-client can carry bytes to an EBYTE NT1-M. Those bytes are not ARINC
-words until framing is opted in.
+client can carry bytes to an EBYTE NT1-M. `A429_FRAME` defaults to 2,
+so those bytes use the RS422-429-1C frame: `C0` plus four little-endian
+bytes, with only the label byte bit-reversed. `A429_FRAME=0` leaves the
+bytes uninterpreted.
 
 This branch is cut from `0ac57cc5` (`AP_eRobCANOpen: restore CSP slew and
 back off fault re-enable`, pull request 3). eRob CANopen on CAN2 is
@@ -23,16 +25,17 @@ unchanged. `AP_EROB_CANOPEN_ENABLED` stays set on ZeroOneX6.
 | Command-word levels and rising-edge detector | Host-tested. Levels are not edges. |
 | Simulation inject / simulation transmit snapshot | In the library. `A429_ENG_CH` 0 leaves 340, 342 and 344 alone. A non-zero channel overwrites only 340, 342 and 344. Enabled `update()` writes or clears 310 from the heli collective and 311 from measured Nr. |
 | NT1-M TCP client byte pipe | Implemented on the existing `AP_Networking` lwIP stack. Host-tested against a scripted pipe and a local mock TCP server. Not a physical NT1-M. |
-| UART429-S `C0` framing | Provisional and off by default (`A429_FRAME=1`). Sends the codec logical word. Does not bit-reverse the label and does not send a `CD` rate command. |
-| RS422-429-1C wire profile | `A429_FRAME=2`. Page 3 `C0` plus four little-endian bytes. Page 4 reverses only the label byte. Host-tested. Not a test of the NT1-M or of the internal TTL board. |
+| UART429-S `C0` framing | Provisional (`A429_FRAME=1`), not the default. Sends the codec logical word. Does not bit-reverse the label and does not send a `CD` rate command. |
+| RS422-429-1C wire profile | Default (`A429_FRAME=2`). Page 3 `C0` plus four little-endian bytes. Page 4 reverses only the label byte. Host-tested. Not a test of the NT1-M or of the internal TTL board. |
 | Flight-controller IP, PROFINET sharing, physical 429 bit timing | Not changed and not proven by these tests. |
 | Hardware loopback, flashing, engine actuation | Not done. |
 
-`A429_ENABLE` defaults to 0, so a ZeroOneX6 image that contains the codec
-still does not schedule words until that parameter is set. With the
-parameter at 0 the rest of the `A429_` group is hidden, which is the
-normal ArduPilot enable-parameter behaviour. Set `A429_ENABLE` to 1 and
-reboot to see the other parameters.
+`A429_ENABLE` defaults to 1, so a fresh image that contains the codec
+schedules words without a parameter change. `A429_ENG_CH`, `A429_NR_REF`,
+and the peer address and port stay at 0, so labels 340, 342 and 344 stay
+on the simulation snapshot and the socket stays closed. Setting
+`A429_ENABLE` to 0 hides the rest of the `A429_` group after reboot,
+which is the normal ArduPilot enable-parameter behaviour.
 
 ## Board
 
@@ -41,8 +44,8 @@ NT1-M TCP client. `Tools/AP_Bootloader/board_types.txt` assigns
 `AP_HW_ZeroOne_X9` the value **5601**. The hwdef keeps the RMII `ETH1`
 pins and sets `AP_ARINC429_ENABLED` and `AP_EROB_CANOPEN_ENABLED`. eRob is
 compiled in and is not selected until `CAN_P2_DRIVER` moves off the shared
-DroneCAN driver, matching ZeroOne X6. `A429_ENABLE` and `A429_FRAME` still
-default to 0.
+DroneCAN driver, matching ZeroOne X6. `A429_ENABLE` defaults to 1 and
+`A429_FRAME` defaults to 2.
 
 The earlier helicopter target is the waf board `ZeroOneX6`.
 
@@ -334,17 +337,18 @@ note (512 bit packets) is not a TCP rule.
 
 The TCP pipe and the byte interpretation are separate.
 
-`A429_FRAME` defaults to 0. Socket bytes are counted as
-`rx_unframed_bytes` and are not decoded into labels. A due transmit slot
-increments `tx_unframed` and is not written to the socket.
+`A429_FRAME` defaults to 2 (RS422-429-1C). Value 0 counts socket bytes as
+`rx_unframed_bytes` and does not decode them into labels. A due transmit
+slot with value 0 increments `tx_unframed` and is not written to the socket.
 
-`A429_FRAME=1` is an explicit opt-in named for the UART429-S manual. It
+`A429_FRAME=1` is the provisional UART429-S profile. It
 sends `0xC0` plus the codec `uint32` in little-endian order. The first
 payload byte is the logical label integer. Octal label 036 is `0x1E` in
 this codec. Octal label 0144 is `0x64`. This profile does not reverse
 either byte. A `0xCD` byte is skipped as unknown. No speed command is
-generated. Setting `A429_FRAME=1` does not by itself enable the TCP
-client, and `A429_ENABLE` still defaults to 0.
+generated. Setting `A429_FRAME=1` does not by itself open the TCP
+client. `A429_ENABLE` defaults to 1. The peer address and port still
+default to 0, so the socket stays closed.
 
 ## RS422-429-1C wire profile, `A429_FRAME=2`
 
@@ -393,7 +397,7 @@ caller, when this connection has accepted any transmit byte or a
 `send` is still in flight. A new profile is not written onto that
 socket. `send` that finishes after the epoch has moved does not update
 the new session and does not close a socket opened later.
-`A429_ENABLE` still defaults to 0. Neither frame value sends
+`A429_ENABLE` defaults to 1. No frame value sends
 `CD 00 00 55 55`, `CD 03 00 55 55`, or `CD 07 00 55 55`. Those three
 commands have a standalone encoder for tests. The scheduler does not call it.
 
@@ -406,7 +410,10 @@ Do not treat `A429_FRAME=1` as hardware-ready. Label 310 is the
 helicopter collective in volts. Label 311 is measured Nr. Labels 340,
 342 and 344 are the engine-mode words. They are not copied into motor,
 servo, or eRob outputs, and the scheduler does not send a `CD` rate
-command. `A429_FRAME` still defaults to 0, so a due slot sends no bytes.
+command. `A429_FRAME` defaults to 2, so a due slot is encoded as `C0`
+plus four little-endian bytes with only the label byte reversed. Value 0
+still sends no bytes. The peer address and port still default to 0, so
+nothing is written until a peer is configured.
 
 ## Engine mode
 
