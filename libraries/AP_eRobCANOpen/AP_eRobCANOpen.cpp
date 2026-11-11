@@ -244,6 +244,13 @@ const AP_Param::GroupInfo AP_eRobCANOpen::var_info[] = {
     // @User: Standard
     AP_GROUPINFO("DEC", 36, AP_eRobCANOpen, _dec_deg_s2, 500),
 
+    // @Param: FAR
+    // @DisplayName: eRob CAN allow long return to mid
+    // @Description: First return to mid when the signed distance from the actual position to mid is longer than CTR+MIN..CTR+MAX plus 5 degrees. 0 holds the current position and warns. 1 still slews along that signed line and does not wrap through 0/524287. Use 1 on the bench when the servo starts far from mid or after CTR is changed. No reboot.
+    // @Values: 0:Hold,1:Allow
+    // @User: Advanced
+    AP_GROUPINFO("FAR", 37, AP_eRobCANOpen, _far_ok, 0),
+
     AP_GROUPEND
 };
 
@@ -488,6 +495,7 @@ void AP_eRobCANOpen::apply_home_window(erob_servo_t *servo)
                          erob_mid_plus(_pos_min.get(), _pos_max.get(), ctr),
                          erob_target_plus(_pos_min.get(), ctr),
                          erob_target_plus(_pos_max.get(), ctr));
+    erob_set_home_far_ok(servo, _far_ok.get() != 0);
 }
 
 bool AP_eRobCANOpen::try_configure(uint8_t index, uint32_t now_ms)

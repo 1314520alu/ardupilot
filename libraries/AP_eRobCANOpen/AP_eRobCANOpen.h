@@ -107,6 +107,7 @@ private:
     AP_Int16 _rate_deg_s;
     AP_Int16 _acc_deg_s2;
     AP_Int16 _dec_deg_s2;
+    AP_Int8 _far_ok;
     AP_Int8 _slot_sv[EROB_SLOT_COUNT];
     AP_Int8 _slot_id[EROB_SLOT_COUNT];
 

@@ -127,6 +127,7 @@ typedef struct {
     bool home_latched;
     bool home_holding;
     bool home_hold_warn;
+    bool home_far_ok; /* FAR=1: slew home even when the straight path exceeds travel */
     int32_t home_mid;
     int32_t home_lo;
     int32_t home_hi;
@@ -162,6 +163,9 @@ void erob_set_rate_deg_s(erob_servo_t *s, int32_t deg_per_s);
  */
 void erob_set_home_window(erob_servo_t *s, int32_t mid,
                           int32_t travel_min, int32_t travel_max);
+
+/* Non-zero allows the first return to mid past the travel window. 0 holds. */
+void erob_set_home_far_ok(erob_servo_t *s, int allow);
 
 /* One-shot when the return is refused because the straight path is too long. */
 bool erob_take_home_hold(erob_servo_t *s);

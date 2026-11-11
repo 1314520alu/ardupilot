@@ -846,7 +846,7 @@ void erob_poll_motion(erob_servo_t *s)
             if (!s->pos_seen) {
                 return;
             }
-            if (home_too_far(s, s->pos_actual)) {
+            if (!s->home_far_ok && home_too_far(s, s->pos_actual)) {
                 if (!s->home_holding) {
                     s->home_holding = true;
                     s->home_hold_warn = true;
@@ -1054,6 +1054,14 @@ static int32_t sat_i32(int64_t v)
 int32_t erob_target_plus(int32_t mapped, int32_t center)
 {
     return sat_i32((int64_t)center + (int64_t)mapped);
+}
+
+void erob_set_home_far_ok(erob_servo_t *s, int allow)
+{
+    if (s == NULL) {
+        return;
+    }
+    s->home_far_ok = allow != 0;
 }
 
 void erob_set_home_window(erob_servo_t *s, int32_t mid,

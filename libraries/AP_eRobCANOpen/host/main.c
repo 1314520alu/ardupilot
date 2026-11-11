@@ -208,6 +208,7 @@ struct home_case {
     int32_t pwm_during;
     int32_t pwm_after;
     int hold;
+    int far_ok;
 };
 
 static void check_home_case(const struct home_case *c)
@@ -242,6 +243,7 @@ static void check_home_case(const struct home_case *c)
     erob_set_acc_deg_s2(&servo, 0);
     erob_set_dec_deg_s2(&servo, 0);
     erob_set_home_window(&servo, c->mid, c->lo, c->hi);
+    erob_set_home_far_ok(&servo, c->far_ok);
 
     expect_true(erob_configure_pdo_csp(&servo) == 0, c->name);
     read_at = find_sdo_cmd(node, 0x40, 0x6064);
@@ -333,6 +335,10 @@ static void check_home_case(const struct home_case *c)
                     c->name, first_move, want, moved);
         }
         expect_true(n > 0 && seq[n - 1] == c->mid, "return reaches mid");
+        if (c->far_ok) {
+            expect_true(!erob_take_home_hold(&servo),
+                        "allowed long return does not warn");
+        }
         erob_set_target_pos(&servo, c->pwm_after);
         can_bus_stub_advance(50);
         erob_poll(&servo);
@@ -364,7 +370,7 @@ static void check_return_to_mid(void)
     const int32_t span = hi - lo;
     const int32_t margin = (int32_t)(((int64_t)EROB_PLUS_PER_REV * EROB_PREARM_MARGIN_DEG) / 360);
     const int32_t limit = span + margin;
-    struct home_case cases[8];
+    struct home_case cases[10];
     int i;
     can_bus_t *bus;
     canopen_master_t master;
@@ -378,34 +384,42 @@ static void check_return_to_mid(void)
 
     memset(cases, 0, sizeof(cases));
     cases[0] = (struct home_case){
-        "mid 262144 actual below moves up", 200000, ctr, lo, hi, 20, 100000, 300000, 0
+        "mid 262144 actual below moves up", 200000, ctr, lo, hi, 20, 100000, 300000, 0, 0
     };
     cases[1] = (struct home_case){
-        "mid 262144 actual above moves down", 300000, ctr, lo, hi, 20, 400000, 200000, 0
+        "mid 262144 actual above moves down", 300000, ctr, lo, hi, 20, 400000, 200000, 0, 0
     };
     cases[2] = (struct home_case){
-        "mid 300000 actual below moves up", 280000, 300000, 250000, 350000, 20, 100000, 340000, 0
+        "mid 300000 actual below moves up", 280000, 300000, 250000, 350000, 20, 100000, 340000, 0, 0
     };
     cases[3] = (struct home_case){
-        "mid 300000 actual above moves down", 320000, 300000, 250000, 350000, 20, 400000, 260000, 0
+        "mid 300000 actual above moves down", 320000, 300000, 250000, 350000, 20, 400000, 260000, 0, 0
     };
     cases[4] = (struct home_case){
-        "RATE 0 still slews to mid", 200000, ctr, lo, hi, 0, ctr, 300000, 0
+        "RATE 0 still slews to mid", 200000, ctr, lo, hi, 0, ctr, 300000, 0, 0
     };
     cases[5] = (struct home_case){
         "distance inside travel plus margin still moves",
-        ctr - limit, ctr, lo, hi, 20, 100000, ctr + 1000, 0
+        ctr - limit, ctr, lo, hi, 20, 100000, ctr + 1000, 0, 0
     };
     cases[6] = (struct home_case){
         "distance past travel plus margin holds",
-        ctr - limit - 1, ctr, lo, hi, 20, ctr, ctr, 1
+        ctr - limit - 1, ctr, lo, hi, 20, ctr, ctr, 1, 0
     };
     cases[7] = (struct home_case){
         "actual right of mid and outside travel holds",
-        400000, ctr, lo, hi, 20, ctr, ctr, 1
+        400000, ctr, lo, hi, 20, ctr, ctr, 1, 0
+    };
+    cases[8] = (struct home_case){
+        "FAR allows a straight return below mid past the margin",
+        ctr - limit - 1, ctr, lo, hi, 20, 100000, ctr + 1000, 0, 1
+    };
+    cases[9] = (struct home_case){
+        "FAR allows a straight return above mid past the margin",
+        400000, ctr, lo, hi, 20, 500000, 200000, 0, 1
     };
 
-    for (i = 0; i < 8; i++) {
+    for (i = 0; i < 10; i++) {
         check_home_case(&cases[i]);
     }
 

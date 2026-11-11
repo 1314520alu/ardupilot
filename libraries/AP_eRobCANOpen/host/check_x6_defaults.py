@@ -40,6 +40,7 @@ EROB_GROUP = {
     "RATE": 100,
     "ACC": 500,
     "DEC": 500,
+    "FAR": 0,
 }
 
 X6_PARM = {
