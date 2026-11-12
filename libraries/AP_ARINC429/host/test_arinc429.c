@@ -1246,6 +1246,226 @@ static void test_collective_clp(void)
                 "clearing 310 leaves 311 and the command word");
 }
 
+static int tx_label_index(const a429_link_t *link, uint8_t label)
+{
+    uint8_t i;
+    uint8_t n = link->last_tx_count;
+    if (n > A429_TX_MAX) {
+        n = A429_TX_MAX;
+    }
+    for (i = 0; i < n; i++) {
+        if ((uint8_t)(link->last_tx[i] & 0xFFu) == label) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static int word_bnr_ok(uint32_t word, uint8_t label, uint8_t sdi, float eu)
+{
+    a429_word_view_t view;
+    a429_inspect(word, sdi, &view);
+    if (view.label != label || view.eu_valid != 1 || view.sm != A429_SM_NORMAL) {
+        return 0;
+    }
+    if (view.sdi != sdi || view.parity_ok != 1 || view.reserved_ok != 1) {
+        return 0;
+    }
+    return view.eu == eu;
+}
+
+static void fill_airdata(a429_link_t *link)
+{
+    a429_link_set_meas(link, 0312, 1, 101.25f);
+    a429_link_set_meas(link, 0313, 1, -10.5f);
+    a429_link_set_meas(link, 0314, 1, 1234.0f);
+    a429_link_set_meas(link, 0316, 1, 12.5f);
+    a429_link_set_utc(link, 1, 14, 5, 9, 2026, 11, 12);
+}
+
+static void build_tx_all(a429_link_t *link)
+{
+    uint32_t words[A429_TX_MAX];
+    a429_link_build_tx(link, words, A429_TX_MAX);
+}
+
+static void test_fc_airdata(void)
+{
+    a429_link_t link;
+    a429_core_t core;
+    a429_pcmd_levels_t levels;
+    const a429_label_info_t *info;
+    union { uint32_t u; float f; } nanbits;
+    uint32_t rejected;
+    uint8_t framed[A429_TCP_TX_CAP];
+    uint8_t framed_n = 0;
+    int idx;
+    uint8_t i;
+
+    info = a429_catalog_find(0312);
+    expect_true(info != 0 && info->denom == 100 && info->kind == A429_KIND_BNR, "312 denom is 100");
+    info = a429_catalog_find(0313);
+    expect_true(info != 0 && info->denom == 10, "313 denom is 10");
+    info = a429_catalog_find(0314);
+    expect_true(info != 0 && info->denom == 1, "314 denom is 1");
+    info = a429_catalog_find(0316);
+    expect_true(info != 0 && info->denom == 10, "316 denom is 10");
+    info = a429_catalog_find(0321);
+    expect_true(info != 0 && info->denom == 1, "321 denom is 1");
+    info = a429_catalog_find(0326);
+    expect_true(info != 0 && info->denom == 1, "326 denom is 1");
+    info = a429_catalog_find(0317);
+    expect_true(info != 0 && info->denom == 10000, "317 stays in the catalog at denom 10000");
+    info = a429_catalog_find(0320);
+    expect_true(info != 0 && info->denom == 10, "320 stays in the catalog");
+    info = a429_catalog_find(0331);
+    expect_true(info != 0 && info->kind == A429_KIND_DISC, "331 stays discrete");
+    expect_true(A429_TX_MAX >= 16u, "the slot holds every valid FC word");
+    expect_true(A429_TCP_TX_CAP >= (unsigned)(A429_TX_MAX * 5u), "the TCP hold fits one full slot");
+
+    a429_link_init(&link);
+    a429_link_set_collective(&link, 1, 50.0f, 1.0f, 9.0f);
+    a429_link_set_measured_nr(&link, 1, 500.0f, 1000.0f);
+    fill_airdata(&link);
+    memset(&levels, 0, sizeof(levels));
+    levels.mode = A429_MODE_FLIGHT;
+    levels.on_ground = 1;
+    for (i = 0; i < A429_PCMD_N; i++) {
+        expect_true(a429_sim_set_pcmd(&link, i, &levels) == 1, "command snapshot for the full slot");
+    }
+    rejected = link.tx_rejected;
+    build_tx_all(&link);
+    expect_true(link.last_tx_count == 15u, "one 12.5 ms slot carries every valid FC word");
+    expect_true(link.tx_rejected == rejected, "the full set does not drop a word");
+    expect_true((link.last_tx[0] & 0xFFu) == 0310, "310 is still the first word of the slot");
+    expect_true(word_bnr_ok(link.last_tx[0], 0310, 0, 5.0f) == 1, "310 is still 5.00 V");
+    idx = tx_label_index(&link, 0312);
+    expect_true(idx > 0 && word_bnr_ok(link.last_tx[idx], 0312, 0, 101.25f) == 1, "312 is 101.25 kPa");
+    idx = tx_label_index(&link, 0313);
+    expect_true(idx > 0 && word_bnr_ok(link.last_tx[idx], 0313, 0, -10.5f) == 1, "313 is -10.5 C");
+    idx = tx_label_index(&link, 0314);
+    expect_true(idx > 0 && word_bnr_ok(link.last_tx[idx], 0314, 0, 1234.0f) == 1, "314 is 1234 m AMSL");
+    idx = tx_label_index(&link, 0316);
+    expect_true(idx > 0 && word_bnr_ok(link.last_tx[idx], 0316, 0, 12.5f) == 1, "316 is 12.5 m/s");
+    idx = tx_label_index(&link, 0321);
+    expect_true(idx > 0 && word_bnr_ok(link.last_tx[idx], 0321, 0, 14.0f) == 1, "321 hour is 14");
+    idx = tx_label_index(&link, 0322);
+    expect_true(idx > 0 && word_bnr_ok(link.last_tx[idx], 0322, 0, 5.0f) == 1, "322 minute is 5");
+    idx = tx_label_index(&link, 0323);
+    expect_true(idx > 0 && word_bnr_ok(link.last_tx[idx], 0323, 0, 9.0f) == 1, "323 second is 9");
+    idx = tx_label_index(&link, 0324);
+    expect_true(idx > 0 && word_bnr_ok(link.last_tx[idx], 0324, 0, 2026.0f) == 1, "324 year is 2026");
+    idx = tx_label_index(&link, 0325);
+    expect_true(idx > 0 && word_bnr_ok(link.last_tx[idx], 0325, 0, 11.0f) == 1, "325 month is 11");
+    idx = tx_label_index(&link, 0326);
+    expect_true(idx > 0 && word_bnr_ok(link.last_tx[idx], 0326, 0, 12.0f) == 1, "326 day is 12");
+    expect_true(tx_label_index(&link, 0311) > 0, "311 stays in the same slot");
+    expect_true(tx_label_index(&link, 0340) > 0 && tx_label_index(&link, 0342) > 0 &&
+                tx_label_index(&link, 0344) > 0, "the three command words stay in the same slot");
+    expect_true(tx_label_index(&link, 0317) < 0 && tx_label_index(&link, 0320) < 0 &&
+                tx_label_index(&link, 0331) < 0, "317, 320 and 331 are absent from the slot");
+    expect_true(a429_frame_encode(A429_FRAME_RS422_429_1C, link.last_tx, link.last_tx_count,
+                                  framed, (uint8_t)sizeof(framed), &framed_n) == 1,
+                "the full slot fits the TCP hold");
+    expect_true(framed_n == (uint8_t)(link.last_tx_count * 5u) && framed[0] == 0xC0u,
+                "each word in the slot is C0 plus four bytes");
+
+    a429_link_set_meas(&link, 0312, 0, 101.25f);
+    build_tx_all(&link);
+    expect_true(tx_label_index(&link, 0312) < 0, "a missing pressure clears 312");
+    expect_true(link.last_tx_count == 14u && (link.last_tx[0] & 0xFFu) == 0310,
+                "clearing 312 leaves 310 in the slot");
+    a429_link_set_meas(&link, 0312, 1, 0.0f);
+    build_tx_all(&link);
+    expect_true(tx_label_index(&link, 0312) < 0, "zero pressure is not sent");
+    a429_link_set_meas(&link, 0312, 1, -1.0f);
+    build_tx_all(&link);
+    expect_true(tx_label_index(&link, 0312) < 0, "negative pressure is not sent");
+
+    nanbits.u = 0x7fc00000u;
+    a429_link_set_meas(&link, 0313, 1, nanbits.f);
+    build_tx_all(&link);
+    expect_true(tx_label_index(&link, 0313) < 0 && (link.last_tx[0] & 0xFFu) == 0310,
+                "NaN temperature clears 313 and leaves 310");
+    a429_link_set_meas(&link, 0314, 1, -12.0f);
+    build_tx_all(&link);
+    idx = tx_label_index(&link, 0314);
+    expect_true(idx > 0 && word_bnr_ok(link.last_tx[idx], 0314, 0, -12.0f) == 1,
+                "altitude below sea level is sent");
+    a429_link_set_meas(&link, 0314, 0, -12.0f);
+    build_tx_all(&link);
+    expect_true(tx_label_index(&link, 0314) < 0, "a missing altitude clears 314");
+    a429_link_set_meas(&link, 0314, 1, 40000.0f);
+    build_tx_all(&link);
+    expect_true(tx_label_index(&link, 0314) < 0, "an altitude outside int16 is cleared");
+
+    a429_link_set_meas(&link, 0316, 1, -1.0f);
+    build_tx_all(&link);
+    expect_true(tx_label_index(&link, 0316) < 0, "negative true airspeed is not sent");
+    a429_link_set_meas(&link, 0316, 0, 12.5f);
+    build_tx_all(&link);
+    expect_true(tx_label_index(&link, 0316) < 0, "a missing TAS clears 316");
+
+    a429_link_set_utc(&link, 1, 24, 0, 0, 2026, 1, 1);
+    build_tx_all(&link);
+    expect_true(tx_label_index(&link, 0321) < 0 && tx_label_index(&link, 0326) < 0,
+                "an hour outside 0..23 clears every time label");
+    expect_true((link.last_tx[0] & 0xFFu) == 0310, "clearing the clock leaves 310");
+    a429_link_set_utc(&link, 1, 0, 0, 60, 2026, 1, 1);
+    build_tx_all(&link);
+    expect_true(tx_label_index(&link, 0321) < 0, "a leap second is not rewritten to 59");
+    a429_link_set_utc(&link, 1, 0, 0, 0, 2026, 0, 1);
+    build_tx_all(&link);
+    expect_true(tx_label_index(&link, 0325) < 0, "month 0 clears the clock");
+    a429_link_set_utc(&link, 1, 0, 0, 0, 2026, 1, 0);
+    build_tx_all(&link);
+    expect_true(tx_label_index(&link, 0326) < 0, "day 0 clears the clock");
+    a429_link_set_utc(&link, 1, 23, 59, 59, 2026, 12, 31);
+    build_tx_all(&link);
+    expect_true(tx_label_index(&link, 0321) > 0 && tx_label_index(&link, 0322) > 0 &&
+                tx_label_index(&link, 0323) > 0 && tx_label_index(&link, 0324) > 0 &&
+                tx_label_index(&link, 0325) > 0 && tx_label_index(&link, 0326) > 0,
+                "a valid clock sends all six time labels");
+    a429_link_set_meas(&link, 0321, 0, 0.0f);
+    build_tx_all(&link);
+    expect_true(tx_label_index(&link, 0321) > 0 && tx_label_index(&link, 0326) > 0,
+                "one time label cannot be cleared on its own");
+    a429_link_set_utc(&link, 0, 23, 59, 59, 2026, 12, 31);
+    build_tx_all(&link);
+    expect_true(tx_label_index(&link, 0321) < 0 && tx_label_index(&link, 0322) < 0 &&
+                tx_label_index(&link, 0323) < 0 && tx_label_index(&link, 0324) < 0 &&
+                tx_label_index(&link, 0325) < 0 && tx_label_index(&link, 0326) < 0,
+                "no clock clears 321 through 326 together");
+
+    a429_link_set_meas(&link, 0317, 1, 0.2f);
+    a429_link_set_meas(&link, 0320, 1, 80.0f);
+    a429_link_set_meas(&link, 0331, 1, 1.0f);
+    build_tx_all(&link);
+    expect_true(tx_label_index(&link, 0317) < 0 && tx_label_index(&link, 0320) < 0 &&
+                tx_label_index(&link, 0331) < 0,
+                "oil pressure, oil temperature and state 331 stay unsent");
+    expect_true((link.last_tx[0] & 0xFFu) == 0310, "310 is still sent after those refusals");
+
+    a429_core_init(&core);
+    a429_link_set_collective(&core.link, 1, 0.0f, 1.0f, 9.0f);
+    fill_airdata(&core.link);
+    a429_core_update(&core, 0);
+    expect_true(core.sched.tx_slots == 0u, "the first poll only arms the scheduler");
+    a429_core_update(&core, 12500u);
+    expect_true(core.sched.tx_slots == 1u, "the first period emits one slot");
+    expect_true(core.link.last_tx_count >= 1u && (core.link.last_tx[0] & 0xFFu) == 0310,
+                "310 is in the 12.5 ms set");
+    expect_true(tx_label_index(&core.link, 0312) > 0 && tx_label_index(&core.link, 0324) > 0,
+                "air-data and the clock share that same set");
+    a429_core_update(&core, 12500u);
+    expect_true(core.sched.tx_slots == 1u, "the same tick does not send a second slot");
+    a429_core_update(&core, 25000u);
+    expect_true(core.sched.tx_slots == 2u && core.sched.tx_slots_skipped == 0u,
+                "the next period emits one slot and does not catch up");
+    expect_true((core.link.last_tx[0] & 0xFFu) == 0310 && tx_label_index(&core.link, 0313) > 0,
+                "310 is in the next 12.5 ms set as well");
+}
+
 int a429_host_tests(void);
 
 int a429_host_tests(void)
@@ -1264,6 +1484,7 @@ int a429_host_tests(void)
     test_engine_mode();
     test_measured_nr();
     test_collective_clp();
+    test_fc_airdata();
     if (g_fails == 0) {
         printf("RESULT: all passed\n");
     } else {

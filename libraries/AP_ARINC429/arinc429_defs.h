@@ -17,7 +17,15 @@
 #define A429_ECU_NOMINAL_REFRESH_US 24000u
 #define A429_RX_N 7
 #define A429_PCMD_N 3
-#define A429_TX_MAX 5
+/*
+ * One 12.5 ms slot carries every FC word that currently has a sample.
+ * 15 can be valid together: 310, 311, 312, 313, 314, 316, 321..326
+ * and 340/342/344. 16 leaves a spare so 310 is not rotated out.
+ * 317, 320 and 331 are not part of that set.
+ */
+#define A429_TX_MAX 16
+/* 312, 313, 314, 316 and 321..326. Not 317, 320 or 331. */
+#define A429_MEAS_N 10
 
 /* AuxSwitchPos HIGH is PWM above this. 1800 itself is middle. */
 #define A429_ENG_PWM_HIGH 1800u
@@ -60,7 +68,8 @@
 #define A429_RS422_RATE_50K 1u
 #define A429_RS422_RATE_12K5 2u
 
-#define A429_TCP_TX_CAP 32u
+/* One slot: C0 plus four little-endian bytes for every TX word. */
+#define A429_TCP_TX_CAP (A429_TX_MAX * 5u)
 #define A429_TCP_RX_CAP 64u
 #define A429_TCP_BACKOFF_MIN_US 200000u
 #define A429_TCP_BACKOFF_MAX_US 5000000u
@@ -178,6 +187,9 @@ typedef struct {
     float clp_v;
     uint8_t nr_set;
     float nr_pct;
+    /* Parallel to the 312/313/314/316/321..326 label list in the link. */
+    uint8_t meas_set[A429_MEAS_N];
+    float meas_eu[A429_MEAS_N];
     uint8_t pcmd_set[A429_PCMD_N];
     a429_pcmd_levels_t pcmd[A429_PCMD_N];
 } a429_sim_tx_t;

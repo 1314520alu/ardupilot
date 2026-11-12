@@ -32,6 +32,13 @@ static const a429_label_info_t catalog[] = {
     {0200, A429_DIR_ECU_TO_FC, 0, A429_KIND_DISC, 0, 0, 0, 0, 0220, "LIFE"},
     {0310, A429_DIR_FC_TO_ECU, 1, A429_KIND_BNR, 0, 100, 0, 0, 0, "CLP"},
     {0311, A429_DIR_FC_TO_ECU, 1, A429_KIND_BNR, 0, 100, 0, 0, 0, "Nr"},
+    /*
+     * 312..316 and 321..326 are transmitted when the vehicle publishes a
+     * real sample. phase1 stays 0 so they are not part of the original
+     * tracked set of 12. 317, 320 and 331 are never published: this
+     * flight controller has no oil-pressure, oil-temperature, or
+     * accessory discrete inputs.
+     */
     {0312, A429_DIR_FC_TO_ECU, 0, A429_KIND_BNR, 0, 100, 0, 0, 0, "P0"},
     {0313, A429_DIR_FC_TO_ECU, 0, A429_KIND_BNR, 0, 10, 0, 0, 0, "T0"},
     {0314, A429_DIR_FC_TO_ECU, 0, A429_KIND_BNR, 0, 1, 0, 0, 0, "H"},
