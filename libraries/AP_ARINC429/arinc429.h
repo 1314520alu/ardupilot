@@ -83,6 +83,27 @@ void a429_link_set_collective(a429_link_t *link, int sample, float collective_pc
                               float v_at_0, float v_at_100);
 
 /*
+ * Publish one air-data label, or clear it. label_oct is 312, 313, 314
+ * or 316. A missing sample, a non-finite value, a non-positive pressure,
+ * a negative true airspeed, or a value that does not fit the catalog
+ * BNR field clears that label and does not hold the previous sample.
+ * 317, 320, 331 and the clock labels are refused here. 321..326 are
+ * published only by a429_link_set_utc, all six together.
+ */
+void a429_link_set_meas(a429_link_t *link, uint16_t label_oct, int sample, float eu);
+
+/*
+ * Publish labels 321..326 from UTC fields, or clear all six. sample 0
+ * clears the set. Hour is 0..23, minute and second are 0..59, month is
+ * 1..12, day is 1..31, and year is the Gregorian year. A field outside
+ * that range, or a value that does not fit the BNR field, clears every
+ * time label. Second 60 is not rewritten to 59.
+ */
+void a429_link_set_utc(a429_link_t *link, int sample,
+                       int hour, int minute, int second,
+                       int year, int month, int day);
+
+/*
  * One engine-mode step. Returns 1 and fills levels when this logic owns
  * labels 340/342/344. Returns -1 when ownership is released and those three
  * words must be cleared. Returns 0 when the simulation snapshot must be
