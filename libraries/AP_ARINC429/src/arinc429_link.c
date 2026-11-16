@@ -15,13 +15,16 @@ static void note_counters(a429_counters_t *c, const a429_word_view_t *view)
     }
     if (!view->reserved_ok) {
         c->reserved_errors++;
+        c->decode_errors++;
         return;
     }
     if (!view->sdi_ok) {
         c->sdi_errors++;
+        c->decode_errors++;
         return;
     }
     if (!view->known) {
+        c->decode_errors++;
         return;
     }
     if (view->sm == A429_SM_FAIL) {
@@ -36,10 +39,124 @@ static void note_counters(a429_counters_t *c, const a429_word_view_t *view)
     info = a429_catalog_find(view->label);
     if (info != 0 && info->has_range && view->sm == A429_SM_NORMAL && !view->eu_valid) {
         c->range_errors++;
+        c->decode_errors++;
     }
     if (view->eu_valid || view->disc_valid) {
         c->valid_count++;
     }
+}
+
+/* Octal labels in the order A4C0..A4C3 pack them, four per int. */
+static const uint16_t mon_labels[A429_MON_N] = {
+    0144, 0145, 0146, 0147,
+    0151, 0152, 0153, 0154,
+    0155, 0156, 0160, 0175,
+    0176, 0177
+};
+
+static uint16_t label_disp(uint16_t oct_value)
+{
+    uint16_t v = 0;
+    uint16_t mul = 1;
+
+    while (oct_value > 0u) {
+        v = (uint16_t)(v + (uint16_t)(oct_value & 7u) * mul);
+        oct_value = (uint16_t)(oct_value >> 3);
+        mul = (uint16_t)(mul * 10u);
+    }
+    return v;
+}
+
+static int mon_find(uint8_t label)
+{
+    uint8_t i;
+
+    for (i = 0; i < A429_MON_N; i++) {
+        if (mon_labels[i] == (uint16_t)label) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static void stats_arm(a429_link_t *link, uint32_t now_us)
+{
+    if (link->stats.started) {
+        return;
+    }
+    link->stats.started = 1;
+    link->stats.win_start_us = now_us;
+    link->stats.parity_mark = link->counters.parity_errors;
+    link->stats.decode_mark = link->counters.decode_errors;
+}
+
+static void wordq_push(a429_link_t *link, const a429_wordq_item_t *item)
+{
+    a429_stats_t *s = &link->stats;
+    uint8_t slot;
+
+    if (s->q_count >= A429_WORDQ) {
+        if (s->q_drop < 0xFFFFFFFFu) {
+            s->q_drop++;
+        }
+        return;
+    }
+    slot = (uint8_t)((s->q_head + s->q_count) % A429_WORDQ);
+    s->q[slot] = *item;
+    s->q_count++;
+}
+
+static void stats_on_word(a429_link_t *link, const a429_word_view_t *view, uint32_t raw,
+                          uint32_t now_us, int fresh)
+{
+    a429_wordq_item_t item;
+    int idx;
+    uint8_t flags = 0;
+
+    if (view->parity_ok) {
+        flags |= A429_WQ_PARITY;
+    }
+    if (view->eu_valid) {
+        flags |= A429_WQ_EU;
+    }
+    if (view->disc_valid) {
+        flags |= A429_WQ_DISC;
+    }
+    if (fresh) {
+        flags |= A429_WQ_FRESH;
+    }
+    if (view->reserved_ok) {
+        flags |= A429_WQ_RSV;
+    }
+    if (view->sdi_ok) {
+        flags |= A429_WQ_SDI;
+    }
+    memset(&item, 0, sizeof(item));
+    item.time_us = now_us;
+    item.raw = raw;
+    item.eu = view->eu;
+    item.data = view->data;
+    item.label = view->label;
+    item.flags = flags;
+    wordq_push(link, &item);
+
+    idx = mon_find(view->label);
+    if (idx < 0) {
+        return;
+    }
+    if (link->stats.count_win[idx] < 65535u) {
+        link->stats.count_win[idx]++;
+    }
+    link->stats.have[idx] = 1;
+    link->stats.eu_valid[idx] = view->eu_valid;
+    link->stats.disc_valid[idx] = view->disc_valid;
+    link->stats.struct_ok[idx] = (uint8_t)(view->parity_ok && view->reserved_ok &&
+                                           view->sdi_ok && view->known &&
+                                           view->sm == A429_SM_NORMAL);
+    link->stats.eu[idx] = view->eu;
+    link->stats.data[idx] = view->data;
+    link->stats.raw[idx] = raw;
+    link->stats.rx_us[idx] = now_us;
 }
 
 void a429_edge_reset(a429_edge_state_t *st)
@@ -117,6 +234,7 @@ void a429_link_ingest(a429_link_t *link, uint32_t raw, uint32_t now_us)
     if (link == 0) {
         return;
     }
+    stats_arm(link, now_us);
     a429_inspect(raw, link->expected_sdi, &view);
     note_counters(&link->counters, &view);
     rx = a429_phase1_rx_index(view.label);
@@ -140,6 +258,7 @@ void a429_link_ingest(a429_link_t *link, uint32_t raw, uint32_t now_us)
              * normal sample stays in last_valid / valid_us and is not refreshed. */
             slot->fresh = 0;
         }
+        stats_on_word(link, &view, raw, now_us, slot->fresh);
         return;
     }
     pcmd = a429_pcmd_index(view.label);
@@ -156,11 +275,13 @@ void a429_link_ingest(a429_link_t *link, uint32_t raw, uint32_t now_us)
             slot->levels = levels;
         }
         a429_edge_update(&slot->edge, &levels, view.disc_valid, &slot->edges);
+        stats_on_word(link, &view, raw, now_us, 0);
         return;
     }
     link->rx_untracked++;
     link->last_untracked_raw = raw;
     link->last_untracked_us = now_us;
+    stats_on_word(link, &view, raw, now_us, 0);
 }
 
 void a429_link_session_lost(a429_link_t *link)
@@ -224,6 +345,134 @@ void a429_link_poll_timeouts(a429_link_t *link, uint32_t now_us)
             slot->timeout_count++;
         }
     }
+}
+
+void a429_link_note_bytes(a429_link_t *link, uint32_t n, uint32_t now_us)
+{
+    if (link == 0 || n == 0u) {
+        return;
+    }
+    stats_arm(link, now_us);
+    link->stats.bytes_total += n;
+    link->stats.bytes_win += n;
+}
+
+void a429_link_note_frames(a429_link_t *link, uint32_t n, uint32_t now_us)
+{
+    if (link == 0 || n == 0u) {
+        return;
+    }
+    stats_arm(link, now_us);
+    link->stats.frames_total += n;
+    link->stats.frames_win += n;
+}
+
+void a429_link_poll_stats(a429_link_t *link, uint32_t now_us)
+{
+    a429_stats_t *s;
+    uint8_t i;
+
+    if (link == 0) {
+        return;
+    }
+    stats_arm(link, now_us);
+    s = &link->stats;
+    if ((int32_t)(now_us - s->win_start_us) < 1000000) {
+        return;
+    }
+    for (i = 0; i < A429_MON_N; i++) {
+        s->count_1s[i] = s->count_win[i];
+        s->count_win[i] = 0;
+    }
+    s->bytes_1s = s->bytes_win;
+    s->frames_1s = s->frames_win;
+    s->bytes_win = 0;
+    s->frames_win = 0;
+    s->parity_1s = link->counters.parity_errors - s->parity_mark;
+    s->decode_1s = link->counters.decode_errors - s->decode_mark;
+    s->parity_mark = link->counters.parity_errors;
+    s->decode_mark = link->counters.decode_errors;
+    s->win_start_us += 1000000u;
+    if ((int32_t)(now_us - s->win_start_us) >= 1000000) {
+        /* The gap after the window that just closed had no samples. */
+        for (i = 0; i < A429_MON_N; i++) {
+            s->count_1s[i] = 0;
+        }
+        s->bytes_1s = 0;
+        s->frames_1s = 0;
+        s->parity_1s = 0;
+        s->decode_1s = 0;
+        s->win_start_us = now_us;
+    }
+}
+
+void a429_link_stats(const a429_link_t *link, a429_stats_view_t *out)
+{
+    if (out == 0) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+    if (link == 0) {
+        return;
+    }
+    out->bytes_total = link->stats.bytes_total;
+    out->frames_total = link->stats.frames_total;
+    out->bytes_1s = link->stats.bytes_1s;
+    out->frames_1s = link->stats.frames_1s;
+    out->parity_errors = link->counters.parity_errors;
+    out->decode_errors = link->counters.decode_errors;
+    out->parity_1s = link->stats.parity_1s;
+    out->decode_1s = link->stats.decode_1s;
+    out->q_drop = link->stats.q_drop;
+}
+
+uint8_t a429_mon_n(void)
+{
+    return A429_MON_N;
+}
+
+int a429_mon_view(const a429_link_t *link, uint8_t index, a429_mon_view_t *out)
+{
+    int rx;
+
+    if (link == 0 || out == 0 || index >= A429_MON_N) {
+        return 0;
+    }
+    memset(out, 0, sizeof(*out));
+    out->label_oct = mon_labels[index];
+    out->label_disp = label_disp(mon_labels[index]);
+    out->count_1s = link->stats.count_1s[index];
+    out->have = link->stats.have[index];
+    out->eu_valid = link->stats.eu_valid[index];
+    out->disc_valid = link->stats.disc_valid[index];
+    out->struct_ok = link->stats.struct_ok[index];
+    out->eu = link->stats.eu[index];
+    out->data = link->stats.data[index];
+    out->raw = link->stats.raw[index];
+    out->rx_us = link->stats.rx_us[index];
+    rx = a429_phase1_rx_index(mon_labels[index]);
+    if (rx >= 0) {
+        const a429_rx_slot_t *slot = &link->rx[rx];
+        out->fresh = slot->fresh;
+        if (slot->timeout_us != 0u && slot->have_valid && !slot->fresh) {
+            out->timed_out = 1;
+        }
+    }
+    return 1;
+}
+
+int a429_link_pop_word(a429_link_t *link, a429_wordq_item_t *out)
+{
+    a429_stats_t *s;
+
+    if (link == 0 || out == 0 || link->stats.q_count == 0u) {
+        return 0;
+    }
+    s = &link->stats;
+    *out = s->q[s->q_head];
+    s->q_head = (uint8_t)((s->q_head + 1u) % A429_WORDQ);
+    s->q_count--;
+    return 1;
 }
 
 void a429_sim_clear(a429_link_t *link)

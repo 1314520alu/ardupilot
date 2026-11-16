@@ -496,7 +496,7 @@ FC-to-ECU slot.
 
 * Parameter group `A429_`, index 34. Indices through 20 are `ENG_CH` 16,
   `NR_INST` 17, `NR_REF` 18, `NR_CRIT` 19, and `RUNUP` 20. Label 310 adds
-  21 `CLP_V0` and 22 `CLP_V100`. Earlier indices are unchanged.
+  21 `CLP_V0` and 22 `CLP_V100`. `TLM_HZ` is 23. Earlier indices are unchanged.
 * `setup()` calls `init()`.
 * The scheduler calls `update()` at 400 Hz.
 * `update()` fills 310 from the heli collective and 311 from the selected
@@ -508,6 +508,63 @@ The compile flag is set on the ZeroOne X6 and ZeroOne X9 hwdefs.
 Other boards keep `AP_ARINC429_ENABLED` at 0, so their images do not gain
 the codec. `Tools/scripts/build_options.py` lists the flag for the custom
 build server, default off.
+
+## GCS telemetry and the dataflash log
+
+`A429_TLM_HZ` is the rate for Ng, Np, T45 and torque (`A4NG`, `A4NP`,
+`A4T45`, `A4MKP`). The default is 10. The maximum is 20. Zero disables
+every A429 named value and the stale/recovery text. It does not stop
+the dataflash log. The other parameters are unchanged, including the
+per-label `*_TO` timeouts, which still default to 0.
+
+The other decoded bench labels are sent at 1 Hz: `A4NGC`, `A4P3`,
+`A4LGT`, `A4T1`, `A4P0`, `A4NGA`, and `A4CLP`. Label 153 has no scale
+in the appendix, so `A4CLP` is the signed data field, not a voltage.
+Warn, state and warn2 are `A4WN1`, `A4STA` and `A4WN2` as integers,
+and only while that phase-one word is fresh.
+
+A named-value frame is 30 bytes on MAVLink 2. Four primary values at
+10 Hz are already 1200 bytes/s, so the fourteen per-label counts are
+packed into four integers instead of fourteen messages. Each byte is
+one label's count in the last closed one-second window, saturated at
+255. The bytes are little-endian:
+
+| Name | byte 0 | byte 1 | byte 2 | byte 3 |
+| --- | --- | --- | --- | --- |
+| `A4C0` | 144 | 145 | 146 | 147 |
+| `A4C1` | 151 | 152 | 153 | 154 |
+| `A4C2` | 155 | 156 | 160 | 175 |
+| `A4C3` | 176 | 177 | 0 | 0 |
+
+`A4PAR` and `A4DEC` are the cumulative parity and decode counts.
+Decode counts reserved-bit, SDI, unknown-label and out-of-range words.
+A parity failure is only `A4PAR`. MAVLink 2 omits the unused trailing
+bytes of the 10-character name, so a SITL capture at the default rate
+was about 1.3 KB/s on the wire. A link that sends the name field at its
+full width is larger. `A429_TLM_HZ` 4 is the setting that keeps the
+same messages near 1 KB/s on a 115200 radio.
+
+A phase-one label that has been fresh and then is not sends
+`A429 <octal> <name> stale`. The next fresh word sends `A429 <octal>
+<name> ok`. Each label waits at least one second between those two
+texts. Timeout 0 does not go stale on silence. A non-zero `*_TO`, a
+bad word, or a dropped TCP session does. The text is sent from
+`update()`, which is the vehicle thread, after that thread has decoded
+the words. The TCP worker does not call GCS or the logger.
+
+`A4RX` is one dataflash row per received word: the octal label written
+as a decimal integer (0144 is 144), the logical raw word, the
+engineering value or NaN, the data field, flag bits, and the vehicle
+microsecond time of the decode. `A4ST` is the one-second totals for
+bytes, frames, parity, decode errors, queue drops and the timeout
+bitmask. `A4S1` and `A4S2` are the fourteen label counts for that same
+window. A dataflash row holds 16 fields and the label string holds 64
+characters, which is why the counts are split.
+
+SITL uses the host TCP stack. The worker there does not wait for
+`get_ip_active()`, which stays 0 on the SITL networking backend.
+ChibiOS still waits until lwIP has an address. That is not a claim
+about a physical NT1-M.
 
 ## Tests
 

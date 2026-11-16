@@ -16,14 +16,20 @@
 
 #include <AP_HAL/AP_HAL.h>
 #include <AP_Arming/AP_Arming.h>
+#include <AP_Logger/AP_Logger_config.h>
 #include <AP_Math/AP_Math.h>
 #include <AP_Notify/AP_Notify.h>
 #include <AP_RPM/AP_RPM_config.h>
 #include <AP_Motors/AP_Motors_config.h>
+#include <GCS_MAVLink/GCS.h>
 #include <RC_Channel/RC_Channel.h>
 #include <cstdio>
 #include <cstring>
 #include <errno.h>
+
+#if HAL_LOGGING_ENABLED
+#include <AP_Logger/AP_Logger.h>
+#endif
 
 #if AP_RPM_ENABLED
 #include <AP_RPM/AP_RPM.h>
@@ -219,6 +225,14 @@ const AP_Param::GroupInfo AP_ARINC429::var_info[] = {
     // @User: Advanced
     AP_GROUPINFO("CLP_V100", 22, AP_ARINC429, _clp_v100, 9.0f),
 
+    // @Param: TLM_HZ
+    // @DisplayName: ARINC429 telemetry rate
+    // @Description: Rate of the Ng, Np, T45 and torque named values. Other decoded labels are sent at 1 Hz or 2 Hz, and the fourteen label counts are packed into four integers at 1 Hz. 0 disables every A429 named value and the stale text. The dataflash log is not affected. Maximum 20.
+    // @Units: Hz
+    // @Range: 0 20
+    // @User: Advanced
+    AP_GROUPINFO("TLM_HZ", 23, AP_ARINC429, _tlm_hz, 10),
+
     AP_GROUPEND
 };
 
@@ -413,10 +427,15 @@ void AP_ARINC429::tcp_worker(void)
     while (true) {
         /* Do not open a socket until the existing stack has an address.
          * This function does not write NET_IP or restart the interface. */
+#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
+        /* Host sockets do not wait on the lwIP address. The SITL
+         * networking backend leaves get_ip_active() at 0. */
+#else
         if (AP::network().get_ip_active() == 0) {
             hal.scheduler->delay(100);
             continue;
         }
+#endif
         a429_tcp_poll(&_core.tcp, AP_HAL::micros());
         hal.scheduler->delay(2);
     }
@@ -578,8 +597,349 @@ void AP_ARINC429::command_engine_mode(void)
     }
 }
 
+static const uint16_t phase1_disp[A429_RX_N] = {144, 145, 147, 151, 175, 176, 177};
+static const char *const phase1_name[A429_RX_N] = {"Ng", "Np", "T45", "Mkp", "Wn1", "St", "Wn2"};
+
+static_assert(sizeof("A4T45") - 1 <= 10, "A429 named value");
+static_assert(sizeof("A4NGC") - 1 <= 10, "A429 named value");
+static_assert(sizeof("A4STA") - 1 <= 10, "A429 named value");
+
+static uint16_t label_disp_u8(uint8_t label)
+{
+    uint16_t v = 0;
+    uint16_t mul = 1;
+    uint16_t x = label;
+
+    while (x > 0u) {
+        v = uint16_t(v + (x & 7u) * mul);
+        x = uint16_t(x >> 3);
+        mul = uint16_t(mul * 10u);
+    }
+    return v;
+}
+
+static int32_t pack_counts(const a429_link_t *link, uint8_t group)
+{
+    int32_t pack = 0;
+    uint8_t b;
+
+    for (b = 0; b < 4u; b++) {
+        a429_mon_view_t v;
+        const uint8_t idx = uint8_t(group * 4u + b);
+        uint16_t c;
+        if (idx >= A429_MON_N || a429_mon_view(link, idx, &v) != 1) {
+            continue;
+        }
+        c = v.count_1s;
+        if (c > 255u) {
+            c = 255u;
+        }
+        pack |= int32_t(uint32_t(c) << (8u * b));
+    }
+    return pack;
+}
+
+static uint16_t timeout_mask(const a429_link_t *link)
+{
+    uint16_t mask = 0;
+    uint8_t i;
+
+    for (i = 0; i < a429_mon_n(); i++) {
+        a429_mon_view_t v;
+        if (a429_mon_view(link, i, &v) == 1 && v.timed_out) {
+            mask = uint16_t(mask | (1u << i));
+        }
+    }
+    return mask;
+}
+
+uint8_t AP_ARINC429::tlm_hz(void) const
+{
+    const int16_t hz = _tlm_hz.get();
+    if (hz <= 0) {
+        return 0;
+    }
+    if (hz > 20) {
+        return 20;
+    }
+    return uint8_t(hz);
+}
+
+void AP_ARINC429::log_rx_words(void)
+{
+    a429_wordq_item_t item;
+
+    while (a429_link_pop_word(&_core.link, &item) == 1) {
+#if HAL_LOGGING_ENABLED
+        if (!AP::logger().logging_enabled()) {
+            continue;
+        }
+        // @LoggerMessage: A4RX
+        // @Description: One received CS35 ARINC429 word. Lbl is the octal label written in decimal digits, so octal 0144 is 144. EU is NaN when the word has no engineering scale. RxUS is the vehicle microsecond clock at decode.
+        // @Field: TimeUS: Time since system startup
+        // @Field: Lbl: Octal label as a decimal integer
+        // @Field: Raw: Logical 32-bit word after label-byte reversal
+        // @Field: EU: Engineering value when the word scaled, otherwise NaN
+        // @Field: Data: Signed data field
+        // @Field: Flg: Parity, engineering valid, discrete valid, phase-one fresh, reserved bits ok, SDI ok
+        // @FieldBits: Flg: Parity,EU,Disc,Fresh,Rsv,SDI
+        // @Field: RxUS: Vehicle microseconds when the word was decoded
+        AP::logger().Write(
+            "A4RX",
+            "TimeUS,Lbl,Raw,EU,Data,Flg,RxUS",
+            "s-----s",
+            "F00000F",
+            "QHIfhBI",
+            uint64_t(AP_HAL::micros64()),
+            uint16_t(label_disp_u8(item.label)),
+            uint32_t(item.raw),
+            float(item.eu),
+            int16_t(item.data),
+            uint8_t(item.flags),
+            uint32_t(item.time_us));
+#else
+        (void)item;
+#endif
+    }
+}
+
+void AP_ARINC429::log_stats(uint32_t now_us)
+{
+#if HAL_LOGGING_ENABLED
+    a429_stats_view_t st;
+    a429_mon_view_t m[A429_MON_N];
+    uint8_t i;
+
+    if (!AP::logger().logging_enabled()) {
+        return;
+    }
+    if (_stat_log_us != 0u && (int32_t)(now_us - _stat_log_us) < 1000000) {
+        return;
+    }
+    _stat_log_us = now_us == 0u ? 1u : now_us;
+    a429_link_stats(&_core.link, &st);
+    for (i = 0; i < A429_MON_N; i++) {
+        if (a429_mon_view(&_core.link, i, &m[i]) != 1) {
+            memset(&m[i], 0, sizeof(m[i]));
+        }
+    }
+    // @LoggerMessage: A4ST
+    // @Description: One-second CS35 ARINC429 receive totals. To is a bitmask of monitored labels whose freshness timeout has fired, in A4C0 pack order.
+    // @Field: TimeUS: Time since system startup
+    // @Field: BTot: Socket bytes received
+    // @Field: FTot: Decoded frames
+    // @Field: B1s: Socket bytes in the last stats window
+    // @Field: F1s: Decoded frames in the last stats window
+    // @Field: Par: Words that failed odd parity
+    // @Field: Dec: Words that failed reserved bits, SDI, label lookup, or BNR range
+    // @Field: Drop: Received words not copied into the log queue
+    // @Field: To: Timeout bitmask, bit 0 is label 144
+    AP::logger().Write(
+        "A4ST",
+        "TimeUS,BTot,FTot,B1s,F1s,Par,Dec,Drop,To",
+        "sb-Bz----",
+        "F00000000",
+        "QIIIIIIIH",
+        uint64_t(AP_HAL::micros64()),
+        uint32_t(st.bytes_total),
+        uint32_t(st.frames_total),
+        uint32_t(st.bytes_1s),
+        uint32_t(st.frames_1s),
+        uint32_t(st.parity_errors),
+        uint32_t(st.decode_errors),
+        uint32_t(st.q_drop),
+        uint16_t(timeout_mask(&_core.link)));
+    // @LoggerMessage: A4S1
+    // @Description: Label counts in the last one-second ARINC429 window, first seven bench labels.
+    // @Field: TimeUS: Time since system startup
+    // @Field: C144: Label 144 Ng count
+    // @Field: C145: Label 145 Np count
+    // @Field: C146: Label 146 Ngc count
+    // @Field: C147: Label 147 T45 count
+    // @Field: C151: Label 151 torque count
+    // @Field: C152: Label 152 P3 count
+    // @Field: C153: Label 153 ECU collective count
+    AP::logger().Write(
+        "A4S1",
+        "TimeUS,C144,C145,C146,C147,C151,C152,C153",
+        "szzzzzzz",
+        "F0000000",
+        "QHHHHHHH",
+        uint64_t(AP_HAL::micros64()),
+        uint16_t(m[0].count_1s),
+        uint16_t(m[1].count_1s),
+        uint16_t(m[2].count_1s),
+        uint16_t(m[3].count_1s),
+        uint16_t(m[4].count_1s),
+        uint16_t(m[5].count_1s),
+        uint16_t(m[6].count_1s));
+    // @LoggerMessage: A4S2
+    // @Description: Label counts in the last one-second ARINC429 window, remaining seven bench labels.
+    // @Field: TimeUS: Time since system startup
+    // @Field: C154: Label 154 LGt count
+    // @Field: C155: Label 155 T1 count
+    // @Field: C156: Label 156 ECU P0 count
+    // @Field: C160: Label 160 NgAc count
+    // @Field: C175: Label 175 warn count
+    // @Field: C176: Label 176 state count
+    // @Field: C177: Label 177 warn2 count
+    AP::logger().Write(
+        "A4S2",
+        "TimeUS,C154,C155,C156,C160,C175,C176,C177",
+        "szzzzzzz",
+        "F0000000",
+        "QHHHHHHH",
+        uint64_t(AP_HAL::micros64()),
+        uint16_t(m[7].count_1s),
+        uint16_t(m[8].count_1s),
+        uint16_t(m[9].count_1s),
+        uint16_t(m[10].count_1s),
+        uint16_t(m[11].count_1s),
+        uint16_t(m[12].count_1s),
+        uint16_t(m[13].count_1s));
+#else
+    (void)now_us;
+#endif
+}
+
+void AP_ARINC429::send_slow(uint8_t step)
+{
+#if HAL_GCS_ENABLED
+    static const struct {
+        uint8_t mon;
+        uint8_t kind;
+        const char *name;
+    } rows[] = {
+        {2, 0, "A4NGC"},
+        {5, 0, "A4P3"},
+        {6, 2, "A4CLP"},
+        {7, 0, "A4LGT"},
+        {8, 0, "A4T1"},
+        {9, 0, "A4P0"},
+        {10, 0, "A4NGA"},
+        {11, 1, "A4WN1"},
+        {12, 1, "A4STA"},
+        {13, 1, "A4WN2"},
+    };
+    if (step < 10u) {
+        a429_mon_view_t v;
+        if (a429_mon_view(&_core.link, rows[step].mon, &v) != 1) {
+            return;
+        }
+        if (rows[step].kind == 0) {
+            if (v.eu_valid) {
+                gcs().send_named_float(rows[step].name, v.eu);
+            }
+        } else if (rows[step].kind == 1) {
+            if (v.fresh && v.disc_valid) {
+                gcs().send_named_int(rows[step].name, v.data);
+            }
+        } else if (v.struct_ok) {
+            gcs().send_named_float(rows[step].name, float(v.data));
+        }
+        return;
+    }
+    if (step < 14u) {
+        static const char *const names[] = {"A4C0", "A4C1", "A4C2", "A4C3"};
+        gcs().send_named_int(names[step - 10u], pack_counts(&_core.link, uint8_t(step - 10u)));
+        return;
+    }
+    if (step == 14u) {
+        gcs().send_named_int("A4PAR", int32_t(_core.link.counters.parity_errors));
+        return;
+    }
+    if (step == 15u) {
+        gcs().send_named_int("A4DEC", int32_t(_core.link.counters.decode_errors));
+    }
+#else
+    (void)step;
+#endif
+}
+
+void AP_ARINC429::publish_telemetry(uint32_t now_us)
+{
+    const uint8_t hz = tlm_hz();
+    uint32_t period;
+    uint8_t i;
+
+    if (hz == 0) {
+        return;
+    }
+    period = 1000000u / hz;
+    if (_tlm_fast_us == 0u || (int32_t)(now_us - _tlm_fast_us) >= (int32_t)period) {
+        static const struct {
+            uint8_t rx;
+            const char *name;
+        } fast_rows[] = {
+            {0, "A4NG"},
+            {1, "A4NP"},
+            {2, "A4T45"},
+            {3, "A4MKP"},
+        };
+        _tlm_fast_us = now_us == 0u ? 1u : now_us;
+#if HAL_GCS_ENABLED
+        for (i = 0; i < 4u; i++) {
+            float eu = 0.0f;
+            if (get_fresh_eu(fast_rows[i].rx, eu)) {
+                gcs().send_named_float(fast_rows[i].name, eu);
+            }
+        }
+#else
+        (void)i;
+#endif
+    }
+    if (!_tlm_slow_on) {
+        if (_tlm_slow_us == 0u || (int32_t)(now_us - _tlm_slow_us) >= 1000000) {
+            _tlm_slow_on = 1;
+            _tlm_slow_i = 0;
+            _tlm_slow_us = now_us == 0u ? 1u : now_us;
+        }
+    }
+    if (_tlm_slow_on) {
+        send_slow(_tlm_slow_i);
+        _tlm_slow_i++;
+        if (_tlm_slow_i >= 16u) {
+            _tlm_slow_on = 0;
+        }
+    }
+}
+
+void AP_ARINC429::note_freshness(uint32_t now_ms)
+{
+    uint8_t i;
+
+    if (tlm_hz() == 0) {
+        return;
+    }
+    for (i = 0; i < A429_RX_N; i++) {
+        const bool fresh = _core.link.rx[i].fresh != 0;
+        const bool want_down = _fresh_seen[i] != 0 && !fresh;
+        if (fresh) {
+            _fresh_seen[i] = 1;
+        }
+        if (want_down == (_fresh_down[i] != 0)) {
+            continue;
+        }
+        if (_fresh_ms[i] != 0u && uint32_t(now_ms - _fresh_ms[i]) < 1000u) {
+            continue;
+        }
+        _fresh_ms[i] = now_ms == 0u ? 1u : now_ms;
+        _fresh_down[i] = want_down ? 1u : 0u;
+#if HAL_GCS_ENABLED
+        if (want_down) {
+            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "A429 %u %s stale",
+                          unsigned(phase1_disp[i]), phase1_name[i]);
+        } else {
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "A429 %u %s ok",
+                          unsigned(phase1_disp[i]), phase1_name[i]);
+        }
+#endif
+    }
+}
+
 void AP_ARINC429::update(void)
 {
+    const uint32_t now_us = AP_HAL::micros();
     if (!_inited) {
         return;
     }
@@ -590,6 +950,7 @@ void AP_ARINC429::update(void)
         a429_tcp_configure(&_core.tcp, 0, 0, 0);
         a429_core_set_frame(&_core, A429_FRAME_NONE);
         a429_link_session_lost(&_core.link);
+        note_freshness(AP_HAL::millis());
         return;
     }
     apply_params();
@@ -597,13 +958,16 @@ void AP_ARINC429::update(void)
     publish_measured_nr();
     publish_collective();
     /*
-     * Scheduling and byte-pipe maintenance. Label 310 is the heli
-     * collective in volts. Label 311 is measured Nr. The three command
-     * words are not copied into motors, servos, EFI, or eRob.
-     * Unconfigured framing sends no bytes, and no CD rate command is
-     * generated.
+     * Decode on this thread, after the TCP worker has only filled the
+     * byte pipe. Named values and stale text are sent from here.
+     * Label 310 is the heli collective in volts. Label 311 is measured
+     * Nr. The command words are not copied into motors, servos, or eRob.
      */
-    a429_core_update(&_core, AP_HAL::micros());
+    a429_core_update(&_core, now_us);
+    log_rx_words();
+    log_stats(now_us);
+    publish_telemetry(now_us);
+    note_freshness(AP_HAL::millis());
 }
 
 void AP_ARINC429::sim_inject_rx(uint32_t raw)

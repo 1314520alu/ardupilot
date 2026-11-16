@@ -1246,6 +1246,112 @@ static void test_collective_clp(void)
                 "clearing 310 leaves 311 and the command word");
 }
 
+static int mon_by_oct(const a429_link_t *link, uint16_t oct, a429_mon_view_t *out)
+{
+    uint8_t i;
+
+    for (i = 0; i < a429_mon_n(); i++) {
+        if (a429_mon_view(link, i, out) == 1 && out->label_oct == oct) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void test_rx_window_and_stale(void)
+{
+    static const uint16_t order_oct[A429_MON_N] = {
+        0144, 0145, 0146, 0147, 0151, 0152, 0153, 0154, 0155, 0156, 0160, 0175, 0176, 0177
+    };
+    static const uint16_t order_disp[A429_MON_N] = {
+        144, 145, 146, 147, 151, 152, 153, 154, 155, 156, 160, 175, 176, 177
+    };
+    a429_link_t link;
+    a429_mon_view_t view;
+    a429_wordq_item_t word;
+    a429_stats_view_t stats;
+    uint32_t ng = 0;
+    uint32_t np = 0;
+    uint32_t ngc = 0;
+    uint32_t bad_parity;
+    uint32_t bad_rsv;
+    uint32_t unknown;
+    uint32_t parity_before;
+    uint32_t decode_before;
+    uint16_t i;
+
+    expect_true(a429_mon_n() == A429_MON_N, "fourteen bench labels are monitored");
+    a429_link_init(&link);
+    for (i = 0; i < A429_MON_N; i++) {
+        expect_true(a429_mon_view(&link, (uint8_t)i, &view) == 1, "monitor slot exists");
+        expect_true(view.label_oct == order_oct[i] && view.label_disp == order_disp[i],
+                    "monitor order matches the packed count bytes");
+        expect_true(view.timed_out == 0, "a label with no sample is not timed out");
+    }
+
+    expect_true(a429_encode_bnr(0144, 0, A429_SM_NORMAL, 50.0f, &ng) == 1, "Ng 50 for the window");
+    expect_true(a429_encode_bnr(0145, 0, A429_SM_NORMAL, 10.0f, &np) == 1, "Np 10 for the window");
+    expect_true(a429_encode_bnr(0146, 0, A429_SM_NORMAL, 48.0f, &ngc) == 1, "Ngc 48 for the window");
+    for (i = 0; i < 40u; i++) {
+        a429_link_ingest(&link, ng, (uint32_t)i * 20000u);
+        expect_true(a429_link_pop_word(&link, &word) == 1, "each Ng word is queued");
+        if (i == 0u) {
+            expect_true(word.label == 0144, "queued label is the logical Ng label");
+            expect_true(word.raw == ng && word.eu > 49.9f && word.eu < 50.1f, "queued Ng value");
+            expect_true((word.flags & A429_WQ_PARITY) != 0 && (word.flags & A429_WQ_EU) != 0 &&
+                        (word.flags & A429_WQ_FRESH) != 0, "a normal Ng word is fresh");
+        }
+    }
+    a429_link_ingest(&link, np, 800000u);
+    a429_link_ingest(&link, ngc, 800000u);
+    expect_true(a429_link_pop_word(&link, &word) == 1 && word.label == 0145, "Np is queued");
+    expect_true(a429_link_pop_word(&link, &word) == 1 && word.label == 0146, "Ngc is queued");
+    expect_true(link.rx_untracked == 1u, "Ngc is still not a phase-one slot");
+    a429_link_note_bytes(&link, 205u, 500000u);
+    a429_link_note_frames(&link, 42u, 500000u);
+    a429_link_poll_stats(&link, 800000u);
+    expect_true(mon_by_oct(&link, 0144, &view) == 1 && view.count_1s == 0u,
+                "the one-second window has not closed yet");
+    a429_link_poll_stats(&link, 1000000u);
+    expect_true(mon_by_oct(&link, 0144, &view) == 1 && view.count_1s == 40u, "Ng count is the closed window");
+    expect_true(mon_by_oct(&link, 0145, &view) == 1 && view.count_1s == 1u, "Np count is the closed window");
+    expect_true(mon_by_oct(&link, 0146, &view) == 1 && view.count_1s == 1u && view.eu_valid == 1 &&
+                view.eu > 47.9f && view.eu < 48.1f, "Ngc keeps an engineering value without a phase-one slot");
+    a429_link_stats(&link, &stats);
+    expect_true(stats.bytes_total == 205u && stats.bytes_1s == 205u, "byte total and the one-second byte count");
+    expect_true(stats.frames_total == 42u && stats.frames_1s == 42u, "frame total and the one-second frame count");
+    expect_true(stats.q_drop == 0u, "draining the queue does not drop words");
+
+    a429_link_poll_stats(&link, 2000000u);
+    expect_true(mon_by_oct(&link, 0144, &view) == 1 && view.count_1s == 0u, "silence publishes a zero count");
+    a429_link_stats(&link, &stats);
+    expect_true(stats.bytes_1s == 0u && stats.frames_1s == 0u && stats.bytes_total == 205u,
+                "a quiet second does not erase the byte total");
+
+    a429_link_ingest(&link, ng, 2000000u);
+    a429_link_set_timeout_us(&link, 0, 100000u);
+    a429_link_poll_timeouts(&link, 2100000u);
+    expect_true(mon_by_oct(&link, 0144, &view) == 1 && view.fresh == 0 && view.timed_out == 1,
+                "Ng timeout flag follows the NG_TO freshness policy");
+    expect_true(mon_by_oct(&link, 0145, &view) == 1 && view.timed_out == 0,
+                "a label with timeout 0 is not flagged");
+    expect_true(link.rx[0].timeout_count == 1u, "the timeout counter fires once");
+
+    parity_before = link.counters.parity_errors;
+    decode_before = link.counters.decode_errors;
+    bad_parity = ng ^ (1u << 31);
+    a429_link_ingest(&link, bad_parity, 2200000u);
+    expect_true(link.counters.parity_errors == parity_before + 1u, "parity error count");
+    expect_true(link.counters.decode_errors == decode_before, "a parity error is not also a decode error");
+    bad_rsv = a429_apply_odd_parity((ng & 0x7FFFFFFFu) | (1u << 10));
+    a429_link_ingest(&link, bad_rsv, 2300000u);
+    expect_true(link.counters.decode_errors == decode_before + 1u, "a reserved bit is a decode error");
+    unknown = a429_apply_odd_parity(1u);
+    a429_link_ingest(&link, unknown, 2400000u);
+    expect_true(link.counters.decode_errors == decode_before + 2u, "an unknown label is a decode error");
+    expect_true(link.rx_untracked == 2u, "an unknown label stays untracked");
+}
+
 int a429_host_tests(void);
 
 int a429_host_tests(void)
@@ -1264,6 +1370,7 @@ int a429_host_tests(void)
     test_engine_mode();
     test_measured_nr();
     test_collective_clp();
+    test_rx_window_and_stale();
     if (g_fails == 0) {
         printf("RESULT: all passed\n");
     } else {
