@@ -30,6 +30,7 @@ struct can_bus {
 };
 
 static struct can_bus g_bus;
+static uint16_t g_fail_read_index;
 
 static void rx_push(struct can_bus *bus, const can_frame_t *fr)
 {
@@ -54,6 +55,11 @@ static void reply_sdo(struct can_bus *bus, const can_frame_t *req)
     rx.data[1] = req->data[1];
     rx.data[2] = req->data[2];
     rx.data[3] = req->data[3];
+    if (cs == 0x40 && g_fail_read_index != 0 && index == g_fail_read_index) {
+        rx.data[0] = 0x80;
+        rx_push(bus, &rx);
+        return;
+    }
     if (cs == 0x40 && index == 0x6064) {
         int32_t pos = bus->sim_pos;
         rx.data[0] = 0x43;
@@ -181,6 +187,7 @@ static void reply_rpdo(struct can_bus *bus, const can_frame_t *req)
 can_bus_t *can_bus_stub_get(void)
 {
     memset(&g_bus, 0, sizeof(g_bus));
+    g_fail_read_index = 0;
     return &g_bus;
 }
 
@@ -254,6 +261,16 @@ void can_bus_stub_push_status(uint16_t sw, int32_t pos)
     g_bus.sim_sw = sw;
     g_bus.sim_pos = pos;
     push_tpdo(&g_bus, (uint16_t)(0x180u + g_bus.node_id), 6, b);
+}
+
+void can_bus_stub_set_position(int32_t pos)
+{
+    g_bus.sim_pos = pos;
+}
+
+void can_bus_stub_fail_read(uint16_t index)
+{
+    g_fail_read_index = index;
 }
 
 void can_bus_stub_push_heartbeat(uint8_t nmt_state)

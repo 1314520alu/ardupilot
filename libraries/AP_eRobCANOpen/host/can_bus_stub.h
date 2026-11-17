@@ -23,3 +23,9 @@ void can_bus_stub_set_silent(int silent);
 
 void can_bus_stub_push_status(uint16_t sw, int32_t pos);
 void can_bus_stub_push_heartbeat(uint8_t nmt_state);
+
+/* 0x6064 value returned to the next SDO upload. Does not emit a TPDO. */
+void can_bus_stub_set_position(int32_t pos);
+
+/* Non-zero: SDO uploads of this index are aborted. 0 answers normally. */
+void can_bus_stub_fail_read(uint16_t index);

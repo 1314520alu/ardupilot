@@ -14,6 +14,7 @@ $(BIN): $(SRCS)
 
 check: $(BIN)
 	./$(BIN)
+	python3 host/check_x6_defaults.py
 
 clean:
 	rm -rf build

@@ -106,6 +106,15 @@
 #define EROB_PREARM_MARGIN_DEG 5
 #endif
 
+/*
+ * First return to mid when RATE is 0. A step to mid makes a single-turn
+ * drive take the long way through 0/524287. 30 deg/s matches the bench note
+ * on CAN_Dx_EROB_RATE.
+ */
+#ifndef EROB_HOME_FALLBACK_DEG_PER_S
+#define EROB_HOME_FALLBACK_DEG_PER_S 30
+#endif
+
 /* HAL iface for EROB_CAN_BUS_INDEX. CAN2 -> 1. Do not use 0 (that is CAN1). */
 static inline unsigned erob_hal_can_iface(void)
 {

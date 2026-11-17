@@ -120,6 +120,17 @@ typedef struct {
     bool ramp_active;
     bool need_nmt_start;
     bool recovered;
+    bool pos_seen; /* 0x6064 has been read. 0x607A stays unwritten until then. */
+    bool actual_stale; /* silence invalidated 0x6064; wait for a new sample */
+    bool home_window;
+    bool need_home;
+    bool home_latched;
+    bool home_holding;
+    bool home_hold_warn;
+    bool home_far_ok; /* FAR=1: slew home even when the straight path exceeds travel */
+    int32_t home_mid;
+    int32_t home_lo;
+    int32_t home_hi;
 } erob_servo_t;
 
 void erob_init(erob_servo_t *s, canopen_master_t *co);
@@ -144,6 +155,23 @@ void erob_set_counts_per_rev(erob_servo_t *s, int32_t counts);
 
 /* Max CSP target slew on the output shaft, deg/s. 0 disables the software ramp. */
 void erob_set_rate_deg_s(erob_servo_t *s, int32_t deg_per_s);
+
+/*
+ * Straight-line return to mid after the axis is enabled or comes back
+ * from silence. mid is CTR+(MIN+MAX)/2. travel_min/max are CTR+MIN and
+ * CTR+MAX. Does not re-arm a return that is already in progress.
+ */
+void erob_set_home_window(erob_servo_t *s, int32_t mid,
+                          int32_t travel_min, int32_t travel_max);
+
+/* Non-zero allows the first return to mid past the travel window. 0 holds. */
+void erob_set_home_far_ok(erob_servo_t *s, int allow);
+
+/* One-shot when the return is refused because the straight path is too long. */
+bool erob_take_home_hold(erob_servo_t *s);
+
+/* CTR + (MIN+MAX)/2, saturated to int32. */
+int32_t erob_mid_plus(int32_t pos_min, int32_t pos_max, int32_t center);
 /* Accel/decel for the CSP command ramp, deg/s^2. 0 ACC keeps the old constant-RATE step. */
 void erob_set_acc_deg_s2(erob_servo_t *s, int32_t deg_per_s2);
 void erob_set_dec_deg_s2(erob_servo_t *s, int32_t deg_per_s2);

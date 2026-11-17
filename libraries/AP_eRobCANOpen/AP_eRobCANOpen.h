@@ -86,6 +86,7 @@ private:
     int32_t counts_per_rev() const;
     void publish_feedback(uint8_t index, uint32_t now_ms);
     bool try_configure(uint8_t index, uint32_t now_ms);
+    void apply_home_window(erob_servo_t *servo);
     bool frame_for_master(const AP_HAL::CANFrame &rx, can_frame_t *fr);
     bool id_for_axis(uint16_t std_id, uint8_t &index) const;
     int hal_send(const can_frame_t *fr);
@@ -106,6 +107,7 @@ private:
     AP_Int16 _rate_deg_s;
     AP_Int16 _acc_deg_s2;
     AP_Int16 _dec_deg_s2;
+    AP_Int8 _far_ok;
     AP_Int8 _slot_sv[EROB_SLOT_COUNT];
     AP_Int8 _slot_id[EROB_SLOT_COUNT];
 

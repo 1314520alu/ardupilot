@@ -28,8 +28,8 @@ FLASH_SIZE_KB 2048
 # supports upto 8MBits/s
 CANFD_SUPPORTED 8
 
-# eRob CAN master (CAN_Dx_PROTOCOL=15). Not selected until CAN_P2_DRIVER
-# moves off the shared DroneCAN driver. See defaults.parm.
+# eRob CAN master (CAN_Dx_PROTOCOL=15). ZeroOneX6/defaults.parm selects
+# it on CAN2. Other boards are unchanged.
 define AP_EROB_CANOPEN_ENABLED 1
 
 env OPTIMIZE -O2
