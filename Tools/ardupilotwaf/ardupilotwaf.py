@@ -106,6 +106,7 @@ COMMON_VEHICLE_DEPENDENT_LIBRARIES = [
     'AC_PID',
     'AP_SerialLED',
     'AP_EFI',
+    'AP_ARINC429',
     'AP_Hott_Telem',
     'AP_ESC_Telem',
     'AP_Servo_Telem',

@@ -1,0 +1,28 @@
+# CS35 NT1-M on ZeroOneX6 heli. Load with the GCS parameter file.
+# A429_TLM_HZ 0 silences named values and stale text. Timeouts stay 0,
+# so silence does not mark a label stale until a *_TO value is set.
+# A429_ENG_CH 6 is the live board RC channel for the engine switch.
+A429_ENABLE,1
+A429_SDI,0
+A429_NG_TO,0
+A429_NP_TO,0
+A429_T45_TO,0
+A429_MKP_TO,0
+A429_WN1_TO,0
+A429_ST_TO,0
+A429_WN2_TO,0
+A429_IP0,192
+A429_IP1,168
+A429_IP2,144
+A429_IP3,7
+A429_REM_PORT,8887
+A429_LOC_PORT,0
+A429_FRAME,2
+A429_ENG_CH,6
+A429_NR_INST,0
+A429_NR_REF,0
+A429_NR_CRIT,0
+A429_RUNUP,0
+A429_CLP_V0,1
+A429_CLP_V100,9
+A429_TLM_HZ,10
