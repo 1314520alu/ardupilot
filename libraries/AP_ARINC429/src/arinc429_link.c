@@ -4,6 +4,27 @@
 
 static const uint8_t pcmd_labels[A429_PCMD_N] = {0340, 0342, 0344};
 
+/* Order is the order in the 12.5 ms slot, after 310 and 311. */
+static const uint8_t meas_labels[A429_MEAS_N] = {
+    0312, 0313, 0314, 0316, 0321, 0322, 0323, 0324, 0325, 0326
+};
+
+static int meas_index(uint16_t label_oct)
+{
+    uint8_t i;
+    for (i = 0; i < A429_MEAS_N; i++) {
+        if (meas_labels[i] == (uint8_t)label_oct) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static int meas_is_utc(uint8_t label)
+{
+    return label >= 0321 && label <= 0326;
+}
+
 static void note_counters(a429_counters_t *c, const a429_word_view_t *view)
 {
     const a429_label_info_t *info;
@@ -342,6 +363,107 @@ void a429_link_set_collective(a429_link_t *link, int sample, float collective_pc
     a429_sim_set_clp(link, volts);
 }
 
+static void meas_clear_one(a429_link_t *link, int index)
+{
+    link->sim.meas_set[index] = 0;
+    link->sim.meas_eu[index] = 0.0f;
+}
+
+static void meas_clear_utc(a429_link_t *link)
+{
+    uint8_t i;
+    for (i = 0; i < A429_MEAS_N; i++) {
+        if (meas_is_utc(meas_labels[i])) {
+            meas_clear_one(link, (int)i);
+        }
+    }
+}
+
+static int meas_utc_ready(const a429_link_t *link)
+{
+    uint8_t i;
+    for (i = 0; i < A429_MEAS_N; i++) {
+        if (meas_is_utc(meas_labels[i]) && !link->sim.meas_set[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+void a429_link_set_meas(a429_link_t *link, uint16_t label_oct, int sample, float eu)
+{
+    int idx;
+    uint32_t w;
+
+    if (link == 0) {
+        return;
+    }
+    idx = meas_index(label_oct);
+    /* 317, 320, 331 and the clock are not individual measurement slots. */
+    if (idx < 0 || meas_is_utc((uint8_t)label_oct)) {
+        return;
+    }
+    /* Missing or non-finite sample: omit this label. Do not hold the
+     * previous engineering value. Pressure must be positive. True
+     * airspeed must not be negative. */
+    if (sample == 0 || !a429_link_finite(eu) ||
+        (label_oct == 0312 && !(eu > 0.0f)) ||
+        (label_oct == 0316 && eu < 0.0f) ||
+        !a429_encode_bnr((uint8_t)label_oct, link->expected_sdi, A429_SM_NORMAL, eu, &w)) {
+        meas_clear_one(link, idx);
+        return;
+    }
+    link->sim.meas_set[idx] = 1;
+    link->sim.meas_eu[idx] = eu;
+}
+
+void a429_link_set_utc(a429_link_t *link, int sample,
+                       int hour, int minute, int second,
+                       int year, int month, int day)
+{
+    static const uint8_t labels[6] = {0321, 0322, 0323, 0324, 0325, 0326};
+    float eu[6];
+    uint32_t word;
+    int i;
+
+    if (link == 0) {
+        return;
+    }
+    /* One bad field drops the whole clock. 60 is a leap second and is
+     * not stored as 59. */
+    if (sample == 0 ||
+        hour < 0 || hour > 23 ||
+        minute < 0 || minute > 59 ||
+        second < 0 || second > 59 ||
+        year < 1 || year > 32767 ||
+        month < 1 || month > 12 ||
+        day < 1 || day > 31) {
+        meas_clear_utc(link);
+        return;
+    }
+    eu[0] = (float)hour;
+    eu[1] = (float)minute;
+    eu[2] = (float)second;
+    eu[3] = (float)year;
+    eu[4] = (float)month;
+    eu[5] = (float)day;
+    for (i = 0; i < 6; i++) {
+        if (!a429_encode_bnr(labels[i], link->expected_sdi, A429_SM_NORMAL, eu[i], &word)) {
+            meas_clear_utc(link);
+            return;
+        }
+    }
+    for (i = 0; i < 6; i++) {
+        int idx = meas_index(labels[i]);
+        if (idx < 0) {
+            meas_clear_utc(link);
+            return;
+        }
+        link->sim.meas_set[idx] = 1;
+        link->sim.meas_eu[idx] = eu[i];
+    }
+}
+
 int a429_sim_set_pcmd(a429_link_t *link, uint8_t index, const a429_pcmd_levels_t *levels)
 {
     if (link == 0 || levels == 0 || index >= A429_PCMD_N) {
@@ -362,6 +484,7 @@ uint8_t a429_link_build_tx(a429_link_t *link, uint32_t *words, uint8_t max_n)
         return 0;
     }
     link->last_tx_count = 0;
+    memset(link->last_tx, 0, sizeof(link->last_tx));
     if (words == 0 || max_n == 0) {
         return 0;
     }
@@ -381,6 +504,25 @@ uint8_t a429_link_build_tx(a429_link_t *link, uint32_t *words, uint8_t max_n)
             words[n++] = w;
         } else {
             link->tx_rejected++;
+        }
+    }
+    /* Air-data, then the six clock labels. The clock is all six or none.
+     * 317, 320 and 331 are not in meas_labels. */
+    {
+        const int utc_ready = meas_utc_ready(link);
+        for (i = 0; i < A429_MEAS_N; i++) {
+            if (!link->sim.meas_set[i]) {
+                continue;
+            }
+            if (meas_is_utc(meas_labels[i]) && !utc_ready) {
+                continue;
+            }
+            if (a429_encode_bnr(meas_labels[i], link->expected_sdi, A429_SM_NORMAL,
+                                link->sim.meas_eu[i], &w) && n < max_n) {
+                words[n++] = w;
+            } else {
+                link->tx_rejected++;
+            }
         }
     }
     for (i = 0; i < A429_PCMD_N; i++) {

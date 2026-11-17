@@ -20,6 +20,10 @@
 #include <AP_Notify/AP_Notify.h>
 #include <AP_RPM/AP_RPM_config.h>
 #include <AP_Motors/AP_Motors_config.h>
+#include <AP_Baro/AP_Baro_config.h>
+#include <AP_AHRS/AP_AHRS_config.h>
+#include <AP_GPS/AP_GPS_config.h>
+#include <AP_RTC/AP_RTC_config.h>
 #include <RC_Channel/RC_Channel.h>
 #include <cstdio>
 #include <cstring>
@@ -30,6 +34,19 @@
 #endif
 #if AP_MOTORS_ENABLED
 #include <AP_Motors/AP_Motors_Class.h>
+#endif
+#if AP_BARO_ENABLED
+#include <AP_Baro/AP_Baro.h>
+#endif
+#if AP_AHRS_ENABLED
+#include <AP_AHRS/AP_AHRS.h>
+#endif
+#if AP_GPS_ENABLED
+#include <AP_GPS/AP_GPS.h>
+#include <AP_Common/time.h>
+#endif
+#if AP_RTC_ENABLED
+#include <AP_RTC/AP_RTC.h>
 #endif
 
 #if AP_NETWORKING_ENABLED
@@ -43,7 +60,7 @@ AP_ARINC429 *AP_ARINC429::_singleton;
 const AP_Param::GroupInfo AP_ARINC429::var_info[] = {
     // @Param: ENABLE
     // @DisplayName: CS35 ARINC429 enable
-    // @Description: Enable the CS35 ARINC429 codec. Default is enabled. Received words are monitoring data. Label 310 carries the helicopter collective as a voltage. Labels 340, 342 and 344 are filled only when A429_ENG_CH selects an RC channel. This does not move motors, servos, or eRob, and it does not claim Ethernet.
+    // @Description: Enable the CS35 ARINC429 codec. Default is enabled. Received words are monitoring data. Label 310 carries the helicopter collective as a voltage. Labels 312, 313, 314 and 316 carry baro pressure, baro temperature, absolute altitude and true airspeed when those samples are valid. Labels 321 to 326 carry UTC from GPS or the RTC. Labels 317, 320 and 331 are not sent. Labels 340, 342 and 344 are filled only when A429_ENG_CH selects an RC channel. This does not move motors, servos, or eRob, and it does not claim Ethernet.
     // @Values: 0:Disabled,1:Enabled
     // @User: Advanced
     AP_GROUPINFO_FLAGS("ENABLE", 0, AP_ARINC429, _enable, 1, AP_PARAM_FLAG_ENABLE),
@@ -503,6 +520,190 @@ void AP_ARINC429::publish_collective(void)
                              _clp_v0.get(), _clp_v100.get());
 }
 
+bool AP_ARINC429::read_pressure_kpa(float &kpa) const
+{
+#if AP_BARO_ENABLED
+    const AP_Baro &baro = AP::baro();
+    if (baro.healthy()) {
+        /* AP_Baro pressure is Pascal. Appendix B 312 is kPa at 0.01. */
+        const float value = baro.get_pressure() / 1000.0f;
+        if (isfinite(value) && is_positive(value)) {
+            kpa = value;
+            return true;
+        }
+    }
+#else
+    (void)kpa;
+#endif
+    return false;
+}
+
+bool AP_ARINC429::read_temperature_c(float &degc) const
+{
+#if AP_BARO_ENABLED
+    const AP_Baro &baro = AP::baro();
+    /* Primary barometer temperature. Not the clamped external-temperature
+     * fallback used when no air-data probe has reported. */
+    if (baro.healthy()) {
+        const float value = baro.get_temperature();
+        if (isfinite(value)) {
+            degc = value;
+            return true;
+        }
+    }
+#else
+    (void)degc;
+#endif
+    return false;
+}
+
+bool AP_ARINC429::read_altitude_amsl_m(float &alt_m) const
+{
+#if AP_AHRS_ENABLED
+    AP_AHRS &ahrs = AP::ahrs();
+    Location loc;
+    float ahrs_amsl = 0.0f;
+    /* AHRS location altitude is absolute AMSL when this succeeds.
+     * get_alt_m(ABSOLUTE) does not return HAGL or height above home. */
+    if (ahrs.healthy() && ahrs.get_location(loc) &&
+        loc.get_alt_m(Location::AltFrame::ABSOLUTE, ahrs_amsl) &&
+        isfinite(ahrs_amsl)) {
+        alt_m = ahrs_amsl;
+        return true;
+    }
+#endif
+#if AP_BARO_ENABLED
+    {
+        const AP_Baro &baro = AP::baro();
+        if (baro.healthy()) {
+            const float rel = baro.get_altitude();
+            const float baro_amsl = baro.get_altitude_AMSL();
+            /* get_altitude() is height above the calibration point.
+             * get_altitude_AMSL() adds field elevation. With no field
+             * elevation the two match, and that relative height is not
+             * sent as AMSL. */
+            if (isfinite(rel) && isfinite(baro_amsl) && !is_zero(baro_amsl - rel)) {
+                alt_m = baro_amsl;
+                return true;
+            }
+        }
+    }
+#endif
+#if AP_GPS_ENABLED
+    {
+        const AP_GPS &gps = AP::gps();
+        float gps_amsl = 0.0f;
+        if (gps.status() >= AP_GPS_FixType::FIX_3D &&
+            gps.location().get_alt_m(Location::AltFrame::ABSOLUTE, gps_amsl) &&
+            isfinite(gps_amsl)) {
+            alt_m = gps_amsl;
+            return true;
+        }
+    }
+#endif
+#if !AP_AHRS_ENABLED && !AP_BARO_ENABLED && !AP_GPS_ENABLED
+    (void)alt_m;
+#endif
+    return false;
+}
+
+bool AP_ARINC429::read_tas_mps(float &tas) const
+{
+#if AP_AHRS_ENABLED
+    AP_AHRS &ahrs = AP::ahrs();
+    float value = 0.0f;
+    /* Sensor true airspeed only. A synthetic estimate is built from
+     * groundspeed and is not label 316. No airspeed sensor leaves 316 clear. */
+    if (ahrs.using_airspeed_sensor() && ahrs.airspeed_TAS(value) &&
+        isfinite(value) && value >= 0.0f) {
+        tas = value;
+        return true;
+    }
+#else
+    (void)tas;
+#endif
+    return false;
+}
+
+bool AP_ARINC429::read_utc_ymdhms(int &hour, int &minute, int &second,
+                                  int &year, int &month, int &day) const
+{
+#if AP_GPS_ENABLED
+    const uint64_t usec = AP::gps().time_epoch_usec();
+    /* time_epoch_usec is 0 until the GPS has a week, which is its date. */
+    if (usec != 0) {
+        const uint64_t sec64 = usec / 1000000ULL;
+        struct tm tmd;
+        if (sec64 <= 0x7FFFFFFFULL) {
+            time_t sec = (time_t)sec64;
+            if (gmtime_r(&sec, &tmd) != nullptr) {
+                /* gmtime_r is UTC. tm_mon is 0..11; appendix B month is 1..12.
+                 * No timezone offset is applied. */
+                hour = tmd.tm_hour;
+                minute = tmd.tm_min;
+                second = tmd.tm_sec;
+                year = tmd.tm_year + 1900;
+                month = tmd.tm_mon + 1;
+                day = tmd.tm_mday;
+                return true;
+            }
+        }
+    }
+#endif
+#if AP_RTC_ENABLED
+    {
+        uint16_t y = 0;
+        uint8_t mo = 0;
+        uint8_t d = 0;
+        uint8_t h = 0;
+        uint8_t mi = 0;
+        uint8_t s = 0;
+        uint16_t ms = 0;
+        if (AP::rtc().get_date_and_time_utc(y, mo, d, h, mi, s, ms)) {
+            /* Month from AP_RTC is 0..11. The clock is UTC, not local. */
+            hour = h;
+            minute = mi;
+            second = s;
+            year = y;
+            month = (int)mo + 1;
+            day = d;
+            return true;
+        }
+    }
+#endif
+    (void)hour;
+    (void)minute;
+    (void)second;
+    (void)year;
+    (void)month;
+    (void)day;
+    return false;
+}
+
+void AP_ARINC429::publish_airdata(void)
+{
+    float value = 0.0f;
+    int hour = 0;
+    int minute = 0;
+    int second = 0;
+    int year = 0;
+    int month = 0;
+    int day = 0;
+    bool sample;
+
+    sample = read_pressure_kpa(value);
+    a429_link_set_meas(&_core.link, 0312, sample ? 1 : 0, value);
+    sample = read_temperature_c(value);
+    a429_link_set_meas(&_core.link, 0313, sample ? 1 : 0, value);
+    sample = read_altitude_amsl_m(value);
+    a429_link_set_meas(&_core.link, 0314, sample ? 1 : 0, value);
+    sample = read_tas_mps(value);
+    a429_link_set_meas(&_core.link, 0316, sample ? 1 : 0, value);
+    sample = read_utc_ymdhms(hour, minute, second, year, month, day);
+    a429_link_set_utc(&_core.link, sample ? 1 : 0,
+                      hour, minute, second, year, month, day);
+}
+
 void AP_ARINC429::command_engine_mode(void)
 {
     a429_mode_in_t in;
@@ -596,12 +797,16 @@ void AP_ARINC429::update(void)
     command_engine_mode();
     publish_measured_nr();
     publish_collective();
+    publish_airdata();
     /*
-     * Scheduling and byte-pipe maintenance. Label 310 is the heli
-     * collective in volts. Label 311 is measured Nr. The three command
-     * words are not copied into motors, servos, EFI, or eRob.
-     * Unconfigured framing sends no bytes, and no CD rate command is
-     * generated.
+     * Scheduling and byte-pipe maintenance. One 12.5 ms slot carries
+     * every FC word that has a sample, so label 310 stays at 80 Hz.
+     * Label 310 is the heli collective in volts. Label 311 is measured
+     * Nr. Labels 312, 313, 314 and 316 are the air-data samples.
+     * Labels 321..326 are UTC. Labels 317, 320 and 331 are not sent.
+     * The three command words are not copied into motors, servos, EFI,
+     * or eRob. Unconfigured framing sends no bytes, and no CD rate
+     * command is generated.
      */
     a429_core_update(&_core, AP_HAL::micros());
 }

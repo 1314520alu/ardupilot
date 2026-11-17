@@ -4,8 +4,14 @@ Flight-controller side of appendix B from the CS35 engine electrical ICD.
 The codec builds and inspects 32-bit logical words. It does not move a
 servo, a motor, or an eRob swash. When enabled, label 310 carries the
 helicopter collective output as a voltage, and label 311 carries
-measured rotor speed from `AP_RPM`. When `A429_ENG_CH` selects an RC
-channel it fills labels 340, 342 and 344 with the engine mode. A TCP
+measured rotor speed from `AP_RPM`. Labels 312, 313, 314 and 316 carry
+ambient pressure, barometer temperature, absolute altitude and sensor
+true airspeed when those samples are valid. Labels 321 through 326
+carry UTC from GPS or the RTC, all six together or not at all. Labels
+317, 320 and 331 stay unsent: this flight controller has no oil
+pressure, oil temperature, or accessory discrete inputs. When
+`A429_ENG_CH` selects an RC channel it fills labels 340, 342 and 344
+with the engine mode. A TCP
 client can carry bytes to an EBYTE NT1-M. `A429_FRAME` defaults to 2,
 so those bytes use the RS422-429-1C frame: `C0` plus four little-endian
 bytes, with only the label byte bit-reversed. `A429_FRAME=0` leaves the
@@ -23,7 +29,7 @@ unchanged. `AP_EROB_CANOPEN_ENABLED` stays set on ZeroOneX6.
 | 12.5 ms FC transmit schedule | Host-tested. `AP_ARINC429::update()` polls it with `AP_HAL::micros()`. |
 | Per-label freshness timeout | Host-tested. Default is off. A non-normal SM or a parity error clears the getter immediately. 24 ms is the ECU's nominal refresh, not the timeout. |
 | Command-word levels and rising-edge detector | Host-tested. Levels are not edges. |
-| Simulation inject / simulation transmit snapshot | In the library. `A429_ENG_CH` 0 leaves 340, 342 and 344 alone. A non-zero channel overwrites only 340, 342 and 344. Enabled `update()` writes or clears 310 from the heli collective and 311 from measured Nr. |
+| Simulation inject / simulation transmit snapshot | In the library. `A429_ENG_CH` 0 leaves 340, 342 and 344 alone. A non-zero channel overwrites only 340, 342 and 344. Enabled `update()` writes or clears 310 from the heli collective, 311 from measured Nr, and 312, 313, 314, 316 and 321..326 from the air-data and clock samples below. |
 | NT1-M TCP client byte pipe | Implemented on the existing `AP_Networking` lwIP stack. Host-tested against a scripted pipe and a local mock TCP server. Not a physical NT1-M. |
 | UART429-S `C0` framing | Provisional (`A429_FRAME=1`), not the default. Sends the codec logical word. Does not bit-reverse the label and does not send a `CD` rate command. |
 | RS422-429-1C wire profile | Default (`A429_FRAME=2`). Page 3 `C0` plus four little-endian bytes. Page 4 reverses only the label byte. Host-tested. Not a test of the NT1-M or of the internal TTL board. |
@@ -126,6 +132,16 @@ the snapshot, or the engine-mode owner when `A429_ENG_CH` is 1..16:
 | --- | --- | --- | --- | --- |
 | 310 | CLP | BNR | 0.01 V | none stated |
 | 311 | Nr | BNR | 0.01 % | none stated |
+| 312 | P0 | BNR | 0.01 kPa | none stated. Sent only from a healthy, finite, positive baro pressure |
+| 313 | T0 | BNR | 0.1 °C | none stated. Sent only from a healthy, finite baro temperature |
+| 314 | H | BNR | 1 m | none stated. Absolute AMSL, not AGL |
+| 316 | TAS | BNR | 0.1 m/s | none stated. Sensor true airspeed only |
+| 321 | Hour | BNR | 1 | 0 .. 23. Sent only with 322..326 |
+| 322 | Minute | BNR | 1 | 0 .. 59 |
+| 323 | Second | BNR | 1 | 0 .. 59 |
+| 324 | Year | BNR | 1 | Gregorian year, for example 2026 |
+| 325 | Month | BNR | 1 | 1 .. 12 |
+| 326 | Day | BNR | 1 | 1 .. 31. The appendix name is "Data" (date) |
 | 340 | PCMD1 | discrete | table B.17 | command levels |
 | 342 | PCMD2 | discrete | table B.17 | same layout as 340 |
 | 344 | PCMD3 | discrete | table B.17 | same layout as 340 |
@@ -151,19 +167,9 @@ Labels that are in the appendix and are not phase-one channels:
 | 173 | ECUFlt1 | ECU to FC | discrete |
 | 174 | ECUFlt2 | ECU to FC | discrete, includes 429/1553 fault bits in the appendix note |
 | 200 .. 220 | LIFE | ECU to FC | life / timer words. The span is recorded. Individual meanings are not. |
-| 312 | P0 | FC to ECU | BNR 0.01 kPa, no range stated |
-| 313 | T0 | FC to ECU | BNR 0.1 °C |
-| 314 | H | FC to ECU | BNR 1 m |
-| 316 | TAS | FC to ECU | BNR 0.1 m/s |
-| 317 | Pm | FC to ECU | BNR 0.0001 MPa |
-| 320 | Tm | FC to ECU | BNR 0.1 °C |
-| 321 | Hour | FC to ECU | resolution 1 |
-| 322 | Minute | FC to ECU | resolution 1 |
-| 323 | Second | FC to ECU | resolution 1 |
-| 324 | Year | FC to ECU | resolution 1 |
-| 325 | Month | FC to ECU | resolution 1 |
-| 326 | Day | FC to ECU | resolution 1. The appendix name is "Data" (date). |
-| 331 | State331 | FC to ECU | discrete. See table B.16 below. Not decoded. |
+| 317 | Pm | FC to ECU | BNR 0.0001 MPa. Not sent. No oil-pressure sensor on this flight controller. |
+| 320 | Tm | FC to ECU | BNR 0.1 °C. Not sent. No oil-temperature sensor. |
+| 331 | State331 | FC to ECU | discrete. See table B.16 below. Not sent and not packed. |
 
 Ingesting a non-phase-one label increments `rx_untracked` and stores that
 raw word. It does not refresh Ng, Np, T45, torque, or the warn words.
@@ -205,10 +211,13 @@ channel-switch stay 0, because those bits are rising-edge commands and
 must not be held at 1. Rotor brake stays 0. The on-ground bit is 1 when
 `AP_Notify::flags.flying` is false.
 
-### Table B.16 (label 331, not implemented)
+### Table B.16 (label 331, not sent)
 
 Recorded from the appendix image so the bits are not dropped. The codec
-does not name these fields.
+does not pack this word. Labels 317 and 320 are the same kind of
+engine-accessory measurement and are not encoded either. A zero or a
+parameter is not substituted for a sensor this flight controller does
+not have.
 
 | Bit | Description | Note |
 | --- | --- | --- |
@@ -229,7 +238,12 @@ bit names.
 
 FC to ECU uses a single period of 12500 microseconds from a monotonic
 `uint32` microsecond clock. The first poll only arms the next deadline.
-Each later poll emits at most one slot.
+Each later poll emits at most one slot. That slot contains every FC
+word that currently has a sample (310, 311, 312, 313, 314, 316,
+321..326, and 340/342/344 when those are published). It does not rotate
+one label per tick, so label 310 stays in every period while its
+collective sample is valid. `A429_TX_MAX` is 16 words. Fifteen is the
+largest set that can be valid together.
 
 * On time, or late by less than one period: the next deadline stays on
   the 12500 microsecond grid.
@@ -305,7 +319,7 @@ from the clock after `open` returns, and that read is not done while the
 state lock is held. A connect that drops without a completed slot keeps
 the grown wait. One attempt is started per poll.
 
-The TX hold is 32 bytes, one slot. A new slot is dropped while that hold
+The TX hold is 80 bytes, one slot (16 words at 5 bytes each). A new slot is dropped while that hold
 is unfinished. If `send()` has not finished the slot within 50 ms, the
 slot is abandoned. When `send()` has accepted no bytes, the slot is
 dropped and the connection stays up. When `send()` has already accepted a
@@ -468,8 +482,10 @@ overwriting the command snapshot. The three command words are cleared
 only if this logic had taken them over. That release does not clear CLP
 or Nr. Labels 310 and 311 are not part of that snapshot rule: while
 `A429_ENABLE` is 1, `update()` writes or clears both from the current
-sample on every pass, including when `A429_ENG_CH` is 0. A missing
-collective clears 310 and does not change 311 or the command words.
+sample on every pass, including when `A429_ENG_CH` is 0. The same pass
+writes or clears 312, 313, 314, 316 and 321..326. A missing
+collective clears 310 and does not change 311, the air-data words, or
+the command words.
 
 ## Collective voltage, label 310
 
@@ -495,7 +511,25 @@ odd parity, SDI from `A429_SDI`. It is not a percent and not blade
 degrees. Label 153 is the ECU echo and is a different word; its
 airframe percent range is not applied here. A voltage that does not fit
 the signed 16-bit field is omitted. The word rides the existing 12.5 ms
-FC-to-ECU slot.
+FC-to-ECU slot, in the same burst as the other valid FC words.
+
+## Air data and UTC, labels 312, 313, 314, 316 and 321..326
+
+`update()` publishes these from sensors the vehicle already has.
+A sample that is missing, not finite, or outside the BNR field clears
+that label on the same pass. The previous value is not held.
+
+| Label | Source | When it is sent |
+| --- | --- | --- |
+| 312 P0 | `AP_Baro::get_pressure()`, kPa = Pa / 1000 | Barometer healthy, value finite and positive. Resolution 0.01 kPa, denominator 100. |
+| 313 T0 | `AP_Baro::get_temperature()` in °C | Barometer healthy and the temperature finite. This is the primary barometer temperature, not the clamped external-temperature fallback. Resolution 0.1 °C, denominator 10. |
+| 314 H | Absolute altitude AMSL, metres | AHRS healthy and `get_location()` yields a finite absolute altitude. Otherwise baro `get_altitude_AMSL()` when the barometer is healthy and a field elevation makes that value differ from the relative calibration height. Otherwise GPS altitude when the fix is 3D or better and the location altitude is absolute and finite. Relative-to-home height, HAGL, and a baro height with no field elevation are not sent as AMSL. Resolution 1 m, denominator 1. |
+| 316 TAS | `AP_AHRS::airspeed_TAS()` in m/s | Only while `using_airspeed_sensor()` is true and the value is finite and not negative. A bench with no airspeed sensor sends nothing. A synthetic airspeed built from groundspeed is not used. Resolution 0.1 m/s, denominator 10. |
+| 321..326 | UTC hour, minute, second, year, month, day | GPS date when `AP_GPS::time_epoch_usec()` is non-zero, otherwise `AP_RTC::get_date_and_time_utc()` when the RTC has been set. Both are UTC. No timezone conversion is applied. RTC and `gmtime_r` month 0..11 is stored as 1..12. All six labels are sent together. If either source is missing, or any field is outside 0..23 / 0..59 / 0..59 / 1..12 / 1..31, none of the six is sent. A leap second of 60 clears the set instead of being rewritten to 59. Year is the full Gregorian year. |
+
+Labels 317 (oil pressure, MPa, denominator 10000), 320 (oil
+temperature, °C, denominator 10) and 331 (table B.16 discrete) are
+not transmitted.
 
 ## Vehicle hook
 
@@ -508,8 +542,11 @@ FC-to-ECU slot.
 * The scheduler calls `update()` at 400 Hz.
 * `update()` fills 310 from the heli collective and 311 from the selected
   `AP_RPM` instance on every enabled pass, including when `A429_ENG_CH`
-  is 0. It fills 340, 342 and 344 only while `A429_ENABLE` is 1 and
-  `A429_ENG_CH` is 1..16. It does not write motors, servos, EFI, or eRob.
+  is 0. On that same pass it fills or clears 312, 313, 314, 316 and
+  321..326 from the air-data and clock sources above. It fills 340, 342
+  and 344 only while `A429_ENABLE` is 1 and `A429_ENG_CH` is 1..16.
+  It does not write motors, servos, EFI, or eRob, and it does not send
+  317, 320 or 331.
 
 The compile flag is set on the ZeroOne X6 and ZeroOne X9 hwdefs.
 Other boards keep `AP_ARINC429_ENABLED` at 0, so their images do not gain
@@ -534,7 +571,11 @@ parity, and clears the word when the sample is missing or `A429_NR_REF`
 is 0. Collective checks label 310 at 0.01 V: 0 percent is 1.00 V, 100
 percent is 9.00 V, 50 percent is 5.00 V, values outside 0 to 100 percent
 clamp to those endpoints, and a missing or non-finite collective clears
-the word without holding the previous voltage. Invalid SM values and a
+the word without holding the previous voltage. Air-data checks encode
+and clear 312, 313, 314, 316 and 321..326, refuse 317, 320 and 331, and
+build one slot that still starts with 310 when every other valid FC
+word is present. Two on-time 12.5 ms polls each include 310, and the
+same tick does not send a second slot. Invalid SM values and a
 parity error clear freshness while leaving the last normal sample in
 `last_valid`. The NT1-M tests add a scripted byte pipe
 and a local TCP server: invalid peer, a zero octet inside a real address,

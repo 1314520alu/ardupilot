@@ -23,8 +23,12 @@
  * CS35 ARINC429 codec on the flight-controller side.
  * Received words are monitoring data. Label 310 is the helicopter
  * collective output converted to volts. Label 311 is measured rotor speed
- * from AP_RPM when A429_NR_REF is a positive scale. Labels 340/342/344
- * are filled from the pilot engine switch when A429_ENG_CH is 1..16.
+ * from AP_RPM when A429_NR_REF is a positive scale. Labels 312, 313, 314
+ * and 316 are ambient pressure, baro temperature, absolute altitude and
+ * sensor true airspeed when those samples are valid. Labels 321..326 are
+ * UTC from GPS or the RTC, all six together. Labels 317, 320 and 331 are
+ * not sent. Labels 340/342/344 are filled from the pilot engine switch
+ * when A429_ENG_CH is 1..16.
  * Those words do not move a motor, a servo, or eRob, and this class does
  * not claim Ethernet.
  */
@@ -65,8 +69,15 @@ private:
     void command_engine_mode(void);
     void publish_measured_nr(void);
     void publish_collective(void);
+    void publish_airdata(void);
     bool read_measured_nr(float &rpm) const;
     bool read_collective_pct(float &pct) const;
+    bool read_pressure_kpa(float &kpa) const;
+    bool read_temperature_c(float &degc) const;
+    bool read_altitude_amsl_m(float &alt_m) const;
+    bool read_tas_mps(float &tas) const;
+    bool read_utc_ymdhms(int &hour, int &minute, int &second,
+                         int &year, int &month, int &day) const;
 #if AP_NETWORKING_ENABLED
     void tcp_worker(void);
     static int tcp_stream_open(void *ctx, uint32_t ipv4_host, uint16_t port);
