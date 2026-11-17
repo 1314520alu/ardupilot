@@ -1,12 +1,15 @@
 #include <AP_gtest.h>
 #include <AP_HAL/AP_HAL.h>
 
+#include "../AP_ARINC429_config.h"
+
 /*
  * The SITL gtest repeats the host suite. The codec sources are compiled
- * into this test. Vehicle firmware includes them only when
- * AP_ARINC429_ENABLED is 1, which SITL leaves at 0, so the symbols
- * are not duplicated in the usual SITL link.
+ * into this test when the vehicle leaves AP_ARINC429_ENABLED at 0.
+ * A SITL build that turns the feature on already links those objects,
+ * so including them again would duplicate the symbols.
  */
+#if !AP_ARINC429_ENABLED
 extern "C" {
 #include "../src/arinc429_catalog.c"
 #include "../src/arinc429_word.c"
@@ -17,10 +20,15 @@ extern "C" {
 #include "../src/arinc429_transport.c"
 #include "../src/arinc429_mode.c"
 }
+#endif
+/* The host suite compares exact engineering values. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wfloat-equal"
 #include "../host/test_nt1m.c"
 
 #define A429_NO_MAIN 1
 #include "../host/test_arinc429.c"
+#pragma GCC diagnostic pop
 
 const AP_HAL::HAL &hal = AP_HAL::get_HAL();
 

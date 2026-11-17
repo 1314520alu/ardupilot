@@ -26,6 +26,17 @@
 #define A429_TX_MAX 16
 /* 312, 313, 314, 316 and 321..326. Not 317, 320 or 331. */
 #define A429_MEAS_N 10
+/* Bench set the NT1-M actually emits, in pack order for the 1 Hz counts. */
+#define A429_MON_N 14
+#define A429_WORDQ 32u
+
+/* Bits stored with a logged word. */
+#define A429_WQ_PARITY 0x01u
+#define A429_WQ_EU 0x02u
+#define A429_WQ_DISC 0x04u
+#define A429_WQ_FRESH 0x08u
+#define A429_WQ_RSV 0x10u
+#define A429_WQ_SDI 0x20u
 
 /* AuxSwitchPos HIGH is PWM above this. 1800 itself is middle. */
 #define A429_ENG_PWM_HIGH 1800u
@@ -156,7 +167,48 @@ typedef struct {
     uint32_t sm_ft;
     uint32_t sm_normal;
     uint32_t range_errors;
+    /* Reserved, SDI, unknown label, or a normal BNR outside its range.
+     * Parity failures stay in parity_errors and are not counted again here. */
+    uint32_t decode_errors;
 } a429_counters_t;
+
+typedef struct {
+    uint32_t time_us;
+    uint32_t raw;
+    float eu;
+    int16_t data;
+    uint8_t label;
+    uint8_t flags;
+} a429_wordq_item_t;
+
+typedef struct {
+    uint8_t started;
+    uint32_t win_start_us;
+    uint32_t parity_mark;
+    uint32_t decode_mark;
+    uint16_t count_win[A429_MON_N];
+    uint16_t count_1s[A429_MON_N];
+    uint32_t bytes_total;
+    uint32_t frames_total;
+    uint32_t bytes_win;
+    uint32_t frames_win;
+    uint32_t bytes_1s;
+    uint32_t frames_1s;
+    uint32_t parity_1s;
+    uint32_t decode_1s;
+    uint8_t have[A429_MON_N];
+    uint8_t eu_valid[A429_MON_N];
+    uint8_t disc_valid[A429_MON_N];
+    uint8_t struct_ok[A429_MON_N];
+    float eu[A429_MON_N];
+    int16_t data[A429_MON_N];
+    uint32_t raw[A429_MON_N];
+    uint32_t rx_us[A429_MON_N];
+    a429_wordq_item_t q[A429_WORDQ];
+    uint8_t q_head;
+    uint8_t q_count;
+    uint32_t q_drop;
+} a429_stats_t;
 
 typedef struct {
     uint32_t raw;
@@ -207,7 +259,36 @@ typedef struct {
     uint32_t tx_rejected;
     uint8_t last_tx_count;
     uint32_t last_tx[A429_TX_MAX];
+    a429_stats_t stats;
 } a429_link_t;
+
+typedef struct {
+    uint16_t label_oct;
+    uint16_t label_disp;
+    uint16_t count_1s;
+    uint8_t have;
+    uint8_t eu_valid;
+    uint8_t disc_valid;
+    uint8_t struct_ok;
+    uint8_t fresh;
+    uint8_t timed_out;
+    float eu;
+    int16_t data;
+    uint32_t raw;
+    uint32_t rx_us;
+} a429_mon_view_t;
+
+typedef struct {
+    uint32_t bytes_total;
+    uint32_t frames_total;
+    uint32_t bytes_1s;
+    uint32_t frames_1s;
+    uint32_t parity_errors;
+    uint32_t decode_errors;
+    uint32_t parity_1s;
+    uint32_t decode_1s;
+    uint32_t q_drop;
+} a429_stats_view_t;
 
 typedef struct {
     uint8_t started;

@@ -151,10 +151,12 @@ void a429_core_update(a429_core_t *core, uint32_t now_us)
             if (gotb == 0) {
                 break;
             }
+            a429_link_note_bytes(&core->link, gotb, now_us);
             if (a429_frame_profile_active(core->frame_profile)) {
                 uint32_t words[8];
                 uint8_t nw = a429_frame_push(&core->frame_dec, raw, gotb, words, 8);
                 uint8_t wi;
+                a429_link_note_frames(&core->link, nw, now_us);
                 for (wi = 0; wi < nw; wi++) {
                     a429_link_ingest(&core->link, words[wi], now_us);
                 }
@@ -168,11 +170,15 @@ void a429_core_update(a429_core_t *core, uint32_t now_us)
         if (got > 8) {
             got = 8;
         }
+        if (got > 0) {
+            a429_link_note_frames(&core->link, (uint32_t)got, now_us);
+        }
         for (i = 0; i < got; i++) {
             a429_link_ingest(&core->link, rx[i], now_us);
         }
     }
     a429_link_poll_timeouts(&core->link, now_us);
+    a429_link_poll_stats(&core->link, now_us);
 }
 
 void a429_core_inject_rx(a429_core_t *core, uint32_t raw, uint32_t now_us)

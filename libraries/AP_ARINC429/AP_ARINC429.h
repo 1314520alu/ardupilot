@@ -70,6 +70,12 @@ private:
     void publish_measured_nr(void);
     void publish_collective(void);
     void publish_airdata(void);
+    void log_rx_words(void);
+    void log_stats(uint32_t now_us);
+    void publish_telemetry(uint32_t now_us);
+    void note_freshness(uint32_t now_ms);
+    uint8_t tlm_hz(void) const;
+    void send_slow(uint8_t step);
     bool read_measured_nr(float &rpm) const;
     bool read_collective_pct(float &pct) const;
     bool read_pressure_kpa(float &kpa) const;
@@ -115,10 +121,19 @@ private:
     AP_Float _runup;
     AP_Float _clp_v0;
     AP_Float _clp_v100;
+    AP_Int8 _tlm_hz;
 
     a429_core_t _core;
     a429_mode_state_t _mode_state;
     bool _inited;
+    uint32_t _tlm_fast_us;
+    uint32_t _tlm_slow_us;
+    uint32_t _stat_log_us;
+    uint8_t _tlm_slow_i;
+    uint8_t _tlm_slow_on;
+    uint8_t _fresh_seen[A429_RX_N];
+    uint8_t _fresh_down[A429_RX_N];
+    uint32_t _fresh_ms[A429_RX_N];
 
     static AP_ARINC429 *_singleton;
 };
