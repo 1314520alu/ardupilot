@@ -1572,6 +1572,161 @@ static void test_rx_window_and_stale(void)
     expect_true(link.rx_untracked == 2u, "an unknown label stays untracked");
 }
 
+static const a429_tx_tlm_t *tlm_by_name(const a429_tx_tlm_t *rows, uint8_t n, const char *name)
+{
+    uint8_t i;
+
+    for (i = 0; i < n; i++) {
+        if (rows[i].name != 0 && strcmp(rows[i].name, name) == 0) {
+            return &rows[i];
+        }
+    }
+    return 0;
+}
+
+static void test_tx_telemetry(void)
+{
+    static const char *const full_names[A429_TX_TLM_N] = {
+        "A4XCLP", "A4XNR", "A4XP0", "A4XT0", "A4XH", "A4XTAS",
+        "A4XHR", "A4XMN", "A4XSC", "A4XYR", "A4XMO", "A4XDY",
+        "A4X340", "A4X342", "A4X344"
+    };
+    static const char *const fast_names[] = {
+        "A4XCLP", "A4XNR", "A4X340", "A4X342", "A4X344"
+    };
+    a429_link_t link;
+    a429_tx_tlm_t rows[A429_TX_TLM_N];
+    a429_pcmd_levels_t levels;
+    const a429_tx_tlm_t *row = 0;
+    uint8_t n;
+    uint8_t i;
+
+    expect_true(A429_TX_TLM_N == 15u && A429_TX_TLM_FAST_N == 5u && A429_TX_TLM_SLOW_N == 10u,
+                "fifteen FC names, five fast and ten slow");
+    a429_link_init(&link);
+    expect_true(a429_tx_telemetry(0, rows, A429_TX_TLM_N) == 0, "a null link publishes nothing");
+    expect_true(a429_tx_telemetry(&link, 0, A429_TX_TLM_N) == 0, "a null output publishes nothing");
+    n = a429_tx_telemetry(&link, rows, A429_TX_TLM_N);
+    expect_true(n == 0, "an empty transmit set publishes no FC names");
+
+    a429_link_set_collective(&link, 1, 50.0f, 1.0f, 9.0f);
+    n = a429_tx_telemetry(&link, rows, A429_TX_TLM_N);
+    expect_true(n == 0, "a collective snapshot is not named until the slot is built");
+    build_tx_all(&link);
+    n = a429_tx_telemetry(&link, rows, A429_TX_TLM_N);
+    row = tlm_by_name(rows, n, "A4XCLP");
+    expect_true(n == 1 && row != 0 && row->fast == 1 && row->is_int == 0 && row->eu == 5.0f,
+                "A4XCLP is 5.00 V from the wire word");
+    expect_true(tlm_by_name(rows, n, "A4XNR") == 0, "311 is absent when Nr was not published");
+    expect_true(tlm_by_name(rows, n, "A4CLP") == 0, "A4XCLP does not reuse the ECU A4CLP name");
+
+    /* Clearing the snapshot drops the name before the next slot rebuilds last_tx. */
+    a429_link_set_collective(&link, 0, 50.0f, 1.0f, 9.0f);
+    expect_true(tx_label_index(&link, 0310) == 0, "last_tx still holds the previous 310 word");
+    n = a429_tx_telemetry(&link, rows, A429_TX_TLM_N);
+    expect_true(n == 0 && tlm_by_name(rows, n, "A4XCLP") == 0,
+                "clearing 310 drops A4XCLP before the next slot");
+    build_tx_all(&link);
+    n = a429_tx_telemetry(&link, rows, A429_TX_TLM_N);
+    expect_true(n == 0 && tx_label_index(&link, 0310) < 0, "the rebuilt slot also omits A4XCLP");
+
+    a429_link_set_collective(&link, 1, 50.0f, 1.0f, 9.0f);
+    n = a429_tx_telemetry(&link, rows, A429_TX_TLM_N);
+    expect_true(n == 0, "restoring 310 is not named until that word is in the slot");
+    build_tx_all(&link);
+
+    a429_link_set_sdi(&link, 2);
+    a429_link_set_collective(&link, 1, 50.0f, 1.0f, 9.0f);
+    a429_link_set_measured_nr(&link, 1, 500.0f, 1000.0f);
+    fill_airdata(&link);
+    memset(&levels, 0, sizeof(levels));
+    levels.mode = A429_MODE_FLIGHT;
+    levels.on_ground = 1;
+    for (i = 0; i < A429_PCMD_N; i++) {
+        expect_true(a429_sim_set_pcmd(&link, i, &levels) == 1, "command snapshot for telemetry");
+    }
+    build_tx_all(&link);
+    n = a429_tx_telemetry(&link, rows, A429_TX_TLM_N);
+    expect_true(n == A429_TX_TLM_N, "every valid FC word has one name");
+    for (i = 0; i < n; i++) {
+        expect_true(rows[i].name != 0 && strcmp(rows[i].name, full_names[i]) == 0, "FC names stay in label order");
+        expect_true(strlen(rows[i].name) <= 9u, "an FC name fits the 10-byte MAVLink field");
+        expect_true(strcmp(rows[i].name, "A4CLP") != 0 && strcmp(rows[i].name, "A4P0") != 0 &&
+                    strcmp(rows[i].name, "A4NG") != 0, "FC names do not reuse a receive name");
+    }
+    row = tlm_by_name(rows, n, "A4XCLP");
+    expect_true(row != 0 && row->eu == 5.0f && row->fast == 1, "A4XCLP stays 5.00 V with SDI 2");
+    row = tlm_by_name(rows, n, "A4XNR");
+    expect_true(row != 0 && row->eu == 50.0f && row->fast == 1 && row->is_int == 0, "A4XNR is 50.00 percent");
+    row = tlm_by_name(rows, n, "A4XP0");
+    expect_true(row != 0 && row->eu == 101.25f && row->fast == 0 && row->slow_i == 0,
+                "A4XP0 is 101.25 kPa at the first slow step");
+    row = tlm_by_name(rows, n, "A4XT0");
+    expect_true(row != 0 && row->eu == -10.5f && row->slow_i == 1, "A4XT0 is -10.5 C");
+    row = tlm_by_name(rows, n, "A4XH");
+    expect_true(row != 0 && row->eu == 1234.0f && row->slow_i == 2, "A4XH is 1234 m");
+    row = tlm_by_name(rows, n, "A4XTAS");
+    expect_true(row != 0 && row->eu == 12.5f && row->slow_i == 3, "A4XTAS is 12.5 m/s");
+    row = tlm_by_name(rows, n, "A4XHR");
+    expect_true(row != 0 && row->eu == 14.0f && row->slow_i == 4, "A4XHR is hour 14");
+    row = tlm_by_name(rows, n, "A4XMN");
+    expect_true(row != 0 && row->eu == 5.0f && row->slow_i == 5, "A4XMN is minute 5");
+    row = tlm_by_name(rows, n, "A4XSC");
+    expect_true(row != 0 && row->eu == 9.0f && row->slow_i == 6, "A4XSC is second 9");
+    row = tlm_by_name(rows, n, "A4XYR");
+    expect_true(row != 0 && row->eu == 2026.0f && row->slow_i == 7, "A4XYR is year 2026");
+    row = tlm_by_name(rows, n, "A4XMO");
+    expect_true(row != 0 && row->eu == 11.0f && row->slow_i == 8, "A4XMO is month 11");
+    row = tlm_by_name(rows, n, "A4XDY");
+    expect_true(row != 0 && row->eu == 12.0f && row->slow_i == 9, "A4XDY is day 12");
+    row = tlm_by_name(rows, n, "A4X340");
+    expect_true(row != 0 && row->is_int == 1 && row->fast == 1 && row->data == 68,
+                "A4X340 is the flight plus on-ground data field");
+    row = tlm_by_name(rows, n, "A4X342");
+    expect_true(row != 0 && row->data == 68 && row->is_int == 1, "A4X342 matches 340");
+    row = tlm_by_name(rows, n, "A4X344");
+    expect_true(row != 0 && row->data == 68 && row->is_int == 1, "A4X344 matches 340");
+    for (i = 0; i < 5u; i++) {
+        row = tlm_by_name(rows, n, fast_names[i]);
+        expect_true(row != 0 && row->fast == 1, "fast FC names are marked fast");
+    }
+
+    a429_link_set_measured_nr(&link, 0, 500.0f, 1000.0f);
+    expect_true(tx_label_index(&link, 0311) > 0, "last_tx still holds 311 after the clear");
+    n = a429_tx_telemetry(&link, rows, A429_TX_TLM_N);
+    row = tlm_by_name(rows, n, "A4XCLP");
+    expect_true(tlm_by_name(rows, n, "A4XNR") == 0, "clearing 311 drops A4XNR on that cycle");
+    expect_true(row != 0 && row->eu == 5.0f, "clearing 311 leaves A4XCLP");
+
+    a429_link_set_meas(&link, 0316, 0, 12.5f);
+    build_tx_all(&link);
+    n = a429_tx_telemetry(&link, rows, A429_TX_TLM_N);
+    row = tlm_by_name(rows, n, "A4XP0");
+    expect_true(tlm_by_name(rows, n, "A4XTAS") == 0, "a cleared TAS is not published");
+    expect_true(row != 0 && row->eu == 101.25f, "clearing TAS leaves A4XP0");
+    expect_true(tlm_by_name(rows, n, "A4XNR") == 0, "311 stays unpublished after the slot rebuild");
+
+    a429_link_set_utc(&link, 0, 14, 5, 9, 2026, 11, 12);
+    build_tx_all(&link);
+    n = a429_tx_telemetry(&link, rows, A429_TX_TLM_N);
+    row = tlm_by_name(rows, n, "A4XH");
+    expect_true(tlm_by_name(rows, n, "A4XHR") == 0 && tlm_by_name(rows, n, "A4XDY") == 0,
+                "clearing the clock drops all six UTC names");
+    expect_true(row != 0 && row->eu == 1234.0f, "clearing the clock leaves A4XH");
+
+    memset(&levels, 0, sizeof(levels));
+    levels.mode = A429_MODE_IDLE;
+    levels.rotor_brake = 1;
+    a429_sim_clear_pcmd(&link);
+    expect_true(a429_sim_set_pcmd(&link, 0, &levels) == 1, "only PCMD1 is published");
+    build_tx_all(&link);
+    n = a429_tx_telemetry(&link, rows, A429_TX_TLM_N);
+    row = tlm_by_name(rows, n, "A4X340");
+    expect_true(row != 0 && row->data == 35, "A4X340 is idle plus brake, data 35");
+    expect_true(tlm_by_name(rows, n, "A4X342") == 0 && tlm_by_name(rows, n, "A4X344") == 0,
+                "cleared PCMD2 and PCMD3 are not published");
+}
+
 int a429_host_tests(void);
 
 int a429_host_tests(void)
@@ -1591,6 +1746,7 @@ int a429_host_tests(void)
     test_measured_nr();
     test_collective_clp();
     test_fc_airdata();
+    test_tx_telemetry();
     test_rx_window_and_stale();
     if (g_fails == 0) {
         printf("RESULT: all passed\n");

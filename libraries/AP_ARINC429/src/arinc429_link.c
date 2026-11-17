@@ -791,3 +791,110 @@ uint8_t a429_link_build_tx(a429_link_t *link, uint32_t *words, uint8_t max_n)
     link->tx_words_built += n;
     return n;
 }
+
+/* A4X names. fast rows share A429_TLM_HZ. slow_i is the 1 Hz step. */
+static const struct {
+    uint8_t label;
+    uint8_t fast;
+    uint8_t is_int;
+    uint8_t slow_i;
+    const char *name;
+} tx_tlm_rows[A429_TX_TLM_N] = {
+    {0310, 1, 0, 0, "A4XCLP"},
+    {0311, 1, 0, 0, "A4XNR"},
+    {0312, 0, 0, 0, "A4XP0"},
+    {0313, 0, 0, 1, "A4XT0"},
+    {0314, 0, 0, 2, "A4XH"},
+    {0316, 0, 0, 3, "A4XTAS"},
+    {0321, 0, 0, 4, "A4XHR"},
+    {0322, 0, 0, 5, "A4XMN"},
+    {0323, 0, 0, 6, "A4XSC"},
+    {0324, 0, 0, 7, "A4XYR"},
+    {0325, 0, 0, 8, "A4XMO"},
+    {0326, 0, 0, 9, "A4XDY"},
+    {0340, 1, 1, 0, "A4X340"},
+    {0342, 1, 1, 0, "A4X342"},
+    {0344, 1, 1, 0, "A4X344"},
+};
+
+static int tx_snapshot_has(const a429_link_t *link, uint8_t label)
+{
+    int idx;
+
+    if (label == 0310) {
+        return link->sim.clp_set != 0;
+    }
+    if (label == 0311) {
+        return link->sim.nr_set != 0;
+    }
+    idx = meas_index(label);
+    if (idx >= 0) {
+        return link->sim.meas_set[idx] != 0;
+    }
+    idx = a429_pcmd_index(label);
+    if (idx >= 0) {
+        return link->sim.pcmd_set[idx] != 0;
+    }
+    return 0;
+}
+
+static int tx_find_word(const a429_link_t *link, uint8_t label, uint32_t *word)
+{
+    uint8_t n = link->last_tx_count;
+    uint8_t i;
+
+    if (n > A429_TX_MAX) {
+        n = A429_TX_MAX;
+    }
+    for (i = 0; i < n; i++) {
+        if ((uint8_t)(link->last_tx[i] & 0xFFu) == label) {
+            *word = link->last_tx[i];
+            return 1;
+        }
+    }
+    return 0;
+}
+
+uint8_t a429_tx_telemetry(const a429_link_t *link, a429_tx_tlm_t *out, uint8_t max_n)
+{
+    uint8_t n = 0;
+    uint8_t i;
+
+    if (link == 0 || out == 0 || max_n == 0) {
+        return 0;
+    }
+    for (i = 0; i < A429_TX_TLM_N; i++) {
+        a429_word_view_t view;
+        uint32_t word = 0;
+        const uint8_t label = tx_tlm_rows[i].label;
+
+        if (n >= max_n) {
+            break;
+        }
+        /* Snapshot clear drops the name immediately. A word that was
+         * not in the built slot is not invented from the snapshot. */
+        if (!tx_snapshot_has(link, label) || !tx_find_word(link, label, &word)) {
+            continue;
+        }
+        a429_inspect(word, link->expected_sdi, &view);
+        if (view.label != label) {
+            continue;
+        }
+        if (tx_tlm_rows[i].is_int) {
+            if (!view.disc_valid) {
+                continue;
+            }
+        } else if (!view.eu_valid) {
+            continue;
+        }
+        out[n].name = tx_tlm_rows[i].name;
+        out[n].label = label;
+        out[n].fast = tx_tlm_rows[i].fast;
+        out[n].is_int = tx_tlm_rows[i].is_int;
+        out[n].slow_i = tx_tlm_rows[i].slow_i;
+        out[n].eu = view.eu;
+        out[n].data = (int32_t)view.data;
+        n++;
+    }
+    return n;
+}

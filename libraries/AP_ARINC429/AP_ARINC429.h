@@ -30,7 +30,9 @@
  * not sent. Labels 340/342/344 are filled from the pilot engine switch
  * when A429_ENG_CH is 1..16.
  * Those words do not move a motor, a servo, or eRob, and this class does
- * not claim Ethernet.
+ * not claim Ethernet. Named values for the words in the current transmit
+ * set use the A4X prefix and the same A429_TLM_HZ gate as the received
+ * labels. A cleared label is not repeated.
  */
 class AP_ARINC429
 {
@@ -76,6 +78,8 @@ private:
     void note_freshness(uint32_t now_ms);
     uint8_t tlm_hz(void) const;
     void send_slow(uint8_t step);
+    void send_tx_fast(void);
+    void send_tx_slow(uint8_t slow_i);
     bool read_measured_nr(float &rpm) const;
     bool read_collective_pct(float &pct) const;
     bool read_pressure_kpa(float &kpa) const;

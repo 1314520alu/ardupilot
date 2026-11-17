@@ -26,6 +26,14 @@
 #define A429_TX_MAX 16
 /* 312, 313, 314, 316 and 321..326. Not 317, 320 or 331. */
 #define A429_MEAS_N 10
+/*
+ * FC-to-ECU named values. Five share A429_TLM_HZ with Ng/Np/T45/torque:
+ * 310, 311, 340, 342, 344. The other ten are the 1 Hz air-data and UTC
+ * names. 317, 320 and 331 are not in either group.
+ */
+#define A429_TX_TLM_FAST_N 5
+#define A429_TX_TLM_SLOW_N 10
+#define A429_TX_TLM_N (A429_TX_TLM_FAST_N + A429_TX_TLM_SLOW_N)
 /* Bench set the NT1-M actually emits, in pack order for the 1 Hz counts. */
 #define A429_MON_N 14
 #define A429_WORDQ 32u
@@ -277,6 +285,23 @@ typedef struct {
     uint32_t raw;
     uint32_t rx_us;
 } a429_mon_view_t;
+
+/*
+ * One FC-to-ECU name that is in the current transmit set.
+ * name is at most 9 characters. fast 1 is sent at A429_TLM_HZ.
+ * is_int 1 is the discrete data field in data (340/342/344).
+ * Otherwise eu is the engineering value decoded from the wire word.
+ * slow_i is the 1 Hz step for the air-data and UTC names.
+ */
+typedef struct {
+    const char *name;
+    uint8_t label;
+    uint8_t fast;
+    uint8_t is_int;
+    uint8_t slow_i;
+    float eu;
+    int32_t data;
+} a429_tx_tlm_t;
 
 typedef struct {
     uint32_t bytes_total;

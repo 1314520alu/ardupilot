@@ -120,6 +120,16 @@ void a429_link_set_utc(a429_link_t *link, int sample,
 int a429_mode_step(a429_mode_state_t *st, const a429_mode_in_t *in, a429_pcmd_levels_t *levels);
 uint8_t a429_link_build_tx(a429_link_t *link, uint32_t *words, uint8_t max_n);
 
+/*
+ * FC-to-ECU named values for the current transmit set.
+ * A row is written only when the published snapshot still includes that
+ * label and last_tx still contains its word. The value is decoded from
+ * that word, so it matches what the slot carried. A cleared label is
+ * omitted even when last_tx has not been rebuilt. Returns the number of
+ * rows written, in label order. out may be shorter than A429_TX_TLM_N.
+ */
+uint8_t a429_tx_telemetry(const a429_link_t *link, a429_tx_tlm_t *out, uint8_t max_n);
+
 uint8_t a429_label_bit_reverse(uint8_t logical_label);
 uint32_t a429_label_wire_swap(uint32_t word);
 int a429_frame_profile_active(uint8_t profile);

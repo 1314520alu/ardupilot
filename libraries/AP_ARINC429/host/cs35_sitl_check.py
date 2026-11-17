@@ -393,6 +393,23 @@ def run_check(args):
             raise RuntimeError("A4T45 value %s" % samples.get("A4T45"))
         if abs(samples.get("A4MKP", 0.0) - 80.0) > 0.2:
             raise RuntimeError("A4MKP value %s" % samples.get("A4MKP"))
+        xclp_hz = report["rates"].get("A4XCLP", 0.0)
+        if not 7.0 <= xclp_hz <= 13.0:
+            raise RuntimeError("A4XCLP rate %.2f Hz is outside 7..13" % xclp_hz)
+        xclp = samples.get("A4XCLP")
+        if xclp is None or not 1.0 <= float(xclp) <= 9.0:
+            raise RuntimeError("A4XCLP value %s" % xclp)
+        xp0_hz = report["rates"].get("A4XP0", 0.0)
+        if not 0.5 <= xp0_hz <= 2.5:
+            raise RuntimeError("A4XP0 rate %.2f Hz is outside 0.5..2.5" % xp0_hz)
+        xp0 = samples.get("A4XP0")
+        if xp0 is None or not 70.0 <= float(xp0) <= 110.0:
+            raise RuntimeError("A4XP0 value %s" % xp0)
+        # Default NR_REF is 0 and heli defaults have no airspeed sensor
+        # and ENG_CH 0, so these labels are not in the transmit set.
+        for absent in ("A4XNR", "A4XTAS", "A4X340", "A4X342", "A4X344"):
+            if absent in report["rates"]:
+                raise RuntimeError("%s was published while that label is not sent" % absent)
         if abs(samples.get("A4P3", 0.0) - 0.8) > 0.001:
             raise RuntimeError("A4P3 value %s" % samples.get("A4P3"))
         if abs(samples.get("A4CLP", 0.0) - 2500.0) > 0.5:
@@ -450,7 +467,8 @@ def main():
     bps = report["bytes"] / report["seconds"] if report["seconds"] else 0.0
     print("SITL telemetry window %.2f s, %d A4 messages, %.0f bytes/s" % (
         report["seconds"], report["messages"], bps))
-    for name in ("A4NG", "A4NP", "A4T45", "A4MKP", "A4NGC", "A4P3", "A4CLP", "A4WN1", "A4C0", "A4PAR"):
+    for name in ("A4NG", "A4NP", "A4T45", "A4MKP", "A4NGC", "A4P3", "A4CLP", "A4WN1", "A4C0", "A4PAR",
+                 "A4XCLP", "A4XP0"):
         if name in report["rates"]:
             print("  %s %.2f Hz sample %s" % (name, report["rates"][name], report["samples"].get(name)))
     print("  per-label counts/s %s" % report["counts"])

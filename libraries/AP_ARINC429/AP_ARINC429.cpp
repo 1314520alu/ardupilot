@@ -247,7 +247,7 @@ const AP_Param::GroupInfo AP_ARINC429::var_info[] = {
 
     // @Param: TLM_HZ
     // @DisplayName: ARINC429 telemetry rate
-    // @Description: Rate of the Ng, Np, T45 and torque named values. Other decoded labels are sent at 1 Hz or 2 Hz, and the fourteen label counts are packed into four integers at 1 Hz. 0 disables every A429 named value and the stale text. The dataflash log is not affected. Maximum 20.
+    // @Description: Rate of Ng, Np, T45, torque, and the fast FC-to-ECU names (collective volts, Nr, and the three command words). Other decoded labels, including FC air-data and UTC, are sent at 1 Hz, and the fourteen label counts are packed into four integers at 1 Hz. 0 disables every A429 named value and the stale text. The dataflash log is not affected. Maximum 20.
     // @Units: Hz
     // @Range: 0 20
     // @User: Advanced
@@ -1007,8 +1007,67 @@ void AP_ARINC429::log_stats(uint32_t now_us)
 #endif
 }
 
+/* Receive slow names occupy steps 0..15. FC transmit slow names follow. */
+static const uint8_t tlm_rx_slow_n = 16;
+
+static void send_tx_row(const a429_tx_tlm_t &row)
+{
+#if HAL_GCS_ENABLED
+    if (row.name == nullptr) {
+        return;
+    }
+    if (row.is_int) {
+        gcs().send_named_int(row.name, row.data);
+    } else {
+        gcs().send_named_float(row.name, row.eu);
+    }
+#else
+    (void)row;
+#endif
+}
+
+void AP_ARINC429::send_tx_fast(void)
+{
+#if HAL_GCS_ENABLED
+    a429_tx_tlm_t rows[A429_TX_TLM_N];
+    const uint8_t n = a429_tx_telemetry(&_core.link, rows, A429_TX_TLM_N);
+    uint8_t i;
+
+    for (i = 0; i < n; i++) {
+        if (rows[i].fast) {
+            send_tx_row(rows[i]);
+        }
+    }
+#endif
+}
+
+void AP_ARINC429::send_tx_slow(uint8_t slow_i)
+{
+#if HAL_GCS_ENABLED
+    a429_tx_tlm_t rows[A429_TX_TLM_N];
+    const uint8_t n = a429_tx_telemetry(&_core.link, rows, A429_TX_TLM_N);
+    uint8_t i;
+
+    if (slow_i >= A429_TX_TLM_SLOW_N) {
+        return;
+    }
+    for (i = 0; i < n; i++) {
+        if (!rows[i].fast && rows[i].slow_i == slow_i) {
+            send_tx_row(rows[i]);
+            return;
+        }
+    }
+#else
+    (void)slow_i;
+#endif
+}
+
 void AP_ARINC429::send_slow(uint8_t step)
 {
+    if (step >= tlm_rx_slow_n) {
+        send_tx_slow(uint8_t(step - tlm_rx_slow_n));
+        return;
+    }
 #if HAL_GCS_ENABLED
     static const struct {
         uint8_t mon;
@@ -1092,6 +1151,7 @@ void AP_ARINC429::publish_telemetry(uint32_t now_us)
 #else
         (void)i;
 #endif
+        send_tx_fast();
     }
     if (!_tlm_slow_on) {
         if (_tlm_slow_us == 0u || (int32_t)(now_us - _tlm_slow_us) >= 1000000) {
@@ -1103,7 +1163,7 @@ void AP_ARINC429::publish_telemetry(uint32_t now_us)
     if (_tlm_slow_on) {
         send_slow(_tlm_slow_i);
         _tlm_slow_i++;
-        if (_tlm_slow_i >= 16u) {
+        if (_tlm_slow_i >= uint8_t(tlm_rx_slow_n + A429_TX_TLM_SLOW_N)) {
             _tlm_slow_on = 0;
         }
     }
@@ -1170,7 +1230,8 @@ void AP_ARINC429::update(void)
      * Nr. Labels 312, 313, 314 and 316 are the air-data samples.
      * Labels 321..326 are UTC. Labels 317, 320 and 331 are not sent.
      * Decode on this thread, after the TCP worker has only filled the
-     * byte pipe. Named values and stale text are sent from here.
+     * byte pipe. Named values for received labels and for FC words in
+     * this slot, plus stale text, are sent from here.
      * The three command words are not copied into motors, servos, EFI,
      * or eRob. Unconfigured framing sends no bytes, and no CD rate
      * command is generated.

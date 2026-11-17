@@ -558,10 +558,11 @@ lists the flag for the custom build server, default off.
 ## GCS telemetry and the dataflash log
 
 `A429_TLM_HZ` is the rate for Ng, Np, T45 and torque (`A4NG`, `A4NP`,
-`A4T45`, `A4MKP`). The default is 10. The maximum is 20. Zero disables
-every A429 named value and the stale/recovery text. It does not stop
-the dataflash log. The other parameters are unchanged, including the
-per-label `*_TO` timeouts, which still default to 0.
+`A4T45`, `A4MKP`) and for the fast FC-to-ECU names below. The default
+is 10. The maximum is 20. Zero disables every A429 named value,
+including the FC-to-ECU names, and the stale/recovery text. It does
+not stop the dataflash log. The other parameters are unchanged,
+including the per-label `*_TO` timeouts, which still default to 0.
 
 The other decoded bench labels are sent at 1 Hz: `A4NGC`, `A4P3`,
 `A4LGT`, `A4T1`, `A4P0`, `A4NGA`, and `A4CLP`. Label 153 has no scale
@@ -584,11 +585,53 @@ one label's count in the last closed one-second window, saturated at
 
 `A4PAR` and `A4DEC` are the cumulative parity and decode counts.
 Decode counts reserved-bit, SDI, unknown-label and out-of-range words.
-A parity failure is only `A4PAR`. MAVLink 2 omits the unused trailing
-bytes of the 10-character name, so a SITL capture at the default rate
-was about 1.3 KB/s on the wire. A link that sends the name field at its
-full width is larger. `A429_TLM_HZ` 4 is the setting that keeps the
-same messages near 1 KB/s on a 115200 radio.
+A parity failure is only `A4PAR`.
+
+The words this flight controller transmits are a separate set. The
+prefix is `A4X`. `A4CLP` stays the ECU label 153 data field. `A4XCLP`
+is label 310 in volts. `A4P0` stays the ECU label 156 pressure.
+`A4XP0` is label 312 in kPa. A name is sent only when that label is
+in the current transmit set: the published snapshot still has it, and
+the last built slot still contains the word. A cleared label is
+skipped on that cycle. The previous word is not repeated. The value
+is the engineering quantity decoded from the word that was built, not
+the raw 32-bit word. The three command labels are the discrete data
+field, the same kind of integer as `A4WN1`.
+
+| Name | Label | Unit | Rate |
+| --- | --- | --- | --- |
+| `A4XCLP` | 310 collective | V | `A429_TLM_HZ` |
+| `A4XNR` | 311 Nr | percent | `A429_TLM_HZ` |
+| `A4X340` | 340 PCMD1 | discrete data field | `A429_TLM_HZ` |
+| `A4X342` | 342 PCMD2 | discrete data field | `A429_TLM_HZ` |
+| `A4X344` | 344 PCMD3 | discrete data field | `A429_TLM_HZ` |
+| `A4XP0` | 312 ambient pressure | kPa | 1 Hz |
+| `A4XT0` | 313 baro temperature | °C | 1 Hz |
+| `A4XH` | 314 altitude AMSL | m | 1 Hz |
+| `A4XTAS` | 316 true airspeed | m/s | 1 Hz |
+| `A4XHR` | 321 hour | UTC hour | 1 Hz |
+| `A4XMN` | 322 minute | UTC minute | 1 Hz |
+| `A4XSC` | 323 second | UTC second | 1 Hz |
+| `A4XYR` | 324 year | UTC year | 1 Hz |
+| `A4XMO` | 325 month | UTC month | 1 Hz |
+| `A4XDY` | 326 day | UTC day | 1 Hz |
+
+Labels 317, 320 and 331 are not sent, so they have no name. On a
+bench with `A429_NR_REF` 0, `A4XNR` is absent. With no airspeed
+sensor, `A4XTAS` is absent. With `A429_ENG_CH` 0, `A4X340`, `A4X342`
+and `A4X344` are absent. The 1 Hz names share the existing slow
+cadence: one name per `update()` during the once-per-second burst,
+after the receive names.
+
+MAVLink 2 omits the unused trailing bytes of the 10-character name,
+so a SITL capture of the receive names at the default rate was about
+1.3 KB/s on the wire. Each fast FC name adds another message at
+`A429_TLM_HZ`. Five of them at 10 Hz are about 1.5 KB/s more when
+every one of those labels is present. A link that sends the name
+field at its full width is larger. `A429_TLM_HZ` 4 was the
+receive-only setting that kept the original messages near 1 KB/s on
+a 115200 radio. It still applies, and it now covers the fast FC
+names as well. The default remains 10.
 
 A phase-one label that has been fresh and then is not sends
 `A429 <octal> <name> stale`. The next fresh word sends `A429 <octal>
@@ -633,8 +676,11 @@ clamp to those endpoints, and a missing or non-finite collective clears
 the word without holding the previous voltage. Air-data checks encode
 and clear 312, 313, 314, 316 and 321..326, refuse 317, 320 and 331, and
 build one slot that still starts with 310 when every other valid FC
-word is present. Two on-time 12.5 ms polls each include 310, and the
-same tick does not send a second slot. Invalid SM values and a
+word is present. The same slot is what the `A4X*` names are decoded
+from: a present word publishes its engineering value (or the PCMD
+data field), and a cleared label is omitted even while `last_tx`
+still holds the previous word. Two on-time 12.5 ms polls each include
+310, and the same tick does not send a second slot. Invalid SM values and a
 parity error clear freshness while leaving the last normal sample in
 `last_valid`. The NT1-M tests add a scripted byte pipe
 and a local TCP server: invalid peer, a zero octet inside a real address,
