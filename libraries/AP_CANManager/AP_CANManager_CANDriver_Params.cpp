@@ -20,6 +20,9 @@
 
 #include <AP_DroneCAN/AP_DroneCAN.h>
 #include <AP_PiccoloCAN/AP_PiccoloCAN.h>
+#if AP_EROB_CANOPEN_ENABLED
+#include <AP_eRobCANOpen/AP_eRobCANOpen.h>
+#endif
 
 // table of user settable CAN bus parameters
 const AP_Param::GroupInfo AP_CANManager::CANDriver_Params::var_info[] = {
@@ -28,7 +31,7 @@ const AP_Param::GroupInfo AP_CANManager::CANDriver_Params::var_info[] = {
     // @DisplayName: Enable use of specific protocol over virtual driver
     // @Description: Enabling this option starts selected protocol that will use this virtual driver
     // @SortValues: AlphabeticalZeroAtTop
-    // @Values: 0:Disabled,1:DroneCAN,4:PiccoloCAN,6:EFI_NWPMU,7:USD1,8:KDECAN,10:Scripting,11:Benewake,12:Scripting2,13:TOFSenseP,14:RadarCAN (NanoRadar/Hexsoon)
+    // @Values: 0:Disabled,1:DroneCAN,4:PiccoloCAN,6:EFI_NWPMU,7:USD1,8:KDECAN,10:Scripting,11:Benewake,12:Scripting2,13:TOFSenseP,14:RadarCAN (NanoRadar/Hexsoon),15:eRob CAN
     // @User: Advanced
     // @RebootRequired: True
     AP_GROUPINFO("PROTOCOL", 1, AP_CANManager::CANDriver_Params, _driver_type, float(AP_CAN::Protocol::DroneCAN)),
@@ -49,6 +52,14 @@ const AP_Param::GroupInfo AP_CANManager::CANDriver_Params::var_info[] = {
     AP_SUBGROUPPTR(_piccolocan, "PC_", 5, AP_CANManager::CANDriver_Params, AP_PiccoloCAN),
 #endif
 
+#if AP_EROB_CANOPEN_ENABLED
+    // @Group: EROB_
+    // @Path: ../AP_eRobCANOpen/AP_eRobCANOpen.cpp
+    AP_SUBGROUPPTR(_erob, "EROB_", 7, AP_CANManager::CANDriver_Params, AP_eRobCANOpen),
+#endif
+
+    // eRob CAN is a primary protocol (value 15). One CAN_Dx_PROTOCOL value
+    // owns the driver. It is not a PROTOCOL2 option.
     // @Param: PROTOCOL2
     // @DisplayName: Secondary protocol with 11 bit CAN addressing
     // @Description: Secondary protocol with 11 bit CAN addressing
