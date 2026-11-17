@@ -706,6 +706,10 @@ const AP_Scheduler::Task AP_Vehicle::scheduler_tasks[] = {
 #if HAL_INS_ACCELCAL_ENABLED
     SCHED_TASK(accel_cal_update,                                                      10, 100, 245),
 #endif
+#if AP_ARINC429_ENABLED
+    // 400 Hz so the 12.5 ms ARINC429 slot is not limited to the 50 Hz EFI rate.
+    SCHED_TASK_CLASS(AP_ARINC429,  &vehicle.arinc429,       update,                  400,  80, 247),
+#endif
 #if AP_FENCE_ENABLED
     SCHED_TASK_CLASS(AC_Fence,     &vehicle.fence,          update,                   10, 100, 248),
 #endif
@@ -714,10 +718,6 @@ const AP_Scheduler::Task AP_Vehicle::scheduler_tasks[] = {
 #endif
 #if HAL_EFI_ENABLED
     SCHED_TASK_CLASS(AP_EFI,       &vehicle.efi,            update,                   50, 200, 250),
-#endif
-#if AP_ARINC429_ENABLED
-    // 400 Hz so the 12.5 ms ARINC429 slot is not limited to the 50 Hz EFI rate.
-    SCHED_TASK_CLASS(AP_ARINC429,  &vehicle.arinc429,       update,                  400,  80, 247),
 #endif
 #if AP_GRIPPER_ENABLED
     SCHED_TASK_CLASS(AP_Gripper,   &vehicle.gripper,        update,                   10,  75, 251),
