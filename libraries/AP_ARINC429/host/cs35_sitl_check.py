@@ -115,6 +115,7 @@ class EcuSim(threading.Thread):
         self.ready = threading.Event()
         self.clients = 0
         self.frames = 0
+        self.rx_bytes = 0
         self.error = None
 
     def halt(self):
@@ -164,9 +165,29 @@ class EcuSim(threading.Thread):
             except OSError:
                 pass
 
+    def _drain_tx(self, conn):
+        # The flight controller sends a full FC slot every 12.5 ms. Read
+        # those bytes so the TCP window stays open for the ECU frames.
+        conn.setblocking(False)
+        try:
+            while True:
+                try:
+                    data = conn.recv(4096)
+                except BlockingIOError:
+                    return True
+                except InterruptedError:
+                    continue
+                if not data:
+                    return False
+                self.rx_bytes += len(data)
+        finally:
+            conn.setblocking(True)
+
     def _stream(self, conn):
         nxt = time.monotonic()
         while not self._halt.is_set():
+            if not self._drain_tx(conn):
+                return
             blob = bytearray()
             for label, word in logical_words():
                 if self.label_stopped(label):
@@ -384,6 +405,9 @@ def run_check(args):
         count_hz = report["rates"].get("A4C0", 0.0)
         if not 0.5 <= count_hz <= 2.5:
             raise RuntimeError("A4C0 rate %.2f Hz is outside 0.5..2.5" % count_hz)
+        if ecu.rx_bytes == 0:
+            raise RuntimeError("ECU received no FC transmit bytes")
+        report["ecu_rx_bytes"] = ecu.rx_bytes
         return report
     except Exception:
         sitl_log.flush()
@@ -432,6 +456,7 @@ def main():
     print("  per-label counts/s %s" % report["counts"])
     print("  stale: %s" % report["stale"])
     print("  recovered: %s" % report["recovered"])
+    print("  ecu rx bytes %d" % report.get("ecu_rx_bytes", 0))
     print("  workdir %s" % report["tmp"])
     return 0
 
