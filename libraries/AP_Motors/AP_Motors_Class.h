@@ -157,6 +157,10 @@ public:
     float               get_throttle_out() const { return _throttle_out; }
     virtual bool        get_thrust(uint8_t motor_num, float& thr_out) const { return false; }
     float               get_throttle() const { return constrain_float(_throttle_filter.get(), 0.0f, 1.0f); }
+    // Filtered collective the swash is driven with, 0 minimum to 1 maximum.
+    // False when this frame is not a helicopter or the sample is not finite.
+    // This is not an RSC throttle-curve output and it is not a PWM.
+    bool                get_heli_collective(float &norm) const;
     float               get_throttle_bidirectional() const { return constrain_float(2 * (_throttle_filter.get() - 0.5f), -1.0f, 1.0f); }
     float               get_throttle_slew_rate() const { return _throttle_slew_rate; }
     float               get_forward() const { return _forward_in; }

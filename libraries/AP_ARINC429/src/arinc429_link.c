@@ -1,0 +1,900 @@
+#include "../arinc429.h"
+
+#include <string.h>
+
+static const uint8_t pcmd_labels[A429_PCMD_N] = {0340, 0342, 0344};
+
+/* Order is the order in the 12.5 ms slot, after 310 and 311. */
+static const uint8_t meas_labels[A429_MEAS_N] = {
+    0312, 0313, 0314, 0316, 0321, 0322, 0323, 0324, 0325, 0326
+};
+
+static int meas_index(uint16_t label_oct)
+{
+    uint8_t i;
+    for (i = 0; i < A429_MEAS_N; i++) {
+        if (meas_labels[i] == (uint8_t)label_oct) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static int meas_is_utc(uint8_t label)
+{
+    return label >= 0321 && label <= 0326;
+}
+
+static void note_counters(a429_counters_t *c, const a429_word_view_t *view)
+{
+    const a429_label_info_t *info;
+
+    c->rx_count++;
+    if (!view->parity_ok) {
+        c->parity_errors++;
+        return;
+    }
+    if (!view->reserved_ok) {
+        c->reserved_errors++;
+        c->decode_errors++;
+        return;
+    }
+    if (!view->sdi_ok) {
+        c->sdi_errors++;
+        c->decode_errors++;
+        return;
+    }
+    if (!view->known) {
+        c->decode_errors++;
+        return;
+    }
+    if (view->sm == A429_SM_FAIL) {
+        c->sm_fail++;
+    } else if (view->sm == A429_SM_NCD) {
+        c->sm_ncd++;
+    } else if (view->sm == A429_SM_FT) {
+        c->sm_ft++;
+    } else if (view->sm == A429_SM_NORMAL) {
+        c->sm_normal++;
+    }
+    info = a429_catalog_find(view->label);
+    if (info != 0 && info->has_range && view->sm == A429_SM_NORMAL && !view->eu_valid) {
+        c->range_errors++;
+        c->decode_errors++;
+    }
+    if (view->eu_valid || view->disc_valid) {
+        c->valid_count++;
+    }
+}
+
+/* Octal labels in the order A4C0..A4C3 pack them, four per int. */
+static const uint16_t mon_labels[A429_MON_N] = {
+    0144, 0145, 0146, 0147,
+    0151, 0152, 0153, 0154,
+    0155, 0156, 0160, 0175,
+    0176, 0177
+};
+
+static uint16_t label_disp(uint16_t oct_value)
+{
+    uint16_t v = 0;
+    uint16_t mul = 1;
+
+    while (oct_value > 0u) {
+        v = (uint16_t)(v + (uint16_t)(oct_value & 7u) * mul);
+        oct_value = (uint16_t)(oct_value >> 3);
+        mul = (uint16_t)(mul * 10u);
+    }
+    return v;
+}
+
+static int mon_find(uint8_t label)
+{
+    uint8_t i;
+
+    for (i = 0; i < A429_MON_N; i++) {
+        if (mon_labels[i] == (uint16_t)label) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static void stats_arm(a429_link_t *link, uint32_t now_us)
+{
+    if (link->stats.started) {
+        return;
+    }
+    link->stats.started = 1;
+    link->stats.win_start_us = now_us;
+    link->stats.parity_mark = link->counters.parity_errors;
+    link->stats.decode_mark = link->counters.decode_errors;
+}
+
+static void wordq_push(a429_link_t *link, const a429_wordq_item_t *item)
+{
+    a429_stats_t *s = &link->stats;
+    uint8_t slot;
+
+    if (s->q_count >= A429_WORDQ) {
+        if (s->q_drop < 0xFFFFFFFFu) {
+            s->q_drop++;
+        }
+        return;
+    }
+    slot = (uint8_t)((s->q_head + s->q_count) % A429_WORDQ);
+    s->q[slot] = *item;
+    s->q_count++;
+}
+
+static void stats_on_word(a429_link_t *link, const a429_word_view_t *view, uint32_t raw,
+                          uint32_t now_us, int fresh)
+{
+    a429_wordq_item_t item;
+    int idx;
+    uint8_t flags = 0;
+
+    if (view->parity_ok) {
+        flags |= A429_WQ_PARITY;
+    }
+    if (view->eu_valid) {
+        flags |= A429_WQ_EU;
+    }
+    if (view->disc_valid) {
+        flags |= A429_WQ_DISC;
+    }
+    if (fresh) {
+        flags |= A429_WQ_FRESH;
+    }
+    if (view->reserved_ok) {
+        flags |= A429_WQ_RSV;
+    }
+    if (view->sdi_ok) {
+        flags |= A429_WQ_SDI;
+    }
+    memset(&item, 0, sizeof(item));
+    item.time_us = now_us;
+    item.raw = raw;
+    item.eu = view->eu;
+    item.data = view->data;
+    item.label = view->label;
+    item.flags = flags;
+    wordq_push(link, &item);
+
+    idx = mon_find(view->label);
+    if (idx < 0) {
+        return;
+    }
+    if (link->stats.count_win[idx] < 65535u) {
+        link->stats.count_win[idx]++;
+    }
+    link->stats.have[idx] = 1;
+    link->stats.eu_valid[idx] = view->eu_valid;
+    link->stats.disc_valid[idx] = view->disc_valid;
+    link->stats.struct_ok[idx] = (uint8_t)(view->parity_ok && view->reserved_ok &&
+                                           view->sdi_ok && view->known &&
+                                           view->sm == A429_SM_NORMAL);
+    link->stats.eu[idx] = view->eu;
+    link->stats.data[idx] = view->data;
+    link->stats.raw[idx] = raw;
+    link->stats.rx_us[idx] = now_us;
+}
+
+void a429_edge_reset(a429_edge_state_t *st)
+{
+    if (st == 0) {
+        return;
+    }
+    memset(st, 0, sizeof(*st));
+}
+
+void a429_edge_update(a429_edge_state_t *st, const a429_pcmd_levels_t *now,
+                      int sample_valid, a429_pcmd_edges_t *edges)
+{
+    if (edges != 0) {
+        memset(edges, 0, sizeof(*edges));
+    }
+    if (st == 0 || edges == 0 || !sample_valid || now == 0) {
+        return;
+    }
+    if (!st->have) {
+        st->have = 1;
+        st->prev = *now;
+        return;
+    }
+    edges->cold_run = (uint8_t)(st->prev.cold_run == 0 && now->cold_run != 0);
+    edges->false_start = (uint8_t)(st->prev.false_start == 0 && now->false_start != 0);
+    edges->channel_switch = (uint8_t)(st->prev.channel_switch == 0 && now->channel_switch != 0);
+    st->prev = *now;
+}
+
+void a429_link_init(a429_link_t *link)
+{
+    if (link == 0) {
+        return;
+    }
+    memset(link, 0, sizeof(*link));
+}
+
+void a429_link_rearm_edges(a429_link_t *link)
+{
+    uint8_t i;
+    if (link == 0) {
+        return;
+    }
+    for (i = 0; i < A429_PCMD_N; i++) {
+        a429_edge_reset(&link->pcmd[i].edge);
+        memset(&link->pcmd[i].edges, 0, sizeof(link->pcmd[i].edges));
+    }
+}
+
+void a429_link_set_sdi(a429_link_t *link, uint8_t sdi)
+{
+    if (link == 0 || sdi > 3u || link->expected_sdi == sdi) {
+        return;
+    }
+    link->expected_sdi = sdi;
+    a429_link_session_lost(link);
+}
+
+void a429_link_set_timeout_us(a429_link_t *link, uint8_t rx_index, uint32_t timeout_us)
+{
+    if (link == 0 || rx_index >= A429_RX_N) {
+        return;
+    }
+    link->rx[rx_index].timeout_us = timeout_us;
+}
+
+void a429_link_ingest(a429_link_t *link, uint32_t raw, uint32_t now_us)
+{
+    a429_word_view_t view;
+    int rx;
+    int pcmd;
+    int valid;
+
+    if (link == 0) {
+        return;
+    }
+    stats_arm(link, now_us);
+    a429_inspect(raw, link->expected_sdi, &view);
+    note_counters(&link->counters, &view);
+    rx = a429_phase1_rx_index(view.label);
+    if (rx >= 0) {
+        a429_rx_slot_t *slot = &link->rx[rx];
+        valid = view.eu_valid || view.disc_valid;
+        slot->raw = raw;
+        slot->rx_us = now_us;
+        slot->have_raw = 1;
+        slot->view = view;
+        if (valid) {
+            slot->last_valid = view;
+            slot->have_valid = 1;
+            slot->valid_us = now_us;
+            slot->fresh = 1;
+            if (view.eu_valid) {
+                slot->last_valid_eu = view.eu;
+            }
+        } else {
+            /* The current word is the status a getter must see. The previous
+             * normal sample stays in last_valid / valid_us and is not refreshed. */
+            slot->fresh = 0;
+        }
+        stats_on_word(link, &view, raw, now_us, slot->fresh);
+        return;
+    }
+    pcmd = a429_pcmd_index(view.label);
+    if (pcmd >= 0) {
+        a429_pcmd_slot_t *slot = &link->pcmd[pcmd];
+        a429_pcmd_levels_t levels;
+        memset(&levels, 0, sizeof(levels));
+        slot->raw = raw;
+        slot->rx_us = now_us;
+        slot->have_raw = 1;
+        slot->view = view;
+        if (view.disc_valid) {
+            a429_pcmd_decode((uint16_t)view.data, &levels);
+            slot->levels = levels;
+        }
+        a429_edge_update(&slot->edge, &levels, view.disc_valid, &slot->edges);
+        stats_on_word(link, &view, raw, now_us, 0);
+        return;
+    }
+    link->rx_untracked++;
+    link->last_untracked_raw = raw;
+    link->last_untracked_us = now_us;
+    stats_on_word(link, &view, raw, now_us, 0);
+}
+
+void a429_link_session_lost(a429_link_t *link)
+{
+    uint8_t i;
+    if (link == 0) {
+        return;
+    }
+    for (i = 0; i < A429_RX_N; i++) {
+        /* The latest word is no longer a live sample. Its last good copy
+         * stays in last_valid / last_valid_eu / valid_us. */
+        link->rx[i].fresh = 0;
+    }
+    /* The next valid command sample only latches. It does not emit an edge. */
+    a429_link_rearm_edges(link);
+}
+
+int a429_link_fresh_eu(const a429_link_t *link, uint8_t rx_index, float *eu)
+{
+    const a429_rx_slot_t *slot;
+    if (link == 0 || eu == 0 || rx_index >= A429_RX_N) {
+        return 0;
+    }
+    slot = &link->rx[rx_index];
+    if (!slot->fresh || !slot->view.eu_valid) {
+        return 0;
+    }
+    *eu = slot->view.eu;
+    return 1;
+}
+
+int a429_link_fresh_disc(const a429_link_t *link, uint8_t rx_index, int16_t *data)
+{
+    const a429_rx_slot_t *slot;
+    if (link == 0 || data == 0 || rx_index >= A429_RX_N) {
+        return 0;
+    }
+    slot = &link->rx[rx_index];
+    if (!slot->fresh || !slot->view.disc_valid) {
+        return 0;
+    }
+    *data = slot->view.data;
+    return 1;
+}
+
+void a429_link_poll_timeouts(a429_link_t *link, uint32_t now_us)
+{
+    uint8_t i;
+    if (link == 0) {
+        return;
+    }
+    for (i = 0; i < A429_RX_N; i++) {
+        a429_rx_slot_t *slot = &link->rx[i];
+        int32_t age;
+        if (slot->timeout_us == 0u || !slot->have_valid || !slot->fresh) {
+            continue;
+        }
+        age = (int32_t)(now_us - slot->valid_us);
+        if (age >= (int32_t)slot->timeout_us) {
+            slot->fresh = 0;
+            slot->timeout_count++;
+        }
+    }
+}
+
+void a429_link_note_bytes(a429_link_t *link, uint32_t n, uint32_t now_us)
+{
+    if (link == 0 || n == 0u) {
+        return;
+    }
+    stats_arm(link, now_us);
+    link->stats.bytes_total += n;
+    link->stats.bytes_win += n;
+}
+
+void a429_link_note_frames(a429_link_t *link, uint32_t n, uint32_t now_us)
+{
+    if (link == 0 || n == 0u) {
+        return;
+    }
+    stats_arm(link, now_us);
+    link->stats.frames_total += n;
+    link->stats.frames_win += n;
+}
+
+void a429_link_poll_stats(a429_link_t *link, uint32_t now_us)
+{
+    a429_stats_t *s;
+    uint8_t i;
+
+    if (link == 0) {
+        return;
+    }
+    stats_arm(link, now_us);
+    s = &link->stats;
+    if ((int32_t)(now_us - s->win_start_us) < 1000000) {
+        return;
+    }
+    for (i = 0; i < A429_MON_N; i++) {
+        s->count_1s[i] = s->count_win[i];
+        s->count_win[i] = 0;
+    }
+    s->bytes_1s = s->bytes_win;
+    s->frames_1s = s->frames_win;
+    s->bytes_win = 0;
+    s->frames_win = 0;
+    s->parity_1s = link->counters.parity_errors - s->parity_mark;
+    s->decode_1s = link->counters.decode_errors - s->decode_mark;
+    s->parity_mark = link->counters.parity_errors;
+    s->decode_mark = link->counters.decode_errors;
+    s->win_start_us += 1000000u;
+    if ((int32_t)(now_us - s->win_start_us) >= 1000000) {
+        /* The gap after the window that just closed had no samples. */
+        for (i = 0; i < A429_MON_N; i++) {
+            s->count_1s[i] = 0;
+        }
+        s->bytes_1s = 0;
+        s->frames_1s = 0;
+        s->parity_1s = 0;
+        s->decode_1s = 0;
+        s->win_start_us = now_us;
+    }
+}
+
+void a429_link_stats(const a429_link_t *link, a429_stats_view_t *out)
+{
+    if (out == 0) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+    if (link == 0) {
+        return;
+    }
+    out->bytes_total = link->stats.bytes_total;
+    out->frames_total = link->stats.frames_total;
+    out->bytes_1s = link->stats.bytes_1s;
+    out->frames_1s = link->stats.frames_1s;
+    out->parity_errors = link->counters.parity_errors;
+    out->decode_errors = link->counters.decode_errors;
+    out->parity_1s = link->stats.parity_1s;
+    out->decode_1s = link->stats.decode_1s;
+    out->q_drop = link->stats.q_drop;
+}
+
+uint8_t a429_mon_n(void)
+{
+    return A429_MON_N;
+}
+
+int a429_mon_view(const a429_link_t *link, uint8_t index, a429_mon_view_t *out)
+{
+    int rx;
+
+    if (link == 0 || out == 0 || index >= A429_MON_N) {
+        return 0;
+    }
+    memset(out, 0, sizeof(*out));
+    out->label_oct = mon_labels[index];
+    out->label_disp = label_disp(mon_labels[index]);
+    out->count_1s = link->stats.count_1s[index];
+    out->have = link->stats.have[index];
+    out->eu_valid = link->stats.eu_valid[index];
+    out->disc_valid = link->stats.disc_valid[index];
+    out->struct_ok = link->stats.struct_ok[index];
+    out->eu = link->stats.eu[index];
+    out->data = link->stats.data[index];
+    out->raw = link->stats.raw[index];
+    out->rx_us = link->stats.rx_us[index];
+    rx = a429_phase1_rx_index(mon_labels[index]);
+    if (rx >= 0) {
+        const a429_rx_slot_t *slot = &link->rx[rx];
+        out->fresh = slot->fresh;
+        if (slot->timeout_us != 0u && slot->have_valid && !slot->fresh) {
+            out->timed_out = 1;
+        }
+    }
+    return 1;
+}
+
+int a429_link_pop_word(a429_link_t *link, a429_wordq_item_t *out)
+{
+    a429_stats_t *s;
+
+    if (link == 0 || out == 0 || link->stats.q_count == 0u) {
+        return 0;
+    }
+    s = &link->stats;
+    *out = s->q[s->q_head];
+    s->q_head = (uint8_t)((s->q_head + 1u) % A429_WORDQ);
+    s->q_count--;
+    return 1;
+}
+
+void a429_sim_clear(a429_link_t *link)
+{
+    if (link == 0) {
+        return;
+    }
+    memset(&link->sim, 0, sizeof(link->sim));
+}
+
+void a429_sim_clear_pcmd(a429_link_t *link)
+{
+    uint8_t i;
+    if (link == 0) {
+        return;
+    }
+    for (i = 0; i < A429_PCMD_N; i++) {
+        link->sim.pcmd_set[i] = 0;
+        memset(&link->sim.pcmd[i], 0, sizeof(link->sim.pcmd[i]));
+    }
+}
+
+static int a429_link_finite(float v)
+{
+    union {
+        float f;
+        uint32_t u;
+    } x;
+    x.f = v;
+    /* Exponent 0xff is IEEE-754 infinity or NaN. */
+    return ((x.u >> 23) & 0xffu) != 0xffu;
+}
+
+int a429_clp_volts(int sample, float collective_pct, float v_at_0, float v_at_100,
+                   float *volts)
+{
+    float pct;
+    float value;
+
+    if (volts == 0 || sample == 0 ||
+        !a429_link_finite(collective_pct) ||
+        !a429_link_finite(v_at_0) ||
+        !a429_link_finite(v_at_100)) {
+        return 0;
+    }
+    /* Clamp before converting. 0 percent is v_at_0 and 100 percent is
+     * v_at_100. With the defaults that is V = 1 + 8 * (percent / 100). */
+    pct = collective_pct;
+    if (pct < 0.0f) {
+        pct = 0.0f;
+    } else if (pct > 100.0f) {
+        pct = 100.0f;
+    }
+    value = v_at_0 + (v_at_100 - v_at_0) * (pct / 100.0f);
+    if (!a429_link_finite(value)) {
+        return 0;
+    }
+    *volts = value;
+    return 1;
+}
+
+void a429_sim_set_clp(a429_link_t *link, float volts)
+{
+    if (link == 0) {
+        return;
+    }
+    link->sim.clp_set = 1;
+    link->sim.clp_v = volts;
+}
+
+void a429_sim_set_nr(a429_link_t *link, float pct)
+{
+    if (link == 0) {
+        return;
+    }
+    link->sim.nr_set = 1;
+    link->sim.nr_pct = pct;
+}
+
+void a429_link_set_measured_nr(a429_link_t *link, int sample, float rpm, float nr_ref)
+{
+    float pct;
+    uint32_t w;
+
+    if (link == 0) {
+        return;
+    }
+    /* Missing sample or unusable scale: omit 311. Do not hold the last
+     * percent, and do not invent a reference rpm that would read as 100%. */
+    if (!a429_nr_percent(sample, rpm, nr_ref, &pct) ||
+        !a429_encode_bnr(0311, link->expected_sdi, A429_SM_NORMAL, pct, &w)) {
+        link->sim.nr_set = 0;
+        link->sim.nr_pct = 0.0f;
+        return;
+    }
+    a429_sim_set_nr(link, pct);
+}
+
+void a429_link_set_collective(a429_link_t *link, int sample, float collective_pct,
+                              float v_at_0, float v_at_100)
+{
+    float volts;
+    uint32_t w;
+
+    if (link == 0) {
+        return;
+    }
+    /* Missing or non-finite collective: omit 310. Do not hold the last
+     * voltage, and do not invent a collective to fill the frame. */
+    if (!a429_clp_volts(sample, collective_pct, v_at_0, v_at_100, &volts) ||
+        !a429_encode_bnr(0310, link->expected_sdi, A429_SM_NORMAL, volts, &w)) {
+        link->sim.clp_set = 0;
+        link->sim.clp_v = 0.0f;
+        return;
+    }
+    a429_sim_set_clp(link, volts);
+}
+
+static void meas_clear_one(a429_link_t *link, int index)
+{
+    link->sim.meas_set[index] = 0;
+    link->sim.meas_eu[index] = 0.0f;
+}
+
+static void meas_clear_utc(a429_link_t *link)
+{
+    uint8_t i;
+    for (i = 0; i < A429_MEAS_N; i++) {
+        if (meas_is_utc(meas_labels[i])) {
+            meas_clear_one(link, (int)i);
+        }
+    }
+}
+
+static int meas_utc_ready(const a429_link_t *link)
+{
+    uint8_t i;
+    for (i = 0; i < A429_MEAS_N; i++) {
+        if (meas_is_utc(meas_labels[i]) && !link->sim.meas_set[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+void a429_link_set_meas(a429_link_t *link, uint16_t label_oct, int sample, float eu)
+{
+    int idx;
+    uint32_t w;
+
+    if (link == 0) {
+        return;
+    }
+    idx = meas_index(label_oct);
+    /* 317, 320, 331 and the clock are not individual measurement slots. */
+    if (idx < 0 || meas_is_utc((uint8_t)label_oct)) {
+        return;
+    }
+    /* Missing or non-finite sample: omit this label. Do not hold the
+     * previous engineering value. Pressure must be positive. True
+     * airspeed must not be negative. */
+    if (sample == 0 || !a429_link_finite(eu) ||
+        (label_oct == 0312 && !(eu > 0.0f)) ||
+        (label_oct == 0316 && eu < 0.0f) ||
+        !a429_encode_bnr((uint8_t)label_oct, link->expected_sdi, A429_SM_NORMAL, eu, &w)) {
+        meas_clear_one(link, idx);
+        return;
+    }
+    link->sim.meas_set[idx] = 1;
+    link->sim.meas_eu[idx] = eu;
+}
+
+void a429_link_set_utc(a429_link_t *link, int sample,
+                       int hour, int minute, int second,
+                       int year, int month, int day)
+{
+    static const uint8_t labels[6] = {0321, 0322, 0323, 0324, 0325, 0326};
+    float eu[6];
+    uint32_t word;
+    int i;
+
+    if (link == 0) {
+        return;
+    }
+    /* One bad field drops the whole clock. 60 is a leap second and is
+     * not stored as 59. */
+    if (sample == 0 ||
+        hour < 0 || hour > 23 ||
+        minute < 0 || minute > 59 ||
+        second < 0 || second > 59 ||
+        year < 1 || year > 32767 ||
+        month < 1 || month > 12 ||
+        day < 1 || day > 31) {
+        meas_clear_utc(link);
+        return;
+    }
+    eu[0] = (float)hour;
+    eu[1] = (float)minute;
+    eu[2] = (float)second;
+    eu[3] = (float)year;
+    eu[4] = (float)month;
+    eu[5] = (float)day;
+    for (i = 0; i < 6; i++) {
+        if (!a429_encode_bnr(labels[i], link->expected_sdi, A429_SM_NORMAL, eu[i], &word)) {
+            meas_clear_utc(link);
+            return;
+        }
+    }
+    for (i = 0; i < 6; i++) {
+        int idx = meas_index(labels[i]);
+        if (idx < 0) {
+            meas_clear_utc(link);
+            return;
+        }
+        link->sim.meas_set[idx] = 1;
+        link->sim.meas_eu[idx] = eu[i];
+    }
+}
+
+int a429_sim_set_pcmd(a429_link_t *link, uint8_t index, const a429_pcmd_levels_t *levels)
+{
+    if (link == 0 || levels == 0 || index >= A429_PCMD_N) {
+        return 0;
+    }
+    link->sim.pcmd_set[index] = 1;
+    link->sim.pcmd[index] = *levels;
+    return 1;
+}
+
+uint8_t a429_link_build_tx(a429_link_t *link, uint32_t *words, uint8_t max_n)
+{
+    uint8_t n = 0;
+    uint8_t i;
+    uint32_t w;
+
+    if (link == 0) {
+        return 0;
+    }
+    link->last_tx_count = 0;
+    memset(link->last_tx, 0, sizeof(link->last_tx));
+    if (words == 0 || max_n == 0) {
+        return 0;
+    }
+    /* 310 is the collective voltage when the vehicle published one.
+     * Host tests use the same slot through a429_sim_set_clp. */
+    if (link->sim.clp_set) {
+        if (a429_encode_bnr(0310, link->expected_sdi, A429_SM_NORMAL, link->sim.clp_v, &w) && n < max_n) {
+            words[n++] = w;
+        } else {
+            link->tx_rejected++;
+        }
+    }
+    /* 311 is measured Nr when the vehicle published a percent. Host tests
+     * use the same slot through a429_sim_set_nr. */
+    if (link->sim.nr_set) {
+        if (a429_encode_bnr(0311, link->expected_sdi, A429_SM_NORMAL, link->sim.nr_pct, &w) && n < max_n) {
+            words[n++] = w;
+        } else {
+            link->tx_rejected++;
+        }
+    }
+    /* Air-data, then the six clock labels. The clock is all six or none.
+     * 317, 320 and 331 are not in meas_labels. */
+    {
+        const int utc_ready = meas_utc_ready(link);
+        for (i = 0; i < A429_MEAS_N; i++) {
+            if (!link->sim.meas_set[i]) {
+                continue;
+            }
+            if (meas_is_utc(meas_labels[i]) && !utc_ready) {
+                continue;
+            }
+            if (a429_encode_bnr(meas_labels[i], link->expected_sdi, A429_SM_NORMAL,
+                                link->sim.meas_eu[i], &w) && n < max_n) {
+                words[n++] = w;
+            } else {
+                link->tx_rejected++;
+            }
+        }
+    }
+    for (i = 0; i < A429_PCMD_N; i++) {
+        if (!link->sim.pcmd_set[i]) {
+            continue;
+        }
+        if (a429_encode_pcmd(pcmd_labels[i], link->expected_sdi, A429_SM_NORMAL, &link->sim.pcmd[i], &w) && n < max_n) {
+            words[n++] = w;
+        } else {
+            link->tx_rejected++;
+        }
+    }
+    link->last_tx_count = n;
+    for (i = 0; i < n && i < A429_TX_MAX; i++) {
+        link->last_tx[i] = words[i];
+    }
+    link->tx_words_built += n;
+    return n;
+}
+
+/* A4X names. fast rows share A429_TLM_HZ. slow_i is the 1 Hz step. */
+static const struct {
+    uint8_t label;
+    uint8_t fast;
+    uint8_t is_int;
+    uint8_t slow_i;
+    const char *name;
+} tx_tlm_rows[A429_TX_TLM_N] = {
+    {0310, 1, 0, 0, "A4XCLP"},
+    {0311, 1, 0, 0, "A4XNR"},
+    {0312, 0, 0, 0, "A4XP0"},
+    {0313, 0, 0, 1, "A4XT0"},
+    {0314, 0, 0, 2, "A4XH"},
+    {0316, 0, 0, 3, "A4XTAS"},
+    {0321, 0, 0, 4, "A4XHR"},
+    {0322, 0, 0, 5, "A4XMN"},
+    {0323, 0, 0, 6, "A4XSC"},
+    {0324, 0, 0, 7, "A4XYR"},
+    {0325, 0, 0, 8, "A4XMO"},
+    {0326, 0, 0, 9, "A4XDY"},
+    {0340, 1, 1, 0, "A4X340"},
+    {0342, 1, 1, 0, "A4X342"},
+    {0344, 1, 1, 0, "A4X344"},
+};
+
+static int tx_snapshot_has(const a429_link_t *link, uint8_t label)
+{
+    int idx;
+
+    if (label == 0310) {
+        return link->sim.clp_set != 0;
+    }
+    if (label == 0311) {
+        return link->sim.nr_set != 0;
+    }
+    idx = meas_index(label);
+    if (idx >= 0) {
+        return link->sim.meas_set[idx] != 0;
+    }
+    idx = a429_pcmd_index(label);
+    if (idx >= 0) {
+        return link->sim.pcmd_set[idx] != 0;
+    }
+    return 0;
+}
+
+static int tx_find_word(const a429_link_t *link, uint8_t label, uint32_t *word)
+{
+    uint8_t n = link->last_tx_count;
+    uint8_t i;
+
+    if (n > A429_TX_MAX) {
+        n = A429_TX_MAX;
+    }
+    for (i = 0; i < n; i++) {
+        if ((uint8_t)(link->last_tx[i] & 0xFFu) == label) {
+            *word = link->last_tx[i];
+            return 1;
+        }
+    }
+    return 0;
+}
+
+uint8_t a429_tx_telemetry(const a429_link_t *link, a429_tx_tlm_t *out, uint8_t max_n)
+{
+    uint8_t n = 0;
+    uint8_t i;
+
+    if (link == 0 || out == 0 || max_n == 0) {
+        return 0;
+    }
+    for (i = 0; i < A429_TX_TLM_N; i++) {
+        a429_word_view_t view;
+        uint32_t word = 0;
+        const uint8_t label = tx_tlm_rows[i].label;
+
+        if (n >= max_n) {
+            break;
+        }
+        /* Snapshot clear drops the name immediately. A word that was
+         * not in the built slot is not invented from the snapshot. */
+        if (!tx_snapshot_has(link, label) || !tx_find_word(link, label, &word)) {
+            continue;
+        }
+        a429_inspect(word, link->expected_sdi, &view);
+        if (view.label != label) {
+            continue;
+        }
+        if (tx_tlm_rows[i].is_int) {
+            if (!view.disc_valid) {
+                continue;
+            }
+        } else if (!view.eu_valid) {
+            continue;
+        }
+        out[n].name = tx_tlm_rows[i].name;
+        out[n].label = label;
+        out[n].fast = tx_tlm_rows[i].fast;
+        out[n].is_int = tx_tlm_rows[i].is_int;
+        out[n].slow_i = tx_tlm_rows[i].slow_i;
+        out[n].eu = view.eu;
+        out[n].data = (int32_t)view.data;
+        n++;
+    }
+    return n;
+}

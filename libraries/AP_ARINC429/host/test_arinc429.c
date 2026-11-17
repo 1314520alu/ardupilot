@@ -1,0 +1,1767 @@
+/*
+ * Host checks for the CS35 ARINC429 logical word.
+ * Expected words below were calculated from appendix B bit positions,
+ * not by calling the codec. Bit 1 is the uint32 LSB.
+ *
+ * Ng 50.00% label 0144 SDI 00 SM 11 data 5000:
+ *   0x64 | (5000<<13) | (3<<29) = 0x62710064, 10 data bits set, so
+ *   odd parity sets bit 32 -> 0xE2710064.
+ */
+#include "../arinc429.h"
+
+#include <stdio.h>
+#include <string.h>
+
+static int g_fails;
+
+static void expect_true(int cond, const char *msg)
+{
+    if (!cond) {
+        printf("FAIL: %s\n", msg);
+        g_fails++;
+    }
+}
+
+static int bit_count(uint32_t w)
+{
+    int n = 0;
+    int i;
+    for (i = 0; i < 32; i++) {
+        n += (int)((w >> i) & 1u);
+    }
+    return n;
+}
+
+static uint32_t oracle_word(uint8_t label, uint8_t sdi, uint16_t data, uint8_t sm)
+{
+    uint32_t w = (uint32_t)label;
+    int n;
+    int i;
+    w |= ((uint32_t)(sdi & 3u)) << 8;
+    w |= ((uint32_t)data) << 13;
+    w |= ((uint32_t)(sm & 3u)) << 29;
+    n = 0;
+    for (i = 0; i < 31; i++) {
+        n += (int)((w >> i) & 1u);
+    }
+    if ((n & 1) == 0) {
+        w |= 1u << 31;
+    }
+    return w;
+}
+
+static int is_nan_f(float v)
+{
+    union {
+        float f;
+        uint32_t u;
+    } x;
+    x.f = v;
+    return ((x.u >> 23) & 0xffu) == 0xffu && (x.u & 0x7fffffu) != 0u;
+}
+
+static void test_known_words(void)
+{
+    uint32_t w = 0xDEADBEEFu;
+    const uint32_t ng50 = 0xE2710064u;
+    const uint32_t t45_m65 = 0x7FAEC067u;
+    const uint32_t mkp_m30 = 0x7FDA8069u;
+    const uint32_t mkp_800 = 0xE3E80069u;
+    const uint32_t ng0 = 0x60000064u;
+    const uint32_t ng_max = 0xE5E24064u;
+
+    expect_true(oracle_word(0144, 0, 5000, A429_SM_NORMAL) == ng50, "oracle Ng 50");
+    expect_true(bit_count(ng50) % 2 == 1, "Ng 50 odd population");
+    expect_true(a429_encode_bnr(0144, 0, A429_SM_NORMAL, 50.0f, &w) == 1, "encode Ng 50");
+    expect_true(w == ng50, "Ng 50 matches hardcoded word");
+    expect_true(((w >> 13) & 0xFFFFu) == 5000u, "Ng data in D14..D29");
+    expect_true(((w >> 10) & 0x7u) == 0u, "reserved D11..D13 clear");
+    expect_true(((w >> 8) & 0x3u) == 0u, "SDI D9..D10 is 00");
+    expect_true(((w >> 29) & 0x3u) == A429_SM_NORMAL, "SM D31..D30 normal");
+    expect_true((w & 0xFFu) == 0144, "label 0144 in D1..D8");
+
+    w = 0xDEADBEEFu;
+    expect_true(a429_encode_bnr(0147, 0, A429_SM_NORMAL, -65.0f, &w) == 1, "encode T45 -65");
+    expect_true(w == t45_m65, "T45 -65 hardcoded");
+    expect_true((int16_t)((w >> 13) & 0xFFFFu) == (int16_t)-650, "T45 sign in D29");
+
+    expect_true(a429_encode_bnr(0151, 0, A429_SM_NORMAL, -30.0f, &w) == 1, "encode torque -30");
+    expect_true(w == mkp_m30, "torque -30 hardcoded");
+    expect_true(a429_encode_bnr(0151, 0, A429_SM_NORMAL, 800.0f, &w) == 1, "encode torque 800");
+    expect_true(w == mkp_800, "torque 800 hardcoded");
+
+    expect_true(a429_encode_bnr(0144, 0, A429_SM_NORMAL, 0.0f, &w) == 1, "encode Ng 0");
+    expect_true(w == ng0, "Ng 0 hardcoded");
+    expect_true(a429_encode_bnr(0144, 0, A429_SM_NORMAL, 120.5f, &w) == 1, "encode Ng 120.5");
+    expect_true(w == ng_max, "Ng 120.5 hardcoded");
+    expect_true(a429_encode_bnr(0145, 0, A429_SM_NORMAL, 150.0f, &w) == 1, "encode Np 150");
+    expect_true(w == oracle_word(0145, 0, 15000, A429_SM_NORMAL), "Np 150 oracle");
+    expect_true(a429_encode_bnr(0147, 0, A429_SM_NORMAL, 1060.0f, &w) == 1, "encode T45 1060");
+    expect_true(w == oracle_word(0147, 0, 10600, A429_SM_NORMAL), "T45 1060 oracle");
+}
+
+static void test_reject_bad_numbers(void)
+{
+    uint32_t w = 0xDEADBEEFu;
+    float nan_v = 0.0f;
+    nan_v = nan_v / nan_v;
+
+    expect_true(a429_encode_bnr(0144, 0, A429_SM_NORMAL, nan_v, &w) == 0, "reject NaN");
+    expect_true(w == 0xDEADBEEFu, "NaN leaves output unchanged");
+    {
+        union { float f; uint32_t u; } inf;
+        inf.u = 0x7f800000u;
+        expect_true(a429_encode_bnr(0144, 0, A429_SM_NORMAL, inf.f, &w) == 0, "reject +Inf");
+        inf.u = 0xff800000u;
+        expect_true(a429_encode_bnr(0144, 0, A429_SM_NORMAL, inf.f, &w) == 0, "reject -Inf");
+        expect_true(w == 0xDEADBEEFu, "non-finite leaves output unchanged");
+    }
+    expect_true(a429_encode_bnr(0144, 0, A429_SM_NORMAL, 1.0e30f, &w) == 0, "reject huge EU");
+    expect_true(w == 0xDEADBEEFu, "huge EU leaves output unchanged");
+    expect_true(a429_encode_bnr(0144, 0, A429_SM_NORMAL, 120.51f, &w) == 0, "reject Ng above 120.5");
+    expect_true(a429_encode_bnr(0144, 0, A429_SM_NORMAL, -0.01f, &w) == 0, "reject Ng below 0");
+    expect_true(a429_encode_bnr(0147, 0, A429_SM_NORMAL, -65.1f, &w) == 0, "reject T45 below -65");
+    expect_true(a429_encode_bnr(0147, 0, A429_SM_NORMAL, 1060.1f, &w) == 0, "reject T45 above 1060");
+    expect_true(a429_encode_bnr(0151, 0, A429_SM_NORMAL, -30.1f, &w) == 0, "reject torque below -30");
+    expect_true(a429_encode_bnr(0151, 0, A429_SM_NORMAL, 800.1f, &w) == 0, "reject torque above 800");
+    expect_true(a429_encode_bnr(0144, 4, A429_SM_NORMAL, 1.0f, &w) == 0, "reject SDI > 3");
+    expect_true(a429_encode_bnr(0144, 0, 4, 1.0f, &w) == 0, "reject SM > 3");
+    expect_true(a429_encode_bnr(0144, 0, A429_SM_NORMAL, 1.0f, 0) == 0, "reject null output");
+    expect_true(a429_encode_bnr(0146, 0, A429_SM_NORMAL, 10.0f, &w) == 1, "catalog Ngc still encodes");
+    expect_true(a429_encode_bnr(0331, 0, A429_SM_NORMAL, 1.0f, &w) == 0, "label 331 is not a BNR encode");
+}
+
+static void test_all_sm_and_faults(void)
+{
+    uint32_t base = 0;
+    uint32_t word;
+    a429_word_view_t view;
+    a429_link_t link;
+    const uint32_t fail_w = 0x82710064u;
+    const uint32_t ncd_w = 0x22710064u;
+    const uint32_t ft_w = 0x42710064u;
+    uint8_t sm;
+
+    expect_true(a429_encode_bnr(0144, 0, A429_SM_NORMAL, 50.0f, &base) == 1, "base Ng");
+    for (sm = 0; sm < 4; sm++) {
+        expect_true(a429_encode_bnr(0144, 0, sm, 50.0f, &word) == 1, "encode each SM");
+        expect_true(a429_parity_ok(word), "each SM keeps odd parity");
+        a429_inspect(word, 0, &view);
+        expect_true(view.sm == sm, "inspect SM");
+        if (sm == A429_SM_NORMAL) {
+            expect_true(view.eu_valid == 1, "only normal SM is valid EU");
+            expect_true(view.eu > 49.9f && view.eu < 50.1f, "normal EU 50");
+        } else {
+            expect_true(view.eu_valid == 0, "non-normal SM is not valid EU");
+            expect_true(is_nan_f(view.eu), "invalid EU is NaN");
+        }
+    }
+    expect_true(a429_encode_bnr(0144, 0, A429_SM_FAIL, 50.0f, &word) == 1 && word == fail_w, "SM fail word");
+    expect_true(a429_encode_bnr(0144, 0, A429_SM_NCD, 50.0f, &word) == 1 && word == ncd_w, "SM ncd word");
+    expect_true(a429_encode_bnr(0144, 0, A429_SM_FT, 50.0f, &word) == 1 && word == ft_w, "SM ft word");
+
+    a429_inspect(base ^ (1u << 31), 0, &view);
+    expect_true(view.parity_ok == 0 && view.eu_valid == 0, "parity flip invalid");
+    expect_true(view.raw == (base ^ (1u << 31)), "parity flip keeps raw");
+    expect_true(view.label == 0144, "parity flip keeps the label");
+
+    word = (base & 0x7FFFFFFFu) | (1u << 10);
+    {
+        uint32_t fixed = word & 0x7FFFFFFFu;
+        int n = 0;
+        int i;
+        for (i = 0; i < 31; i++) {
+            n += (int)((fixed >> i) & 1u);
+        }
+        if ((n & 1) == 0) {
+            fixed |= 1u << 31;
+        }
+        word = fixed;
+    }
+    a429_inspect(word, 0, &view);
+    expect_true(view.parity_ok == 1 && view.reserved_ok == 0 && view.eu_valid == 0, "reserved bit invalid");
+
+    word = oracle_word(0144, 1, 5000, A429_SM_NORMAL);
+    a429_inspect(word, 0, &view);
+    expect_true(view.sdi_ok == 0 && view.eu_valid == 0, "SDI 01 is not the default");
+
+    word = oracle_word(0144, 0, 13000, A429_SM_NORMAL);
+    a429_inspect(word, 0, &view);
+    expect_true(view.parity_ok == 1 && view.in_range == 0 && view.eu_valid == 0, "over-range Ng invalid");
+
+    a429_link_init(&link);
+    a429_link_ingest(&link, base ^ (1u << 31), 1000u);
+    expect_true(link.counters.parity_errors == 1u, "parity counter increments");
+    expect_true(link.counters.rx_count == 1u, "rx counter increments");
+    expect_true(link.rx[0].have_raw == 1 && link.rx[0].raw == (base ^ (1u << 31)), "raw kept on bad parity");
+    expect_true(link.rx[0].have_valid == 0 && link.rx[0].fresh == 0, "bad parity is not fresh");
+    expect_true(link.counters.valid_count == 0u, "bad parity is not valid");
+    a429_link_ingest(&link, word, 2000u); /* over-range, still label 144 */
+    expect_true(link.counters.range_errors == 1u, "range counter increments");
+    expect_true(link.rx[0].raw == word, "over-range raw kept");
+    expect_true(link.rx[0].fresh == 0, "over-range is not fresh");
+}
+
+static void test_edges(void)
+{
+    a429_edge_state_t a;
+    a429_edge_state_t b;
+    a429_pcmd_levels_t hi;
+    a429_pcmd_levels_t lo;
+    a429_pcmd_edges_t edges;
+    a429_link_t link;
+    uint32_t word = 0;
+    uint16_t bits;
+
+    memset(&hi, 0, sizeof(hi));
+    memset(&lo, 0, sizeof(lo));
+    hi.mode = A429_MODE_FLIGHT;
+    hi.cold_run = 1;
+    hi.false_start = 1;
+    hi.channel_switch = 1;
+    hi.rotor_brake = 1;
+    hi.on_ground = 1;
+    hi.power_assurance = 1;
+    hi.overspeed_a = 1;
+    hi.overspeed_b = 1;
+    lo.mode = A429_MODE_STOP;
+
+    a429_edge_reset(&a);
+    a429_edge_reset(&b);
+    a429_edge_update(&a, &hi, 0, &edges);
+    expect_true(edges.cold_run == 0 && edges.false_start == 0 && edges.channel_switch == 0,
+                "invalid sample emits no edge");
+    expect_true(a.have == 0, "invalid sample does not arm the detector");
+
+    a429_edge_update(&a, &hi, 1, &edges);
+    expect_true(a.have == 1, "first valid sample arms");
+    expect_true(edges.cold_run == 0 && edges.false_start == 0 && edges.channel_switch == 0,
+                "startup high is not an edge");
+    a429_edge_update(&a, &hi, 1, &edges);
+    expect_true(edges.cold_run == 0, "held high is not an edge");
+    a429_edge_update(&a, &lo, 1, &edges);
+    expect_true(edges.cold_run == 0 && edges.channel_switch == 0, "falling level is not an edge");
+    a429_edge_update(&a, &hi, 0, &edges);
+    expect_true(edges.cold_run == 0 && a.prev.cold_run == 0, "invalid high does not move state");
+    a429_edge_update(&a, &hi, 1, &edges);
+    expect_true(edges.cold_run == 1 && edges.false_start == 1 && edges.channel_switch == 1,
+                "0 to 1 is an edge");
+    expect_true(edges.cold_run == 1, "edge result is separate from the level snapshot");
+
+    a429_edge_update(&b, &hi, 1, &edges);
+    expect_true(edges.cold_run == 0, "a second label starts clean");
+
+    bits = (uint16_t)(4u | (1u << 3) | (1u << 4) | (1u << 5) | (1u << 6) | (1u << 7) | (1u << 8) | (1u << 9) | (1u << 10));
+    a429_pcmd_decode(bits, &hi);
+    expect_true(hi.mode == A429_MODE_FLIGHT, "flight code 100");
+    expect_true(hi.cold_run == 1 && hi.false_start == 1 && hi.rotor_brake == 1, "level bits D17..D19");
+    expect_true(hi.on_ground == 1 && hi.power_assurance == 1, "ground and power-assurance levels");
+    expect_true(hi.channel_switch == 1 && hi.overspeed_a == 1 && hi.overspeed_b == 1, "D22..D24 levels");
+
+    memset(&lo, 0, sizeof(lo));
+    lo.mode = A429_MODE_STOP;
+    expect_true(a429_encode_pcmd(0340, 0, A429_SM_NORMAL, &lo, &word) == 1, "encode stop");
+    expect_true(((word >> 13) & 7u) == 1u, "D16..D14 is 001");
+    expect_true(a429_parity_ok(word), "stop word has odd parity");
+    lo.mode = A429_MODE_IDLE;
+    expect_true(a429_encode_pcmd(0342, 0, A429_SM_NORMAL, &lo, &word) == 1, "encode idle");
+    expect_true(((word >> 13) & 7u) == 3u && (word & 0xFFu) == 0342, "idle code 011 on 342");
+    lo.mode = A429_MODE_FLIGHT;
+    expect_true(a429_encode_pcmd(0344, 0, A429_SM_NORMAL, &lo, &word) == 1, "encode flight");
+    expect_true(((word >> 13) & 7u) == 4u && (word & 0xFFu) == 0344, "flight code 100 on 344");
+    lo.mode = A429_MODE_UNKNOWN;
+    expect_true(a429_encode_pcmd(0340, 0, A429_SM_NORMAL, &lo, &word) == 0, "unknown mode is not encoded");
+
+    a429_link_init(&link);
+    lo.mode = A429_MODE_FLIGHT;
+    lo.cold_run = 1;
+    lo.false_start = 1;
+    lo.channel_switch = 1;
+    expect_true(a429_encode_pcmd(0340, 0, A429_SM_NORMAL, &lo, &word) == 1, "pcmd 340 high");
+    a429_link_ingest(&link, word, 10u);
+    expect_true(link.pcmd[0].edges.cold_run == 0, "link startup does not edge 340");
+    expect_true(link.pcmd[0].levels.cold_run == 1, "link snapshot is a level");
+    lo.cold_run = 0;
+    lo.false_start = 0;
+    lo.channel_switch = 0;
+    expect_true(a429_encode_pcmd(0340, 0, A429_SM_NORMAL, &lo, &word) == 1, "pcmd 340 low");
+    a429_link_ingest(&link, word, 20u);
+    lo.cold_run = 1;
+    word ^= 1u << 31; /* parity error on the same label; level bits stay low */
+    a429_link_ingest(&link, word, 30u);
+    expect_true(link.pcmd[0].edges.cold_run == 0, "bad parity does not edge");
+    expect_true(link.pcmd[0].levels.cold_run == 0, "bad parity keeps previous level");
+    expect_true(a429_encode_pcmd(0342, 0, A429_SM_NORMAL, &lo, &word) == 1, "pcmd 342 high");
+    a429_link_ingest(&link, word, 40u);
+    expect_true(link.pcmd[1].edges.cold_run == 0, "342 has its own detector");
+    expect_true(link.pcmd[0].edge.have == 1 && link.pcmd[0].levels.cold_run == 0, "340 state unchanged by 342");
+}
+
+static void test_schedule_and_timeout(void)
+{
+    a429_sched_t sched;
+    a429_link_t link;
+    uint32_t ng = 0;
+    uint32_t bad;
+    uint32_t t0 = 0xFFFFF000u;
+
+    a429_sched_init(&sched);
+    expect_true(a429_sched_poll(&sched, 0) == 0, "first poll only arms");
+    expect_true(a429_sched_poll(&sched, 12000u) == 0, "12 ms is not the FC period");
+    expect_true(a429_sched_poll(&sched, 12500u) == 1, "due at 12500 us");
+    expect_true(a429_sched_poll(&sched, 12500u) == 0, "same time does not repeat");
+    expect_true(a429_sched_poll(&sched, 24500u) == 0, "13 ms alternate is not used");
+    expect_true(a429_sched_poll(&sched, 25000u) == 1, "second slot at +12500");
+    expect_true(a429_sched_poll(&sched, 37500u) == 1, "third slot at +12500");
+    expect_true(sched.tx_slots == 3u && sched.tx_slots_skipped == 0u, "on-time slots are not skips");
+
+    a429_sched_init(&sched);
+    a429_sched_poll(&sched, 0);
+    expect_true(a429_sched_poll(&sched, 62500u) == 1, "late tick emits one slot");
+    expect_true(sched.tx_slots_skipped == 4u, "late tick records skipped slots");
+    expect_true(a429_sched_poll(&sched, 62500u) == 0, "late tick does not burst");
+    expect_true(a429_sched_poll(&sched, 74999u) == 0, "reschedule is a full period ahead");
+    expect_true(a429_sched_poll(&sched, 75000u) == 1, "next slot after the reschedule");
+
+    a429_sched_init(&sched);
+    expect_true(a429_sched_poll(&sched, t0) == 0, "arm near wrap");
+    expect_true(a429_sched_poll(&sched, t0 + 12499u) == 0, "still early across the wrap");
+    expect_true(a429_sched_poll(&sched, t0 + 12500u) == 1, "due across the microsecond wrap");
+    expect_true(a429_sched_poll(&sched, t0 + 12500u) == 0, "wrap slot does not repeat");
+
+    expect_true(a429_encode_bnr(0144, 0, A429_SM_NORMAL, 10.0f, &ng) == 1, "Ng for timeout");
+    bad = ng ^ (1u << 31);
+
+    a429_link_init(&link);
+    a429_link_ingest(&link, ng, 0);
+    a429_link_poll_timeouts(&link, 1000000u);
+    expect_true(link.rx[0].fresh == 1 && link.rx[0].timeout_count == 0u,
+                "24 ms nominal refresh is not a timeout");
+
+    a429_link_set_timeout_us(&link, 0, 50000u);
+    a429_link_poll_timeouts(&link, 50000u);
+    expect_true(link.rx[0].fresh == 0 && link.rx[0].timeout_count == 1u, "silence times out once");
+    expect_true(link.rx[0].valid_us == 0u && link.rx[0].last_valid_eu > 9.9f &&
+                link.rx[0].last_valid_eu < 10.1f, "timeout keeps the historical sample");
+    a429_link_poll_timeouts(&link, 200000u);
+    expect_true(link.rx[0].timeout_count == 1u, "timeout does not count every poll");
+    a429_link_ingest(&link, ng, 210000u);
+    expect_true(link.rx[0].fresh == 1 && link.rx[0].valid_us == 210000u, "a valid word is fresh again");
+    a429_link_ingest(&link, bad, 220000u);
+    expect_true(link.rx[0].fresh == 0, "parity error clears current freshness");
+    expect_true(link.rx[0].valid_us == 210000u, "parity error does not refresh valid_us");
+    expect_true(link.rx[0].last_valid_eu > 9.9f && link.rx[0].last_valid_eu < 10.1f,
+                "parity error keeps the last good value");
+    expect_true(link.rx[0].raw == bad && link.rx[0].rx_us == 220000u, "invalid word still updates raw and rx time");
+    a429_link_poll_timeouts(&link, 400000u);
+    expect_true(link.rx[0].timeout_count == 1u, "an already-invalid sample is not a second timeout");
+    a429_link_ingest(&link, ng, 410000u);
+    expect_true(link.rx[0].fresh == 1 && link.rx[0].valid_us == 410000u, "recovery restores freshness");
+    a429_link_poll_timeouts(&link, 460000u);
+    expect_true(link.rx[0].fresh == 0 && link.rx[0].timeout_count == 2u, "silence after recovery times out");
+}
+
+static void test_catalog_and_tx_authority(void)
+{
+    uint16_t n = 0;
+    uint16_t i;
+    uint16_t phase1 = 0;
+    const a429_label_info_t *rows;
+    const a429_label_info_t *life;
+    const a429_label_info_t *ngc;
+    const a429_label_info_t *state331;
+    a429_core_t core;
+    a429_pcmd_levels_t levels;
+    uint32_t buf[4];
+    uint32_t ng = 0;
+
+    rows = a429_catalog(&n);
+    expect_true(rows != 0 && n > 20u, "catalog lists the appendix");
+    for (i = 0; i < n; i++) {
+        phase1 = (uint16_t)(phase1 + rows[i].phase1);
+    }
+    expect_true(phase1 == 12u, "phase one is the approved minimal set");
+    ngc = a429_catalog_find(0146);
+    expect_true(ngc != 0 && ngc->phase1 == 0 && ngc->has_range == 1, "Ngc is documented, not phase one");
+    state331 = a429_catalog_find(0331);
+    expect_true(state331 != 0 && state331->phase1 == 0 && state331->kind == A429_KIND_DISC,
+                "label 331 stays documented");
+    life = a429_catalog_find(0210);
+    expect_true(life != 0 && life->phase1 == 0, "life labels 0200..0220 are documented");
+    expect_true(a429_catalog_find(0200) != 0 && a429_catalog_find(0220) != 0, "life span endpoints");
+    expect_true(a429_catalog_find(0221) == 0, "label past the life span is absent");
+    expect_true(a429_phase1_rx_index(0144) == 0, "Ng slot");
+    expect_true(a429_phase1_rx_index(0145) == 1, "Np slot");
+    expect_true(a429_phase1_rx_index(0147) == 2, "T45 slot");
+    expect_true(a429_phase1_rx_index(0151) == 3, "torque slot");
+    expect_true(a429_phase1_rx_index(0175) == 4, "warn slot");
+    expect_true(a429_phase1_rx_index(0176) == 5, "state slot");
+    expect_true(a429_phase1_rx_index(0177) == 6, "warn2 slot");
+    expect_true(a429_phase1_rx_index(0146) < 0, "Ngc is not a tracked receive slot");
+
+    memset(buf, 0xA5, sizeof(buf));
+    expect_true(a429_transport_null()->recv_words(0, 0, buf, 4) == 0, "null recv yields no words");
+    expect_true(buf[0] == 0xA5A5A5A5u && buf[1] == 0xA5A5A5A5u, "null recv writes no frame");
+    expect_true(a429_transport_null()->send_words(0, 0, buf, 1) == -1, "null send refuses");
+
+    a429_core_init(&core);
+    expect_true(core.endpoint.carrier == A429_CARRIER_UNSPECIFIED, "carrier is unspecified");
+    core.endpoint.remote_ipv4 = 0x0A000002u;
+    core.endpoint.remote_port = 4000;
+    core.endpoint.local_port = 4001;
+    a429_core_update(&core, 0);
+    a429_core_update(&core, 12500u);
+    expect_true(core.link.last_tx_count == 0, "no sim input means no command words");
+    expect_true(core.tx_not_sent == 0u, "an empty set is not presented as a send");
+    expect_true(core.sched.tx_slots == 1u, "the slot still elapses");
+
+    memset(&levels, 0, sizeof(levels));
+    levels.mode = A429_MODE_FLIGHT;
+    levels.rotor_brake = 1;
+    expect_true(a429_sim_set_pcmd(&core.link, 0, &levels) == 1, "sim may supply a level snapshot");
+    a429_sim_set_clp(&core.link, 2.5f);
+    a429_sim_set_nr(&core.link, 100.0f);
+    a429_core_update(&core, 25000u);
+    expect_true(core.link.last_tx_count == 3u, "sim builds CLP, Nr and one PCMD");
+    expect_true((core.link.last_tx[0] & 0xFFu) == 0310, "first word is CLP");
+    expect_true((core.link.last_tx[1] & 0xFFu) == 0311, "second word is Nr");
+    expect_true((core.link.last_tx[2] & 0xFFu) == 0340, "third word is PCMD1");
+    expect_true(((core.link.last_tx[2] >> 13) & 7u) == A429_MODE_FLIGHT, "PCMD carries the supplied level");
+    expect_true(core.tx_not_sent == 3u, "null carrier did not accept the words");
+    a429_core_update(&core, 25000u);
+    expect_true(core.tx_not_sent == 3u, "no catch-up send on the same tick");
+
+    expect_true(a429_encode_bnr(0144, 0, A429_SM_NORMAL, 80.0f, &ng) == 1, "Ng inject");
+    a429_core_inject_rx(&core, ng, 25000u);
+    expect_true(core.link.rx[0].fresh == 1, "injected Ng is fresh in simulation");
+    a429_core_inject_rx(&core, oracle_word(0146, 0, 1000, A429_SM_NORMAL), 26000u);
+    expect_true(core.link.rx_untracked == 1u, "Ngc is not a phase-one channel");
+    expect_true(core.link.rx[0].fresh == 1, "an untracked label does not disturb Ng");
+    a429_core_inject_rx(&core, oracle_word(0310, 0, 100, A429_SM_NORMAL), 27000u);
+    expect_true(core.link.rx_untracked == 2u, "a TX label does not keep RX data as a receive channel");
+}
+
+/* The carrier test double lives only in this file. Firmware ships the null carrier. */
+static uint32_t g_seen_ip;
+static uint16_t g_seen_rp;
+static uint16_t g_seen_lp;
+static uint8_t g_seen_carrier;
+static int g_send_calls;
+static uint32_t g_rx_word;
+static int g_rx_left;
+
+static int fake_send2(void *ctx, const a429_endpoint_t *ep, const uint32_t *words, uint8_t n)
+{
+    (void)ctx;
+    (void)words;
+    g_send_calls++;
+    if (ep != 0) {
+        g_seen_ip = ep->remote_ipv4;
+        g_seen_rp = ep->remote_port;
+        g_seen_lp = ep->local_port;
+        g_seen_carrier = ep->carrier;
+    }
+    expect_true(n > 0, "send is not called with an empty set");
+    return -1;
+}
+
+static int fake_recv2(void *ctx, const a429_endpoint_t *ep, uint32_t *words, uint8_t max_n)
+{
+    (void)ctx;
+    (void)ep;
+    if (g_rx_left <= 0 || max_n == 0 || words == 0) {
+        return 0;
+    }
+    words[0] = g_rx_word;
+    g_rx_left = 0;
+    return 1;
+}
+
+static void test_carrier_interface(void)
+{
+    a429_core_t core;
+    a429_transport_t fake;
+    a429_pcmd_levels_t levels;
+    uint32_t ng;
+
+    memset(&fake, 0, sizeof(fake));
+    fake.send_words = fake_send2;
+    fake.recv_words = fake_recv2;
+    a429_core_init(&core);
+    core.endpoint.remote_ipv4 = 0xC0A8010Au;
+    core.endpoint.remote_port = 5000;
+    core.endpoint.local_port = 5001;
+    core.endpoint.carrier = A429_CARRIER_UNSPECIFIED;
+    a429_core_set_transport(&core, &fake);
+    memset(&levels, 0, sizeof(levels));
+    levels.mode = A429_MODE_IDLE;
+    a429_sim_set_pcmd(&core.link, 1, &levels);
+    g_send_calls = 0;
+    a429_core_update(&core, 0);
+    expect_true(g_send_calls == 0, "arming the schedule does not send");
+    a429_core_update(&core, 12500u);
+    expect_true(g_send_calls == 1, "one due slot sends once");
+    expect_true(g_seen_ip == 0xC0A8010Au && g_seen_rp == 5000 && g_seen_lp == 5001, "endpoint is passed through");
+    expect_true(g_seen_carrier == A429_CARRIER_UNSPECIFIED, "send does not invent a UDP or TCP choice");
+    expect_true((core.link.last_tx[0] & 0xFFu) == 0342, "the word is PCMD2");
+    expect_true(core.tx_not_sent == 1u, "a refusing carrier is counted");
+
+    expect_true(a429_encode_bnr(0175, 0, A429_SM_NORMAL, 0.0f, &ng) == 0, "warn is not a BNR value");
+    ng = oracle_word(0175, 0, 0x1555, A429_SM_NORMAL);
+    g_rx_word = ng;
+    g_rx_left = 1;
+    a429_core_update(&core, 25000u);
+    expect_true(core.link.rx[4].have_raw == 1 && core.link.rx[4].fresh == 1, "warn word received via the carrier");
+    expect_true(core.link.rx[4].view.disc_valid == 1, "warn is a discrete word");
+    expect_true(core.link.rx[4].view.data == (int16_t)0x1555, "warn keeps the data field");
+    expect_true(core.link.rx[4].view.eu_valid == 0, "warn has no engineering value");
+
+    ng = oracle_word(0176, 0, 0x0001, A429_SM_FAIL);
+    a429_core_inject_rx(&core, ng, 26000u);
+    expect_true(core.link.rx[5].fresh == 0 && core.link.rx[5].have_raw == 1, "failed state word is stored and not fresh");
+    expect_true(core.link.counters.sm_fail >= 1u, "SM fail is a counter");
+}
+
+static void test_disc_sm_matrix(void)
+{
+    a429_link_t link;
+    uint32_t word;
+    uint8_t sm;
+    a429_link_init(&link);
+    for (sm = 0; sm < 4; sm++) {
+        word = oracle_word(0177, 0, 0x00AAu, sm);
+        a429_link_ingest(&link, word, 1000u + sm);
+    }
+    expect_true(link.counters.sm_fail == 1u, "one fail");
+    expect_true(link.counters.sm_ncd == 1u, "one non-computed");
+    expect_true(link.counters.sm_ft == 1u, "one functional test");
+    expect_true(link.counters.sm_normal == 1u, "one normal");
+    expect_true(link.rx[6].fresh == 1, "only the normal warn2 word is fresh");
+    expect_true(link.rx[6].view.data == (int16_t)0x00AA, "warn2 data kept");
+    word = oracle_word(0177, 0, 0x0001, A429_SM_NCD);
+    a429_link_ingest(&link, word, 2000u);
+    expect_true(link.rx[6].fresh == 0, "NCD clears current freshness");
+    expect_true(link.rx[6].valid_us == 1003u, "NCD does not refresh valid_us");
+    expect_true(link.rx[6].last_valid.raw == oracle_word(0177, 0, 0x00AAu, A429_SM_NORMAL),
+                "historical normal word is kept");
+    expect_true(link.rx[6].raw == word, "latest raw is the NCD word");
+    expect_true(link.rx[6].view.disc_valid == 0, "current view is the invalid word");
+}
+
+static void test_invalid_sm_clears_fresh(void)
+{
+    uint8_t sm;
+    uint32_t good = 0;
+    uint32_t bad;
+    const uint8_t sms[3] = {A429_SM_FAIL, A429_SM_NCD, A429_SM_FT};
+
+    expect_true(a429_encode_bnr(0144, 0, A429_SM_NORMAL, 50.0f, &good) == 1, "Ng 50 for SM matrix");
+    for (sm = 0; sm < 3u; sm++) {
+        a429_link_t link;
+        a429_link_init(&link);
+        a429_link_ingest(&link, good, 1000u);
+        expect_true(a429_encode_bnr(0144, 0, sms[sm], 50.0f, &bad) == 1, "encode non-normal SM");
+        a429_link_ingest(&link, bad, 2000u);
+        expect_true(link.rx[0].fresh == 0, "non-normal SM is not a fresh getter value");
+        expect_true(link.rx[0].view.eu_valid == 0, "current view is not a valid EU");
+        expect_true(link.rx[0].valid_us == 1000u, "non-normal SM does not refresh valid_us");
+        expect_true(link.rx[0].have_valid == 1 && link.rx[0].last_valid_eu > 49.9f &&
+                    link.rx[0].last_valid_eu < 50.1f, "last good EU remains");
+        expect_true(link.rx[0].last_valid.raw == good, "last good word remains");
+    }
+    {
+        a429_link_t link;
+        a429_link_init(&link);
+        a429_link_ingest(&link, good, 1000u);
+        a429_link_ingest(&link, good ^ (1u << 31), 2000u);
+        expect_true(link.rx[0].fresh == 0 && link.rx[0].valid_us == 1000u, "parity invalidates freshness only");
+        a429_link_ingest(&link, good, 3000u);
+        expect_true(link.rx[0].fresh == 1 && link.rx[0].valid_us == 3000u &&
+                    link.rx[0].view.eu_valid == 1, "normal word recovers freshness");
+    }
+}
+
+static void test_rs422_label_wire(void)
+{
+    uint32_t ng = 0;
+    uint32_t pdf = 0x629218C1u;
+    uint32_t logical;
+    uint32_t wire;
+    uint32_t bad;
+    uint8_t frame[5];
+    uint8_t legacy[5];
+    uint8_t n = 0;
+    uint8_t rate[5];
+    uint32_t out = 0;
+    a429_frame_dec_t dec;
+    int mismatches = 0;
+    int label;
+
+    expect_true(a429_encode_bnr(0144, 0, A429_SM_NORMAL, 50.0f, &ng) == 1 && ng == 0xE2710064u,
+                "Ng50 logical word");
+    wire = a429_label_wire_swap(ng);
+    expect_true(wire == 0xE2710026u, "Ng octal 144 logical 0x64 becomes wire 0x26");
+    expect_true((wire & 0xFFFFFF00u) == (ng & 0xFFFFFF00u), "only the label byte moves");
+    expect_true(a429_parity_ok(ng) == 1 && a429_parity_ok(wire) == 1, "label reversal keeps odd parity");
+    expect_true(a429_label_wire_swap(wire) == ng, "the swap is its own inverse");
+    logical = a429_label_wire_swap(pdf);
+    expect_true((logical & 0xFFu) == 0203u, "PDF 0x629218C1 decodes label octal 203");
+    expect_true(a429_parity_ok(pdf) == a429_parity_ok(logical), "the PDF word's parity bit is not rewritten");
+
+    expect_true(a429_frame_encode(A429_FRAME_UART429S_C0, &ng, 1, legacy, 5, &n) == 1 &&
+                legacy[0] == 0xC0u && legacy[1] == 0x64u, "FRAME 1 still sends logical 0x64");
+    expect_true(a429_frame_encode(A429_FRAME_RS422_429_1C, &ng, 1, frame, 5, &n) == 1 && n == 5u &&
+                frame[0] == 0xC0u && frame[1] == 0x26u && frame[2] == 0x00u &&
+                frame[3] == 0x71u && frame[4] == 0xE2u, "RS422 frame is C0 26 00 71 E2");
+    a429_frame_dec_init(&dec, A429_FRAME_RS422_429_1C);
+    expect_true(a429_frame_push(&dec, frame, 5, &out, 1) == 1 && out == ng, "RX restores the logical word");
+    bad = ng ^ (1u << 31);
+    expect_true(a429_frame_encode(A429_FRAME_RS422_429_1C, &bad, 1, frame, 5, &n) == 1, "bad parity still frames");
+    a429_frame_dec_init(&dec, A429_FRAME_RS422_429_1C);
+    expect_true(a429_frame_push(&dec, frame, 5, &out, 1) == 1, "bad parity is delivered");
+    expect_true(a429_parity_ok(out) == 0 && (out & 0xFFu) == 0144u, "RX does not repair parity");
+
+    for (label = 0; label < 256; label++) {
+        uint32_t base = a429_apply_odd_parity((uint32_t)label | (0x1555u << 13) | ((uint32_t)A429_SM_NORMAL << 29));
+        uint32_t flipped = base ^ (1u << 31);
+        uint32_t on_wire = a429_label_wire_swap(base);
+        uint32_t back = a429_label_wire_swap(on_wire);
+        uint32_t bad_wire = a429_label_wire_swap(flipped);
+        uint8_t encoded[5];
+        uint8_t decoded_n = 0;
+        uint32_t decoded = 0;
+        a429_frame_dec_t round;
+        if (back != base || (on_wire & 0xFFu) != a429_label_bit_reverse((uint8_t)label) ||
+            (on_wire & 0xFFFFFF00u) != (base & 0xFFFFFF00u) ||
+            a429_parity_ok(base) != 1 || a429_parity_ok(on_wire) != 1 ||
+            a429_parity_ok(flipped) != 0 || a429_parity_ok(bad_wire) != 0 ||
+            a429_label_wire_swap(bad_wire) != flipped) {
+            mismatches++;
+            continue;
+        }
+        if (a429_frame_encode(A429_FRAME_RS422_429_1C, &base, 1, encoded, 5, &decoded_n) != 1 ||
+            decoded_n != 5u || encoded[1] != a429_label_bit_reverse((uint8_t)label)) {
+            mismatches++;
+            continue;
+        }
+        a429_frame_dec_init(&round, A429_FRAME_RS422_429_1C);
+        if (a429_frame_push(&round, encoded, 5, &decoded, 1) != 1 || decoded != base) {
+            mismatches++;
+        }
+    }
+    expect_true(mismatches == 0, "all 256 labels round-trip and keep parity");
+    expect_true(a429_rs422_rate_encode(A429_RS422_RATE_100K, rate, 5, &n) == 1 &&
+                rate[0] == 0xCDu && rate[1] == 0x00u && rate[2] == 0x00u &&
+                rate[3] == 0x55u && rate[4] == 0x55u, "100 kbps command bytes");
+    expect_true(a429_rs422_rate_encode(A429_RS422_RATE_50K, rate, 5, &n) == 1 && rate[1] == 0x03u,
+                "50 kbps command bytes");
+    expect_true(a429_rs422_rate_encode(A429_RS422_RATE_12K5, rate, 5, &n) == 1 && rate[1] == 0x07u,
+                "12.5 kbps command bytes");
+    expect_true(a429_rs422_rate_encode(9u, rate, 5, &n) == 0, "an unknown rate encodes nothing");
+}
+
+static void apply_engine(a429_link_t *link, a429_mode_state_t *st, const a429_mode_in_t *in)
+{
+    a429_pcmd_levels_t levels;
+    int rc = a429_mode_step(st, in, &levels);
+    uint8_t i;
+    if (rc > 0) {
+        for (i = 0; i < A429_PCMD_N; i++) {
+            a429_sim_set_pcmd(link, i, &levels);
+        }
+    } else if (rc < 0) {
+        a429_sim_clear_pcmd(link);
+    }
+}
+
+static void build_tx(a429_link_t *link)
+{
+    uint32_t words[8];
+    a429_link_build_tx(link, words, 8);
+}
+
+static int levels_match(uint32_t word, uint8_t label, uint8_t mode, uint8_t on_ground)
+{
+    a429_pcmd_levels_t got;
+    a429_pcmd_decode((uint16_t)((word >> 13) & 0xFFFFu), &got);
+    if ((word & 0xFFu) != label || a429_parity_ok(word) != 1) {
+        return 0;
+    }
+    if (got.mode != mode || got.on_ground != on_ground) {
+        return 0;
+    }
+    if (got.cold_run || got.false_start || got.rotor_brake || got.channel_switch ||
+        got.power_assurance || got.overspeed_a || got.overspeed_b) {
+        return 0;
+    }
+    return 1;
+}
+
+static void expect_three(const a429_link_t *link, uint8_t mode, uint8_t on_ground, const char *msg)
+{
+    static const uint8_t labels[A429_PCMD_N] = {0340, 0342, 0344};
+    uint8_t i;
+    expect_true(link->last_tx_count == A429_PCMD_N, msg);
+    for (i = 0; i < A429_PCMD_N; i++) {
+        expect_true(levels_match(link->last_tx[i], labels[i], mode, on_ground) == 1, msg);
+    }
+}
+
+static a429_mode_in_t engine_run_in(uint32_t now_ms)
+{
+    a429_mode_in_t in;
+    memset(&in, 0, sizeof(in));
+    in.enable = 1;
+    in.eng_ch = 8;
+    in.rc_present = 1;
+    in.rc_valid = 1;
+    in.rc_pwm = 1801;
+    in.interlock_high = 1;
+    in.armed = 1;
+    in.on_ground = 1;
+    in.now_ms = now_ms;
+    return in;
+}
+
+static void test_engine_mode(void)
+{
+    a429_link_t link;
+    a429_mode_state_t st;
+    a429_mode_in_t in;
+    a429_pcmd_levels_t levels;
+    a429_pcmd_levels_t snap;
+    union {
+        uint32_t u;
+        float f;
+    } nanbits;
+
+    nanbits.u = 0x7fc00000u;
+    memset(&st, 0, sizeof(st));
+    memset(&in, 0, sizeof(in));
+    expect_true(a429_mode_step(0, &in, &levels) == 0, "null state does not decide");
+    expect_true(a429_mode_step(&st, 0, &levels) == 0, "null input does not decide");
+
+    a429_link_init(&link);
+    memset(&snap, 0, sizeof(snap));
+    snap.mode = A429_MODE_FLIGHT;
+    snap.rotor_brake = 1;
+    a429_sim_set_pcmd(&link, 0, &snap);
+    a429_sim_set_clp(&link, 2.5f);
+    memset(&in, 0, sizeof(in));
+    in.enable = 1;
+    expect_true(a429_mode_step(&st, &in, &levels) == 0, "ENG_CH 0 does not take the snapshot");
+    build_tx(&link);
+    expect_true(link.last_tx_count == 2u, "CLP and the sim command remain");
+    expect_true((link.last_tx[0] & 0xFFu) == 0310, "CLP is still first");
+    expect_true(levels_match(link.last_tx[1], 0340, A429_MODE_FLIGHT, 0) == 0, "brake is not a vehicle word");
+    expect_true(((link.last_tx[1] >> 13) & 0xFFFFu) != 0u, "sim data was not cleared");
+    expect_true(link.sim.pcmd[0].rotor_brake == 1, "sim brake level remains");
+    expect_true(a429_mode_step(&st, &in, &levels) == 0, "a second idle step still does not wipe");
+
+    in = engine_run_in(1000u);
+    in.nr_sample = 0;
+    in.nr_rpm = 0.0f;
+    in.nr_ref = 1000.0f;
+    in.nr_crit_pct = 90.0f;
+    in.runup_ms = 5000u;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_true(link.last_tx_count == 4u && (link.last_tx[0] & 0xFFu) == 0310, "CLP stays ahead of the command words");
+    expect_true(levels_match(link.last_tx[1], 0340, A429_MODE_FLIGHT, 1) == 1, "flight is immediate and does not wait for Nr");
+    link.sim.clp_set = 0;
+
+    in.rc_pwm = 1800;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_STOP, 1, "PWM 1800 is not engine run");
+
+    in = engine_run_in(1100u);
+    in.rc_pwm = 1200;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_STOP, 1, "middle or low requests stop");
+
+    in = engine_run_in(1200u);
+    in.rc_valid = 0;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_STOP, 1, "invalid RC requests stop");
+
+    in = engine_run_in(1300u);
+    in.rc_failsafe = 1;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_STOP, 1, "RC failsafe requests stop");
+
+    in = engine_run_in(1400u);
+    in.rc_present = 0;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_STOP, 1, "a missing channel requests stop");
+
+    in = engine_run_in(1500u);
+    in.armed = 0;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_IDLE, 1, "disarmed run is idle, not stop");
+
+    in = engine_run_in(1600u);
+    in.interlock_high = 0;
+    in.interlock_released = 1;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_IDLE, 1, "interlock off keeps idle");
+
+    in = engine_run_in(0u);
+    in.on_ground = 0;
+    in.nr_ref = 0.0f;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_FLIGHT, 0, "air clears the on-ground bit and still flies");
+
+    memset(&st, 0, sizeof(st));
+    in = engine_run_in(0u);
+    in.nr_ref = 1000.0f;
+    in.nr_crit_pct = 50.0f;
+    in.runup_ms = 5000u;
+    in.nr_sample = 1;
+    in.nr_rpm = 100.0f;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_FLIGHT, 1, "low Nr does not delay the first flight word");
+    in.now_ms = 4999u;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_FLIGHT, 1, "Nr still below inside the runup window");
+    in.now_ms = 5000u;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_IDLE, 1, "runup timeout latches idle");
+    in.now_ms = 9000u;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_IDLE, 1, "the latch holds while interlock stays high");
+    in.rc_pwm = 1000;
+    in.interlock_high = 1;
+    in.interlock_released = 0;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_STOP, 1, "engine stop does not by itself clear the latch");
+    in.rc_pwm = 1801;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_IDLE, 1, "engine run again stays idle until interlock cycles");
+    in.interlock_high = 0;
+    in.interlock_released = 1;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_IDLE, 1, "releasing interlock clears the latch and stays idle");
+    in.interlock_high = 1;
+    in.interlock_released = 0;
+    in.now_ms = 20000u;
+    in.nr_rpm = 0.0f;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_FLIGHT, 1, "opening interlock commands flight again immediately");
+    in.now_ms = 24999u;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_FLIGHT, 1, "the new runup window starts at the new command");
+
+    memset(&st, 0, sizeof(st));
+    in = engine_run_in(100u);
+    in.nr_ref = 1000.0f;
+    in.nr_crit_pct = 50.0f;
+    in.runup_ms = 5000u;
+    in.nr_sample = 1;
+    in.nr_rpm = 500.0f;
+    apply_engine(&link, &st, &in);
+    in.now_ms = 200u;
+    in.nr_rpm = 0.0f;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_FLIGHT, 1, "a dip after the threshold does not abort");
+    in.now_ms = 50000u;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_FLIGHT, 1, "the later dip is still flight after the window");
+
+    memset(&st, 0, sizeof(st));
+    in = engine_run_in(0xFFFFF830u);
+    in.nr_ref = 400.0f;
+    in.nr_crit_pct = 80.0f;
+    in.runup_ms = 5000u;
+    in.nr_sample = 0;
+    apply_engine(&link, &st, &in);
+    in.now_ms = 0xFFFFF830u + 20000u;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_FLIGHT, 1, "no Nr sample does not abort");
+    in.nr_sample = 1;
+    in.nr_rpm = nanbits.f;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_FLIGHT, 1, "a non-finite sample does not abort");
+    in.nr_rpm = 10.0f;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_IDLE, 1, "a late below-threshold sample aborts after the window");
+
+    memset(&st, 0, sizeof(st));
+    in = engine_run_in(0xFFFFF830u);
+    in.nr_ref = 1000.0f;
+    in.nr_crit_pct = 90.0f;
+    in.runup_ms = 5000u;
+    in.nr_sample = 1;
+    in.nr_rpm = 10.0f;
+    apply_engine(&link, &st, &in);
+    in.now_ms = 0xFFFFF830u + 4999u;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_FLIGHT, 1, "unsigned age just inside the window wraps cleanly");
+    in.now_ms = 0xFFFFF830u + 5000u;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_IDLE, 1, "unsigned age at the limit aborts across the wrap");
+
+    in.armed = 0;
+    in.interlock_high = 1;
+    in.interlock_released = 0;
+    in.rc_pwm = 1900;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_IDLE, 1, "disarming clears the latch and returns to idle");
+    in.armed = 1;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_three(&link, A429_MODE_FLIGHT, 1, "rearming with interlock high flies again");
+
+    in.enable = 0;
+    expect_true(a429_mode_step(&st, &in, &levels) == -1, "ENABLE 0 releases a previous takeover");
+    a429_sim_set_clp(&link, 2.5f);
+    a429_sim_clear_pcmd(&link);
+    build_tx(&link);
+    expect_true(link.last_tx_count == 1u && (link.last_tx[0] & 0xFFu) == 0310, "clearing commands keeps CLP");
+    expect_true(a429_mode_step(&st, &in, &levels) == 0, "ENABLE 0 does not clear again");
+
+    memset(&st, 0, sizeof(st));
+    a429_link_init(&link);
+    a429_sim_set_pcmd(&link, 1, &snap);
+    a429_sim_set_nr(&link, 100.0f);
+    in.enable = 0;
+    in.eng_ch = 0;
+    expect_true(a429_mode_step(&st, &in, &levels) == 0, "default inputs do not own the words");
+    build_tx(&link);
+    expect_true(link.last_tx_count == 2u, "Nr and the sim command are untouched");
+    expect_true((link.last_tx[1] & 0xFFu) == 0342, "PCMD2 is still the simulation word");
+}
+
+static int nr_word_is(uint32_t word, uint8_t sdi, uint16_t data)
+{
+    return word == oracle_word(0311, sdi, data, A429_SM_NORMAL) &&
+           a429_parity_ok(word) == 1 && (bit_count(word) & 1) == 1;
+}
+
+static void test_measured_nr(void)
+{
+    a429_link_t link;
+    a429_mode_state_t st;
+    a429_mode_in_t in;
+    a429_pcmd_levels_t levels;
+    a429_word_view_t view;
+    float pct;
+    uint32_t clp;
+    uint32_t pcmd;
+    uint32_t rejected;
+    union {
+        uint32_t u;
+        float f;
+    } nanbits;
+    union {
+        uint32_t u;
+        float f;
+    } infbits;
+
+    nanbits.u = 0x7fc00000u;
+    infbits.u = 0x7f800000u;
+    pct = -1.0f;
+    expect_true(a429_nr_percent(1, 500.0f, 1000.0f, &pct) == 1 && pct == 50.0f,
+                "Nr percent is rpm * 100 / NR_REF");
+    expect_true(a429_nr_percent(1, 1.0f, 8.0f, &pct) == 1 && pct == 12.5f,
+                "12.50 percent is an exact 0.01 step");
+    expect_true(a429_nr_percent(1, 0.0f, 1000.0f, &pct) == 1 && pct == 0.0f,
+                "a stopped rotor is 0 percent");
+    expect_true(a429_nr_percent(0, 500.0f, 1000.0f, &pct) == 0, "no sample is not a percent");
+    expect_true(a429_nr_percent(1, 500.0f, 0.0f, &pct) == 0, "NR_REF 0 is not 100 percent");
+    expect_true(a429_nr_percent(1, 500.0f, -10.0f, &pct) == 0, "a negative reference is not a scale");
+    expect_true(a429_nr_percent(1, nanbits.f, 1000.0f, &pct) == 0, "NaN rpm is not a sample");
+    expect_true(a429_nr_percent(1, infbits.f, 1000.0f, &pct) == 0, "infinite rpm is not a sample");
+    expect_true(a429_nr_percent(1, 500.0f, nanbits.f, &pct) == 0, "NaN reference is not a scale");
+    expect_true(a429_nr_percent(1, 1.0e30f, 1.0e-30f, &pct) == 0, "a non-finite percent is not sent");
+    expect_true(a429_nr_percent(1, 500.0f, 1000.0f, 0) == 0, "null percent output is rejected");
+    a429_link_set_measured_nr(0, 1, 500.0f, 1000.0f);
+
+    a429_link_init(&link);
+    a429_link_set_measured_nr(&link, 1, 500.0f, 1000.0f);
+    build_tx(&link);
+    expect_true(link.last_tx_count == 1u, "only label 311 is added");
+    expect_true(nr_word_is(link.last_tx[0], 0, 5000) == 1, "500 rpm at ref 1000 is 50.00 percent");
+    a429_inspect(link.last_tx[0], 0, &view);
+    expect_true(view.eu_valid == 1 && view.eu == 50.0f && view.sm == A429_SM_NORMAL,
+                "50.00 percent decodes as a normal BNR value");
+
+    a429_link_set_measured_nr(&link, 1, 1000.0f, 1000.0f);
+    build_tx(&link);
+    expect_true(nr_word_is(link.last_tx[0], 0, 10000) == 1, "100.00 percent is data 10000");
+
+    a429_link_set_measured_nr(&link, 1, 0.0f, 1000.0f);
+    build_tx(&link);
+    expect_true(nr_word_is(link.last_tx[0], 0, 0) == 1, "0 rpm is a normal 0.00 percent word");
+
+    a429_link_set_measured_nr(&link, 1, 1.0f, 8.0f);
+    build_tx(&link);
+    expect_true(nr_word_is(link.last_tx[0], 0, 1250) == 1, "12.50 percent uses the 0.01 count");
+
+    a429_link_set_measured_nr(&link, 1, 1.0f, 10000.0f);
+    build_tx(&link);
+    expect_true(nr_word_is(link.last_tx[0], 0, 1) == 1, "0.01 percent is one BNR count");
+    a429_inspect(link.last_tx[0], 0, &view);
+    expect_true(view.eu_valid == 1 && view.eu == 0.01f, "the count decodes as 0.01 percent");
+
+    a429_link_set_sdi(&link, 2);
+    a429_link_set_measured_nr(&link, 1, 500.0f, 1000.0f);
+    build_tx(&link);
+    expect_true(nr_word_is(link.last_tx[0], 2, 5000) == 1, "311 uses the link SDI");
+
+    a429_link_init(&link);
+    rejected = link.tx_rejected;
+    a429_link_set_measured_nr(&link, 1, 100000.0f, 1.0f);
+    build_tx(&link);
+    expect_true(link.sim.nr_set == 0 && link.last_tx_count == 0u && link.tx_rejected == rejected,
+                "a percent that does not fit the BNR field is omitted");
+
+    a429_sim_set_nr(&link, 100.0f);
+    a429_link_set_measured_nr(&link, 1, 250.0f, 500.0f);
+    build_tx(&link);
+    expect_true(nr_word_is(link.last_tx[0], 0, 5000) == 1, "measured Nr replaces a snapshot percent");
+    a429_link_set_measured_nr(&link, 0, 250.0f, 500.0f);
+    build_tx(&link);
+    expect_true(link.sim.nr_set == 0 && link.sim.nr_pct == 0.0f && link.last_tx_count == 0u,
+                "a missing sample clears 311 and does not hold the last percent");
+    a429_sim_set_nr(&link, 100.0f);
+    a429_link_set_measured_nr(&link, 1, 250.0f, 0.0f);
+    build_tx(&link);
+    expect_true(link.sim.nr_set == 0 && link.last_tx_count == 0u,
+                "NR_REF 0 clears 311 instead of sending a made-up 100 percent");
+    a429_link_set_measured_nr(&link, 1, nanbits.f, 1000.0f);
+    expect_true(link.sim.nr_set == 0, "NaN rpm clears 311");
+    a429_link_set_measured_nr(&link, 1, 250.0f, -1.0f);
+    expect_true(link.sim.nr_set == 0, "a negative NR_REF clears 311");
+
+    a429_link_init(&link);
+    expect_true(a429_encode_bnr(0310, 0, A429_SM_NORMAL, 2.5f, &clp) == 1, "CLP oracle");
+    a429_sim_set_clp(&link, 2.5f);
+    memset(&levels, 0, sizeof(levels));
+    levels.mode = A429_MODE_IDLE;
+    expect_true(a429_sim_set_pcmd(&link, 0, &levels) == 1, "command snapshot");
+    expect_true(a429_encode_pcmd(0340, 0, A429_SM_NORMAL, &levels, &pcmd) == 1, "idle command oracle");
+    a429_link_set_measured_nr(&link, 1, 250.0f, 500.0f);
+    build_tx(&link);
+    expect_true(link.last_tx_count == 3u, "CLP, Nr, then the command word");
+    expect_true(link.last_tx[0] == clp, "label 310 is not rewritten");
+    expect_true(nr_word_is(link.last_tx[1], 0, 5000) == 1, "Nr sits between CLP and the command");
+    expect_true(link.last_tx[2] == pcmd, "stop/idle/flight bits are not rewritten");
+    a429_link_set_measured_nr(&link, 0, 0.0f, 0.0f);
+    build_tx(&link);
+    expect_true(link.last_tx_count == 2u && link.last_tx[0] == clp && link.last_tx[1] == pcmd,
+                "clearing 311 leaves 310 and the command word");
+
+    a429_link_init(&link);
+    memset(&st, 0, sizeof(st));
+    in = engine_run_in(0u);
+    in.nr_sample = 1;
+    in.nr_rpm = 500.0f;
+    in.nr_ref = 1000.0f;
+    in.nr_crit_pct = 50.0f;
+    in.runup_ms = 1000u;
+    apply_engine(&link, &st, &in);
+    a429_link_set_measured_nr(&link, in.nr_sample, in.nr_rpm, in.nr_ref);
+    in.now_ms = 10000u;
+    apply_engine(&link, &st, &in);
+    build_tx(&link);
+    expect_true(link.last_tx_count == 4u, "311 plus the three command words");
+    expect_true(nr_word_is(link.last_tx[0], 0, 5000) == 1, "the command path and 311 share 50.00 percent");
+    expect_true(levels_match(link.last_tx[1], 0340, A429_MODE_FLIGHT, 1) == 1,
+                "reaching Nr does not change the flight command");
+
+    a429_link_init(&link);
+    memset(&st, 0, sizeof(st));
+    in = engine_run_in(0u);
+    in.nr_sample = 1;
+    in.nr_rpm = 100.0f;
+    in.nr_ref = 1000.0f;
+    in.nr_crit_pct = 50.0f;
+    in.runup_ms = 5000u;
+    apply_engine(&link, &st, &in);
+    a429_link_set_measured_nr(&link, in.nr_sample, in.nr_rpm, in.nr_ref);
+    build_tx(&link);
+    expect_true(nr_word_is(link.last_tx[0], 0, 1000) == 1, "10.00 percent is sent while Nr is still low");
+    expect_true(levels_match(link.last_tx[1], 0340, A429_MODE_FLIGHT, 1) == 1,
+                "a low measured Nr does not delay flight");
+}
+
+static int clp_word_is(uint32_t word, uint8_t sdi, uint16_t data)
+{
+    return word == oracle_word(0310, sdi, data, A429_SM_NORMAL) &&
+           a429_parity_ok(word) == 1 && (bit_count(word) & 1) == 1;
+}
+
+static void test_collective_clp(void)
+{
+    a429_link_t link;
+    a429_word_view_t view;
+    a429_pcmd_levels_t levels;
+    float volts;
+    uint32_t nr;
+    uint32_t pcmd;
+    uint32_t rejected;
+    union {
+        uint32_t u;
+        float f;
+    } nanbits;
+    union {
+        uint32_t u;
+        float f;
+    } infbits;
+
+    nanbits.u = 0x7fc00000u;
+    infbits.u = 0x7f800000u;
+    volts = -1.0f;
+    expect_true(a429_clp_volts(1, 0.0f, 1.0f, 9.0f, &volts) == 1 && volts == 1.0f,
+                "0 percent collective is 1.00 V");
+    expect_true(a429_clp_volts(1, 100.0f, 1.0f, 9.0f, &volts) == 1 && volts == 9.0f,
+                "100 percent collective is 9.00 V");
+    expect_true(a429_clp_volts(1, 50.0f, 1.0f, 9.0f, &volts) == 1 && volts == 5.0f,
+                "50 percent collective is 5.00 V");
+    expect_true(a429_clp_volts(1, 25.0f, 1.0f, 9.0f, &volts) == 1 && volts == 3.0f,
+                "25 percent is 1 + 8 * 0.25");
+    expect_true(a429_clp_volts(1, -10.0f, 1.0f, 9.0f, &volts) == 1 && volts == 1.0f,
+                "collective below 0 percent clamps to 1.00 V");
+    expect_true(a429_clp_volts(1, 150.0f, 1.0f, 9.0f, &volts) == 1 && volts == 9.0f,
+                "collective above 100 percent clamps to 9.00 V");
+    expect_true(a429_clp_volts(1, 25.0f, 2.0f, 6.0f, &volts) == 1 && volts == 3.0f,
+                "endpoints scale the same linear map");
+    expect_true(a429_clp_volts(0, 50.0f, 1.0f, 9.0f, &volts) == 0,
+                "a missing collective is not a voltage");
+    expect_true(a429_clp_volts(1, nanbits.f, 1.0f, 9.0f, &volts) == 0,
+                "NaN collective is omitted");
+    expect_true(a429_clp_volts(1, infbits.f, 1.0f, 9.0f, &volts) == 0,
+                "infinite collective is omitted");
+    infbits.u = 0xff800000u;
+    expect_true(a429_clp_volts(1, infbits.f, 1.0f, 9.0f, &volts) == 0,
+                "negative infinite collective is omitted");
+    expect_true(a429_clp_volts(1, 50.0f, nanbits.f, 9.0f, &volts) == 0,
+                "a NaN 0 percent endpoint is omitted");
+    expect_true(a429_clp_volts(1, 50.0f, 1.0f, nanbits.f, &volts) == 0,
+                "a NaN 100 percent endpoint is omitted");
+    expect_true(a429_clp_volts(1, 50.0f, 1.0f, 9.0f, 0) == 0,
+                "null voltage output is rejected");
+    a429_link_set_collective(0, 1, 50.0f, 1.0f, 9.0f);
+
+    a429_link_init(&link);
+    a429_link_set_collective(&link, 1, 0.0f, 1.0f, 9.0f);
+    build_tx(&link);
+    expect_true(link.last_tx_count == 1u, "only label 310 is added");
+    expect_true(clp_word_is(link.last_tx[0], 0, 100) == 1, "0 percent is data 100, 1.00 V");
+    a429_inspect(link.last_tx[0], 0, &view);
+    expect_true(view.eu_valid == 1 && view.eu == 1.0f && view.sm == A429_SM_NORMAL &&
+                view.reserved_ok == 1,
+                "1.00 V decodes as a normal BNR voltage");
+
+    a429_link_set_collective(&link, 1, 100.0f, 1.0f, 9.0f);
+    build_tx(&link);
+    expect_true(clp_word_is(link.last_tx[0], 0, 900) == 1, "100 percent is data 900, 9.00 V");
+    a429_inspect(link.last_tx[0], 0, &view);
+    expect_true(view.eu_valid == 1 && view.eu == 9.0f, "9.00 V decodes from the 0.01 count");
+
+    a429_link_set_collective(&link, 1, 50.0f, 1.0f, 9.0f);
+    build_tx(&link);
+    expect_true(clp_word_is(link.last_tx[0], 0, 500) == 1, "50 percent is data 500, 5.00 V");
+    a429_inspect(link.last_tx[0], 0, &view);
+    expect_true(view.eu_valid == 1 && view.eu == 5.0f, "5.00 V is the mid-range voltage");
+
+    a429_link_set_collective(&link, 1, -25.0f, 1.0f, 9.0f);
+    build_tx(&link);
+    expect_true(clp_word_is(link.last_tx[0], 0, 100) == 1, "a negative percent is sent as 1.00 V");
+    a429_link_set_collective(&link, 1, 180.0f, 1.0f, 9.0f);
+    build_tx(&link);
+    expect_true(clp_word_is(link.last_tx[0], 0, 900) == 1, "percent above 100 is sent as 9.00 V");
+
+    a429_link_set_sdi(&link, 2);
+    a429_link_set_collective(&link, 1, 50.0f, 1.0f, 9.0f);
+    build_tx(&link);
+    expect_true(clp_word_is(link.last_tx[0], 2, 500) == 1, "310 uses the link SDI");
+
+    a429_link_init(&link);
+    rejected = link.tx_rejected;
+    a429_link_set_collective(&link, 1, 50.0f, 40000.0f, 40000.0f);
+    build_tx(&link);
+    expect_true(link.sim.clp_set == 0 && link.last_tx_count == 0u && link.tx_rejected == rejected,
+                "a voltage that does not fit the BNR field is omitted");
+
+    a429_sim_set_clp(&link, 2.5f);
+    a429_link_set_collective(&link, 1, 50.0f, 1.0f, 9.0f);
+    build_tx(&link);
+    expect_true(clp_word_is(link.last_tx[0], 0, 500) == 1, "measured collective replaces a snapshot voltage");
+    a429_link_set_collective(&link, 0, 50.0f, 1.0f, 9.0f);
+    build_tx(&link);
+    expect_true(link.sim.clp_set == 0 && link.sim.clp_v == 0.0f && link.last_tx_count == 0u,
+                "a missing collective clears 310 and does not hold the last voltage");
+    a429_sim_set_clp(&link, 2.5f);
+    a429_link_set_collective(&link, 1, nanbits.f, 1.0f, 9.0f);
+    build_tx(&link);
+    expect_true(link.sim.clp_set == 0 && link.last_tx_count == 0u,
+                "NaN collective clears 310 instead of repeating 2.50 V");
+    a429_sim_set_clp(&link, 2.5f);
+    a429_link_set_collective(&link, 1, 50.0f, infbits.f, 9.0f);
+    expect_true(link.sim.clp_set == 0, "a non-finite endpoint clears 310");
+
+    a429_link_init(&link);
+    expect_true(a429_encode_bnr(0311, 0, A429_SM_NORMAL, 50.0f, &nr) == 1, "Nr oracle");
+    memset(&levels, 0, sizeof(levels));
+    levels.mode = A429_MODE_FLIGHT;
+    levels.on_ground = 1;
+    expect_true(a429_encode_pcmd(0340, 0, A429_SM_NORMAL, &levels, &pcmd) == 1, "flight command oracle");
+    expect_true(a429_sim_set_pcmd(&link, 0, &levels) == 1, "command snapshot");
+    a429_link_set_measured_nr(&link, 1, 500.0f, 1000.0f);
+    a429_link_set_collective(&link, 1, 50.0f, 1.0f, 9.0f);
+    build_tx(&link);
+    expect_true(link.last_tx_count == 3u, "CLP, Nr, then the command word");
+    expect_true(clp_word_is(link.last_tx[0], 0, 500) == 1, "label 310 is the collective voltage");
+    expect_true(link.last_tx[1] == nr, "label 311 is not rewritten");
+    expect_true(link.last_tx[2] == pcmd, "stop/idle/flight bits are not rewritten");
+    a429_link_set_collective(&link, 0, 0.0f, 0.0f, 0.0f);
+    build_tx(&link);
+    expect_true(link.last_tx_count == 2u && link.last_tx[0] == nr && link.last_tx[1] == pcmd,
+                "clearing 310 leaves 311 and the command word");
+}
+
+static int tx_label_index(const a429_link_t *link, uint8_t label)
+{
+    uint8_t i;
+    uint8_t n = link->last_tx_count;
+    if (n > A429_TX_MAX) {
+        n = A429_TX_MAX;
+    }
+    for (i = 0; i < n; i++) {
+        if ((uint8_t)(link->last_tx[i] & 0xFFu) == label) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static int word_bnr_ok(uint32_t word, uint8_t label, uint8_t sdi, float eu)
+{
+    a429_word_view_t view;
+    a429_inspect(word, sdi, &view);
+    if (view.label != label || view.eu_valid != 1 || view.sm != A429_SM_NORMAL) {
+        return 0;
+    }
+    if (view.sdi != sdi || view.parity_ok != 1 || view.reserved_ok != 1) {
+        return 0;
+    }
+    return view.eu == eu;
+}
+
+static void fill_airdata(a429_link_t *link)
+{
+    a429_link_set_meas(link, 0312, 1, 101.25f);
+    a429_link_set_meas(link, 0313, 1, -10.5f);
+    a429_link_set_meas(link, 0314, 1, 1234.0f);
+    a429_link_set_meas(link, 0316, 1, 12.5f);
+    a429_link_set_utc(link, 1, 14, 5, 9, 2026, 11, 12);
+}
+
+static void build_tx_all(a429_link_t *link)
+{
+    uint32_t words[A429_TX_MAX];
+    a429_link_build_tx(link, words, A429_TX_MAX);
+}
+
+static void test_fc_airdata(void)
+{
+    a429_link_t link;
+    a429_core_t core;
+    a429_pcmd_levels_t levels;
+    const a429_label_info_t *info;
+    union { uint32_t u; float f; } nanbits;
+    uint32_t rejected;
+    uint8_t framed[A429_TCP_TX_CAP];
+    uint8_t framed_n = 0;
+    int idx;
+    uint8_t i;
+
+    info = a429_catalog_find(0312);
+    expect_true(info != 0 && info->denom == 100 && info->kind == A429_KIND_BNR, "312 denom is 100");
+    info = a429_catalog_find(0313);
+    expect_true(info != 0 && info->denom == 10, "313 denom is 10");
+    info = a429_catalog_find(0314);
+    expect_true(info != 0 && info->denom == 1, "314 denom is 1");
+    info = a429_catalog_find(0316);
+    expect_true(info != 0 && info->denom == 10, "316 denom is 10");
+    info = a429_catalog_find(0321);
+    expect_true(info != 0 && info->denom == 1, "321 denom is 1");
+    info = a429_catalog_find(0326);
+    expect_true(info != 0 && info->denom == 1, "326 denom is 1");
+    info = a429_catalog_find(0317);
+    expect_true(info != 0 && info->denom == 10000, "317 stays in the catalog at denom 10000");
+    info = a429_catalog_find(0320);
+    expect_true(info != 0 && info->denom == 10, "320 stays in the catalog");
+    info = a429_catalog_find(0331);
+    expect_true(info != 0 && info->kind == A429_KIND_DISC, "331 stays discrete");
+    expect_true(A429_TX_MAX >= 16u, "the slot holds every valid FC word");
+    expect_true(A429_TCP_TX_CAP >= (unsigned)(A429_TX_MAX * 5u), "the TCP hold fits one full slot");
+
+    a429_link_init(&link);
+    a429_link_set_collective(&link, 1, 50.0f, 1.0f, 9.0f);
+    a429_link_set_measured_nr(&link, 1, 500.0f, 1000.0f);
+    fill_airdata(&link);
+    memset(&levels, 0, sizeof(levels));
+    levels.mode = A429_MODE_FLIGHT;
+    levels.on_ground = 1;
+    for (i = 0; i < A429_PCMD_N; i++) {
+        expect_true(a429_sim_set_pcmd(&link, i, &levels) == 1, "command snapshot for the full slot");
+    }
+    rejected = link.tx_rejected;
+    build_tx_all(&link);
+    expect_true(link.last_tx_count == 15u, "one 12.5 ms slot carries every valid FC word");
+    expect_true(link.tx_rejected == rejected, "the full set does not drop a word");
+    expect_true((link.last_tx[0] & 0xFFu) == 0310, "310 is still the first word of the slot");
+    expect_true(word_bnr_ok(link.last_tx[0], 0310, 0, 5.0f) == 1, "310 is still 5.00 V");
+    idx = tx_label_index(&link, 0312);
+    expect_true(idx > 0 && word_bnr_ok(link.last_tx[idx], 0312, 0, 101.25f) == 1, "312 is 101.25 kPa");
+    idx = tx_label_index(&link, 0313);
+    expect_true(idx > 0 && word_bnr_ok(link.last_tx[idx], 0313, 0, -10.5f) == 1, "313 is -10.5 C");
+    idx = tx_label_index(&link, 0314);
+    expect_true(idx > 0 && word_bnr_ok(link.last_tx[idx], 0314, 0, 1234.0f) == 1, "314 is 1234 m AMSL");
+    idx = tx_label_index(&link, 0316);
+    expect_true(idx > 0 && word_bnr_ok(link.last_tx[idx], 0316, 0, 12.5f) == 1, "316 is 12.5 m/s");
+    idx = tx_label_index(&link, 0321);
+    expect_true(idx > 0 && word_bnr_ok(link.last_tx[idx], 0321, 0, 14.0f) == 1, "321 hour is 14");
+    idx = tx_label_index(&link, 0322);
+    expect_true(idx > 0 && word_bnr_ok(link.last_tx[idx], 0322, 0, 5.0f) == 1, "322 minute is 5");
+    idx = tx_label_index(&link, 0323);
+    expect_true(idx > 0 && word_bnr_ok(link.last_tx[idx], 0323, 0, 9.0f) == 1, "323 second is 9");
+    idx = tx_label_index(&link, 0324);
+    expect_true(idx > 0 && word_bnr_ok(link.last_tx[idx], 0324, 0, 2026.0f) == 1, "324 year is 2026");
+    idx = tx_label_index(&link, 0325);
+    expect_true(idx > 0 && word_bnr_ok(link.last_tx[idx], 0325, 0, 11.0f) == 1, "325 month is 11");
+    idx = tx_label_index(&link, 0326);
+    expect_true(idx > 0 && word_bnr_ok(link.last_tx[idx], 0326, 0, 12.0f) == 1, "326 day is 12");
+    expect_true(tx_label_index(&link, 0311) > 0, "311 stays in the same slot");
+    expect_true(tx_label_index(&link, 0340) > 0 && tx_label_index(&link, 0342) > 0 &&
+                tx_label_index(&link, 0344) > 0, "the three command words stay in the same slot");
+    expect_true(tx_label_index(&link, 0317) < 0 && tx_label_index(&link, 0320) < 0 &&
+                tx_label_index(&link, 0331) < 0, "317, 320 and 331 are absent from the slot");
+    expect_true(a429_frame_encode(A429_FRAME_RS422_429_1C, link.last_tx, link.last_tx_count,
+                                  framed, (uint8_t)sizeof(framed), &framed_n) == 1,
+                "the full slot fits the TCP hold");
+    expect_true(framed_n == (uint8_t)(link.last_tx_count * 5u) && framed[0] == 0xC0u,
+                "each word in the slot is C0 plus four bytes");
+
+    a429_link_set_meas(&link, 0312, 0, 101.25f);
+    build_tx_all(&link);
+    expect_true(tx_label_index(&link, 0312) < 0, "a missing pressure clears 312");
+    expect_true(link.last_tx_count == 14u && (link.last_tx[0] & 0xFFu) == 0310,
+                "clearing 312 leaves 310 in the slot");
+    a429_link_set_meas(&link, 0312, 1, 0.0f);
+    build_tx_all(&link);
+    expect_true(tx_label_index(&link, 0312) < 0, "zero pressure is not sent");
+    a429_link_set_meas(&link, 0312, 1, -1.0f);
+    build_tx_all(&link);
+    expect_true(tx_label_index(&link, 0312) < 0, "negative pressure is not sent");
+
+    nanbits.u = 0x7fc00000u;
+    a429_link_set_meas(&link, 0313, 1, nanbits.f);
+    build_tx_all(&link);
+    expect_true(tx_label_index(&link, 0313) < 0 && (link.last_tx[0] & 0xFFu) == 0310,
+                "NaN temperature clears 313 and leaves 310");
+    a429_link_set_meas(&link, 0314, 1, -12.0f);
+    build_tx_all(&link);
+    idx = tx_label_index(&link, 0314);
+    expect_true(idx > 0 && word_bnr_ok(link.last_tx[idx], 0314, 0, -12.0f) == 1,
+                "altitude below sea level is sent");
+    a429_link_set_meas(&link, 0314, 0, -12.0f);
+    build_tx_all(&link);
+    expect_true(tx_label_index(&link, 0314) < 0, "a missing altitude clears 314");
+    a429_link_set_meas(&link, 0314, 1, 40000.0f);
+    build_tx_all(&link);
+    expect_true(tx_label_index(&link, 0314) < 0, "an altitude outside int16 is cleared");
+
+    a429_link_set_meas(&link, 0316, 1, -1.0f);
+    build_tx_all(&link);
+    expect_true(tx_label_index(&link, 0316) < 0, "negative true airspeed is not sent");
+    a429_link_set_meas(&link, 0316, 0, 12.5f);
+    build_tx_all(&link);
+    expect_true(tx_label_index(&link, 0316) < 0, "a missing TAS clears 316");
+
+    a429_link_set_utc(&link, 1, 24, 0, 0, 2026, 1, 1);
+    build_tx_all(&link);
+    expect_true(tx_label_index(&link, 0321) < 0 && tx_label_index(&link, 0326) < 0,
+                "an hour outside 0..23 clears every time label");
+    expect_true((link.last_tx[0] & 0xFFu) == 0310, "clearing the clock leaves 310");
+    a429_link_set_utc(&link, 1, 0, 0, 60, 2026, 1, 1);
+    build_tx_all(&link);
+    expect_true(tx_label_index(&link, 0321) < 0, "a leap second is not rewritten to 59");
+    a429_link_set_utc(&link, 1, 0, 0, 0, 2026, 0, 1);
+    build_tx_all(&link);
+    expect_true(tx_label_index(&link, 0325) < 0, "month 0 clears the clock");
+    a429_link_set_utc(&link, 1, 0, 0, 0, 2026, 1, 0);
+    build_tx_all(&link);
+    expect_true(tx_label_index(&link, 0326) < 0, "day 0 clears the clock");
+    a429_link_set_utc(&link, 1, 23, 59, 59, 2026, 12, 31);
+    build_tx_all(&link);
+    expect_true(tx_label_index(&link, 0321) > 0 && tx_label_index(&link, 0322) > 0 &&
+                tx_label_index(&link, 0323) > 0 && tx_label_index(&link, 0324) > 0 &&
+                tx_label_index(&link, 0325) > 0 && tx_label_index(&link, 0326) > 0,
+                "a valid clock sends all six time labels");
+    a429_link_set_meas(&link, 0321, 0, 0.0f);
+    build_tx_all(&link);
+    expect_true(tx_label_index(&link, 0321) > 0 && tx_label_index(&link, 0326) > 0,
+                "one time label cannot be cleared on its own");
+    a429_link_set_utc(&link, 0, 23, 59, 59, 2026, 12, 31);
+    build_tx_all(&link);
+    expect_true(tx_label_index(&link, 0321) < 0 && tx_label_index(&link, 0322) < 0 &&
+                tx_label_index(&link, 0323) < 0 && tx_label_index(&link, 0324) < 0 &&
+                tx_label_index(&link, 0325) < 0 && tx_label_index(&link, 0326) < 0,
+                "no clock clears 321 through 326 together");
+
+    a429_link_set_meas(&link, 0317, 1, 0.2f);
+    a429_link_set_meas(&link, 0320, 1, 80.0f);
+    a429_link_set_meas(&link, 0331, 1, 1.0f);
+    build_tx_all(&link);
+    expect_true(tx_label_index(&link, 0317) < 0 && tx_label_index(&link, 0320) < 0 &&
+                tx_label_index(&link, 0331) < 0,
+                "oil pressure, oil temperature and state 331 stay unsent");
+    expect_true((link.last_tx[0] & 0xFFu) == 0310, "310 is still sent after those refusals");
+
+    a429_core_init(&core);
+    a429_link_set_collective(&core.link, 1, 0.0f, 1.0f, 9.0f);
+    fill_airdata(&core.link);
+    a429_core_update(&core, 0);
+    expect_true(core.sched.tx_slots == 0u, "the first poll only arms the scheduler");
+    a429_core_update(&core, 12500u);
+    expect_true(core.sched.tx_slots == 1u, "the first period emits one slot");
+    expect_true(core.link.last_tx_count >= 1u && (core.link.last_tx[0] & 0xFFu) == 0310,
+                "310 is in the 12.5 ms set");
+    expect_true(tx_label_index(&core.link, 0312) > 0 && tx_label_index(&core.link, 0324) > 0,
+                "air-data and the clock share that same set");
+    a429_core_update(&core, 12500u);
+    expect_true(core.sched.tx_slots == 1u, "the same tick does not send a second slot");
+    a429_core_update(&core, 25000u);
+    expect_true(core.sched.tx_slots == 2u && core.sched.tx_slots_skipped == 0u,
+                "the next period emits one slot and does not catch up");
+    expect_true((core.link.last_tx[0] & 0xFFu) == 0310 && tx_label_index(&core.link, 0313) > 0,
+                "310 is in the next 12.5 ms set as well");
+}
+
+static int mon_by_oct(const a429_link_t *link, uint16_t oct, a429_mon_view_t *out)
+{
+    uint8_t i;
+
+    for (i = 0; i < a429_mon_n(); i++) {
+        if (a429_mon_view(link, i, out) == 1 && out->label_oct == oct) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void test_rx_window_and_stale(void)
+{
+    static const uint16_t order_oct[A429_MON_N] = {
+        0144, 0145, 0146, 0147, 0151, 0152, 0153, 0154, 0155, 0156, 0160, 0175, 0176, 0177
+    };
+    static const uint16_t order_disp[A429_MON_N] = {
+        144, 145, 146, 147, 151, 152, 153, 154, 155, 156, 160, 175, 176, 177
+    };
+    a429_link_t link;
+    a429_mon_view_t view;
+    a429_wordq_item_t word;
+    a429_stats_view_t stats;
+    uint32_t ng = 0;
+    uint32_t np = 0;
+    uint32_t ngc = 0;
+    uint32_t bad_parity;
+    uint32_t bad_rsv;
+    uint32_t unknown;
+    uint32_t parity_before;
+    uint32_t decode_before;
+    uint16_t i;
+
+    expect_true(a429_mon_n() == A429_MON_N, "fourteen bench labels are monitored");
+    a429_link_init(&link);
+    for (i = 0; i < A429_MON_N; i++) {
+        expect_true(a429_mon_view(&link, (uint8_t)i, &view) == 1, "monitor slot exists");
+        expect_true(view.label_oct == order_oct[i] && view.label_disp == order_disp[i],
+                    "monitor order matches the packed count bytes");
+        expect_true(view.timed_out == 0, "a label with no sample is not timed out");
+    }
+
+    expect_true(a429_encode_bnr(0144, 0, A429_SM_NORMAL, 50.0f, &ng) == 1, "Ng 50 for the window");
+    expect_true(a429_encode_bnr(0145, 0, A429_SM_NORMAL, 10.0f, &np) == 1, "Np 10 for the window");
+    expect_true(a429_encode_bnr(0146, 0, A429_SM_NORMAL, 48.0f, &ngc) == 1, "Ngc 48 for the window");
+    for (i = 0; i < 40u; i++) {
+        a429_link_ingest(&link, ng, (uint32_t)i * 20000u);
+        expect_true(a429_link_pop_word(&link, &word) == 1, "each Ng word is queued");
+        if (i == 0u) {
+            expect_true(word.label == 0144, "queued label is the logical Ng label");
+            expect_true(word.raw == ng && word.eu > 49.9f && word.eu < 50.1f, "queued Ng value");
+            expect_true((word.flags & A429_WQ_PARITY) != 0 && (word.flags & A429_WQ_EU) != 0 &&
+                        (word.flags & A429_WQ_FRESH) != 0, "a normal Ng word is fresh");
+        }
+    }
+    a429_link_ingest(&link, np, 800000u);
+    a429_link_ingest(&link, ngc, 800000u);
+    expect_true(a429_link_pop_word(&link, &word) == 1 && word.label == 0145, "Np is queued");
+    expect_true(a429_link_pop_word(&link, &word) == 1 && word.label == 0146, "Ngc is queued");
+    expect_true(link.rx_untracked == 1u, "Ngc is still not a phase-one slot");
+    a429_link_note_bytes(&link, 205u, 500000u);
+    a429_link_note_frames(&link, 42u, 500000u);
+    a429_link_poll_stats(&link, 800000u);
+    expect_true(mon_by_oct(&link, 0144, &view) == 1 && view.count_1s == 0u,
+                "the one-second window has not closed yet");
+    a429_link_poll_stats(&link, 1000000u);
+    expect_true(mon_by_oct(&link, 0144, &view) == 1 && view.count_1s == 40u, "Ng count is the closed window");
+    expect_true(mon_by_oct(&link, 0145, &view) == 1 && view.count_1s == 1u, "Np count is the closed window");
+    expect_true(mon_by_oct(&link, 0146, &view) == 1 && view.count_1s == 1u && view.eu_valid == 1 &&
+                view.eu > 47.9f && view.eu < 48.1f, "Ngc keeps an engineering value without a phase-one slot");
+    a429_link_stats(&link, &stats);
+    expect_true(stats.bytes_total == 205u && stats.bytes_1s == 205u, "byte total and the one-second byte count");
+    expect_true(stats.frames_total == 42u && stats.frames_1s == 42u, "frame total and the one-second frame count");
+    expect_true(stats.q_drop == 0u, "draining the queue does not drop words");
+
+    a429_link_poll_stats(&link, 2000000u);
+    expect_true(mon_by_oct(&link, 0144, &view) == 1 && view.count_1s == 0u, "silence publishes a zero count");
+    a429_link_stats(&link, &stats);
+    expect_true(stats.bytes_1s == 0u && stats.frames_1s == 0u && stats.bytes_total == 205u,
+                "a quiet second does not erase the byte total");
+
+    a429_link_ingest(&link, ng, 2000000u);
+    a429_link_set_timeout_us(&link, 0, 100000u);
+    a429_link_poll_timeouts(&link, 2100000u);
+    expect_true(mon_by_oct(&link, 0144, &view) == 1 && view.fresh == 0 && view.timed_out == 1,
+                "Ng timeout flag follows the NG_TO freshness policy");
+    expect_true(mon_by_oct(&link, 0145, &view) == 1 && view.timed_out == 0,
+                "a label with timeout 0 is not flagged");
+    expect_true(link.rx[0].timeout_count == 1u, "the timeout counter fires once");
+
+    parity_before = link.counters.parity_errors;
+    decode_before = link.counters.decode_errors;
+    bad_parity = ng ^ (1u << 31);
+    a429_link_ingest(&link, bad_parity, 2200000u);
+    expect_true(link.counters.parity_errors == parity_before + 1u, "parity error count");
+    expect_true(link.counters.decode_errors == decode_before, "a parity error is not also a decode error");
+    bad_rsv = a429_apply_odd_parity((ng & 0x7FFFFFFFu) | (1u << 10));
+    a429_link_ingest(&link, bad_rsv, 2300000u);
+    expect_true(link.counters.decode_errors == decode_before + 1u, "a reserved bit is a decode error");
+    unknown = a429_apply_odd_parity(1u);
+    a429_link_ingest(&link, unknown, 2400000u);
+    expect_true(link.counters.decode_errors == decode_before + 2u, "an unknown label is a decode error");
+    expect_true(link.rx_untracked == 2u, "an unknown label stays untracked");
+}
+
+static const a429_tx_tlm_t *tlm_by_name(const a429_tx_tlm_t *rows, uint8_t n, const char *name)
+{
+    uint8_t i;
+
+    for (i = 0; i < n; i++) {
+        if (rows[i].name != 0 && strcmp(rows[i].name, name) == 0) {
+            return &rows[i];
+        }
+    }
+    return 0;
+}
+
+static void test_tx_telemetry(void)
+{
+    static const char *const full_names[A429_TX_TLM_N] = {
+        "A4XCLP", "A4XNR", "A4XP0", "A4XT0", "A4XH", "A4XTAS",
+        "A4XHR", "A4XMN", "A4XSC", "A4XYR", "A4XMO", "A4XDY",
+        "A4X340", "A4X342", "A4X344"
+    };
+    static const char *const fast_names[] = {
+        "A4XCLP", "A4XNR", "A4X340", "A4X342", "A4X344"
+    };
+    a429_link_t link;
+    a429_tx_tlm_t rows[A429_TX_TLM_N];
+    a429_pcmd_levels_t levels;
+    const a429_tx_tlm_t *row = 0;
+    uint8_t n;
+    uint8_t i;
+
+    expect_true(A429_TX_TLM_N == 15u && A429_TX_TLM_FAST_N == 5u && A429_TX_TLM_SLOW_N == 10u,
+                "fifteen FC names, five fast and ten slow");
+    a429_link_init(&link);
+    expect_true(a429_tx_telemetry(0, rows, A429_TX_TLM_N) == 0, "a null link publishes nothing");
+    expect_true(a429_tx_telemetry(&link, 0, A429_TX_TLM_N) == 0, "a null output publishes nothing");
+    n = a429_tx_telemetry(&link, rows, A429_TX_TLM_N);
+    expect_true(n == 0, "an empty transmit set publishes no FC names");
+
+    a429_link_set_collective(&link, 1, 50.0f, 1.0f, 9.0f);
+    n = a429_tx_telemetry(&link, rows, A429_TX_TLM_N);
+    expect_true(n == 0, "a collective snapshot is not named until the slot is built");
+    build_tx_all(&link);
+    n = a429_tx_telemetry(&link, rows, A429_TX_TLM_N);
+    row = tlm_by_name(rows, n, "A4XCLP");
+    expect_true(n == 1 && row != 0 && row->fast == 1 && row->is_int == 0 && row->eu == 5.0f,
+                "A4XCLP is 5.00 V from the wire word");
+    expect_true(tlm_by_name(rows, n, "A4XNR") == 0, "311 is absent when Nr was not published");
+    expect_true(tlm_by_name(rows, n, "A4CLP") == 0, "A4XCLP does not reuse the ECU A4CLP name");
+
+    /* Clearing the snapshot drops the name before the next slot rebuilds last_tx. */
+    a429_link_set_collective(&link, 0, 50.0f, 1.0f, 9.0f);
+    expect_true(tx_label_index(&link, 0310) == 0, "last_tx still holds the previous 310 word");
+    n = a429_tx_telemetry(&link, rows, A429_TX_TLM_N);
+    expect_true(n == 0 && tlm_by_name(rows, n, "A4XCLP") == 0,
+                "clearing 310 drops A4XCLP before the next slot");
+    build_tx_all(&link);
+    n = a429_tx_telemetry(&link, rows, A429_TX_TLM_N);
+    expect_true(n == 0 && tx_label_index(&link, 0310) < 0, "the rebuilt slot also omits A4XCLP");
+
+    a429_link_set_collective(&link, 1, 50.0f, 1.0f, 9.0f);
+    n = a429_tx_telemetry(&link, rows, A429_TX_TLM_N);
+    expect_true(n == 0, "restoring 310 is not named until that word is in the slot");
+    build_tx_all(&link);
+
+    a429_link_set_sdi(&link, 2);
+    a429_link_set_collective(&link, 1, 50.0f, 1.0f, 9.0f);
+    a429_link_set_measured_nr(&link, 1, 500.0f, 1000.0f);
+    fill_airdata(&link);
+    memset(&levels, 0, sizeof(levels));
+    levels.mode = A429_MODE_FLIGHT;
+    levels.on_ground = 1;
+    for (i = 0; i < A429_PCMD_N; i++) {
+        expect_true(a429_sim_set_pcmd(&link, i, &levels) == 1, "command snapshot for telemetry");
+    }
+    build_tx_all(&link);
+    n = a429_tx_telemetry(&link, rows, A429_TX_TLM_N);
+    expect_true(n == A429_TX_TLM_N, "every valid FC word has one name");
+    for (i = 0; i < n; i++) {
+        expect_true(rows[i].name != 0 && strcmp(rows[i].name, full_names[i]) == 0, "FC names stay in label order");
+        expect_true(strlen(rows[i].name) <= 9u, "an FC name fits the 10-byte MAVLink field");
+        expect_true(strcmp(rows[i].name, "A4CLP") != 0 && strcmp(rows[i].name, "A4P0") != 0 &&
+                    strcmp(rows[i].name, "A4NG") != 0, "FC names do not reuse a receive name");
+    }
+    row = tlm_by_name(rows, n, "A4XCLP");
+    expect_true(row != 0 && row->eu == 5.0f && row->fast == 1, "A4XCLP stays 5.00 V with SDI 2");
+    row = tlm_by_name(rows, n, "A4XNR");
+    expect_true(row != 0 && row->eu == 50.0f && row->fast == 1 && row->is_int == 0, "A4XNR is 50.00 percent");
+    row = tlm_by_name(rows, n, "A4XP0");
+    expect_true(row != 0 && row->eu == 101.25f && row->fast == 0 && row->slow_i == 0,
+                "A4XP0 is 101.25 kPa at the first slow step");
+    row = tlm_by_name(rows, n, "A4XT0");
+    expect_true(row != 0 && row->eu == -10.5f && row->slow_i == 1, "A4XT0 is -10.5 C");
+    row = tlm_by_name(rows, n, "A4XH");
+    expect_true(row != 0 && row->eu == 1234.0f && row->slow_i == 2, "A4XH is 1234 m");
+    row = tlm_by_name(rows, n, "A4XTAS");
+    expect_true(row != 0 && row->eu == 12.5f && row->slow_i == 3, "A4XTAS is 12.5 m/s");
+    row = tlm_by_name(rows, n, "A4XHR");
+    expect_true(row != 0 && row->eu == 14.0f && row->slow_i == 4, "A4XHR is hour 14");
+    row = tlm_by_name(rows, n, "A4XMN");
+    expect_true(row != 0 && row->eu == 5.0f && row->slow_i == 5, "A4XMN is minute 5");
+    row = tlm_by_name(rows, n, "A4XSC");
+    expect_true(row != 0 && row->eu == 9.0f && row->slow_i == 6, "A4XSC is second 9");
+    row = tlm_by_name(rows, n, "A4XYR");
+    expect_true(row != 0 && row->eu == 2026.0f && row->slow_i == 7, "A4XYR is year 2026");
+    row = tlm_by_name(rows, n, "A4XMO");
+    expect_true(row != 0 && row->eu == 11.0f && row->slow_i == 8, "A4XMO is month 11");
+    row = tlm_by_name(rows, n, "A4XDY");
+    expect_true(row != 0 && row->eu == 12.0f && row->slow_i == 9, "A4XDY is day 12");
+    row = tlm_by_name(rows, n, "A4X340");
+    expect_true(row != 0 && row->is_int == 1 && row->fast == 1 && row->data == 68,
+                "A4X340 is the flight plus on-ground data field");
+    row = tlm_by_name(rows, n, "A4X342");
+    expect_true(row != 0 && row->data == 68 && row->is_int == 1, "A4X342 matches 340");
+    row = tlm_by_name(rows, n, "A4X344");
+    expect_true(row != 0 && row->data == 68 && row->is_int == 1, "A4X344 matches 340");
+    for (i = 0; i < 5u; i++) {
+        row = tlm_by_name(rows, n, fast_names[i]);
+        expect_true(row != 0 && row->fast == 1, "fast FC names are marked fast");
+    }
+
+    a429_link_set_measured_nr(&link, 0, 500.0f, 1000.0f);
+    expect_true(tx_label_index(&link, 0311) > 0, "last_tx still holds 311 after the clear");
+    n = a429_tx_telemetry(&link, rows, A429_TX_TLM_N);
+    row = tlm_by_name(rows, n, "A4XCLP");
+    expect_true(tlm_by_name(rows, n, "A4XNR") == 0, "clearing 311 drops A4XNR on that cycle");
+    expect_true(row != 0 && row->eu == 5.0f, "clearing 311 leaves A4XCLP");
+
+    a429_link_set_meas(&link, 0316, 0, 12.5f);
+    build_tx_all(&link);
+    n = a429_tx_telemetry(&link, rows, A429_TX_TLM_N);
+    row = tlm_by_name(rows, n, "A4XP0");
+    expect_true(tlm_by_name(rows, n, "A4XTAS") == 0, "a cleared TAS is not published");
+    expect_true(row != 0 && row->eu == 101.25f, "clearing TAS leaves A4XP0");
+    expect_true(tlm_by_name(rows, n, "A4XNR") == 0, "311 stays unpublished after the slot rebuild");
+
+    a429_link_set_utc(&link, 0, 14, 5, 9, 2026, 11, 12);
+    build_tx_all(&link);
+    n = a429_tx_telemetry(&link, rows, A429_TX_TLM_N);
+    row = tlm_by_name(rows, n, "A4XH");
+    expect_true(tlm_by_name(rows, n, "A4XHR") == 0 && tlm_by_name(rows, n, "A4XDY") == 0,
+                "clearing the clock drops all six UTC names");
+    expect_true(row != 0 && row->eu == 1234.0f, "clearing the clock leaves A4XH");
+
+    memset(&levels, 0, sizeof(levels));
+    levels.mode = A429_MODE_IDLE;
+    levels.rotor_brake = 1;
+    a429_sim_clear_pcmd(&link);
+    expect_true(a429_sim_set_pcmd(&link, 0, &levels) == 1, "only PCMD1 is published");
+    build_tx_all(&link);
+    n = a429_tx_telemetry(&link, rows, A429_TX_TLM_N);
+    row = tlm_by_name(rows, n, "A4X340");
+    expect_true(row != 0 && row->data == 35, "A4X340 is idle plus brake, data 35");
+    expect_true(tlm_by_name(rows, n, "A4X342") == 0 && tlm_by_name(rows, n, "A4X344") == 0,
+                "cleared PCMD2 and PCMD3 are not published");
+}
+
+int a429_host_tests(void);
+
+int a429_host_tests(void)
+{
+    g_fails = 0;
+    test_known_words();
+    test_reject_bad_numbers();
+    test_all_sm_and_faults();
+    test_edges();
+    test_schedule_and_timeout();
+    test_catalog_and_tx_authority();
+    test_carrier_interface();
+    test_disc_sm_matrix();
+    test_invalid_sm_clears_fresh();
+    test_rs422_label_wire();
+    test_engine_mode();
+    test_measured_nr();
+    test_collective_clp();
+    test_fc_airdata();
+    test_tx_telemetry();
+    test_rx_window_and_stale();
+    if (g_fails == 0) {
+        printf("RESULT: all passed\n");
+    } else {
+        printf("RESULT: %d failed\n", g_fails);
+    }
+    return g_fails;
+}
+
+#ifndef A429_NO_MAIN
+int a429_nt1m_tests(void);
+int main(void)
+{
+    int fails = a429_host_tests();
+    fails += a429_nt1m_tests();
+    return fails == 0 ? 0 : 1;
+}
+#endif

@@ -32,6 +32,10 @@ CANFD_SUPPORTED 8
 # it on CAN2. Other boards are unchanged.
 define AP_EROB_CANOPEN_ENABLED 1
 
+# CS35 ARINC429 codec. A429_ENABLE defaults to 1 and A429_FRAME defaults to 2.
+# ETH1 RMII is already on this board, so AP_Networking can run the NT1-M TCP client.
+define AP_ARINC429_ENABLED 1
+
 env OPTIMIZE -O2
 
 # order of UARTs (and USB)
